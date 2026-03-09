@@ -1,0 +1,1002 @@
+#!/bin/sh
+# TARX CLI — local AI engine control plane
+# Usage: tarx <command> [options]
+
+set -e
+
+TARX_VERSION="1.0.0"
+
+# ── Platform paths ───────────────────────────────────────────────────
+
+_os="$(uname -s)"
+case "$_os" in
+  Darwin) TARX_DATA="${HOME}/Library/Application Support/tarx" ;;
+  *)      TARX_DATA="${HOME}/.tarx" ;;
+esac
+
+TARX_MODELS="${TARX_DATA}/models"
+TARX_LOGS="${TARX_DATA}/logs"
+TARX_PID_DIR="${TARX_DATA}/pids"
+INFERENCE_PORT=11435
+MESH_PORT=11436
+EMBED_PORT=11437
+COGNITIVE_PORT=11438
+
+INFERENCE_MODEL="tarx-qwen2.5-7b-deep-Q4_K_M.gguf"
+EMBED_MODEL="nomic-embed-text-v1.5-f16.gguf"
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+log() { printf '%s\n' "$*"; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
+err() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+ensure_dirs() {
+  mkdir -p "$TARX_LOGS" "$TARX_PID_DIR" 2>/dev/null || true
+}
+
+check_port() {
+  curl -sf "http://127.0.0.1:${1}/health" >/dev/null 2>&1
+}
+
+pid_file() {
+  echo "${TARX_PID_DIR}/${1}.pid"
+}
+
+is_running() {
+  _pf="$(pid_file "$1")"
+  if [ -f "$_pf" ]; then
+    _pid=$(cat "$_pf")
+    if kill -0 "$_pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$_pf"
+  fi
+  return 1
+}
+
+find_llama_server() {
+  # Check common locations
+  for _path in \
+    /opt/homebrew/bin/llama-server \
+    /usr/local/bin/llama-server \
+    "${HOME}/.local/bin/llama-server" \
+    "$(command -v llama-server 2>/dev/null || true)"; do
+    if [ -n "$_path" ] && [ -x "$_path" ]; then
+      echo "$_path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_mesh_binary() {
+  for _path in \
+    "${HOME}/Desktop/tarx-mesh/target/release/tarx-mesh" \
+    /usr/local/bin/tarx-mesh \
+    "$(command -v tarx-mesh 2>/dev/null || true)"; do
+    if [ -n "$_path" ] && [ -x "$_path" ]; then
+      echo "$_path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ── start ────────────────────────────────────────────────────────────
+
+cmd_start() {
+  ensure_dirs
+  log "Starting TARX services..."
+
+  _started=0
+
+  # 1. Inference server (port 11435)
+  if check_port $INFERENCE_PORT; then
+    log "  Inference  (${INFERENCE_PORT}): already running"
+  else
+    _llama="$(find_llama_server)" || true
+    _model_path="${TARX_MODELS}/${INFERENCE_MODEL}"
+
+    if [ -z "$_llama" ]; then
+      warn "llama-server not found — install with: brew install llama.cpp"
+    elif [ ! -f "$_model_path" ]; then
+      warn "Inference model not found at ${_model_path}"
+      warn "Download with: tarx update --models"
+    else
+      "$_llama" \
+        --host 127.0.0.1 \
+        --port $INFERENCE_PORT \
+        --model "$_model_path" \
+        --ctx-size 8192 \
+        --parallel 2 \
+        --no-warmup \
+        > "${TARX_LOGS}/inference.log" 2>&1 &
+      echo $! > "$(pid_file inference)"
+      log "  Inference  (${INFERENCE_PORT}): starting (pid $!)"
+      _started=$(( _started + 1 ))
+    fi
+  fi
+
+  # 2. Embedding server (port 11437)
+  if check_port $EMBED_PORT; then
+    log "  Embeddings (${EMBED_PORT}): already running"
+  else
+    _llama="$(find_llama_server)" || true
+    _embed_path="${TARX_MODELS}/${EMBED_MODEL}"
+
+    if [ -z "$_llama" ]; then
+      warn "llama-server not found — install with: brew install llama.cpp"
+    elif [ ! -f "$_embed_path" ]; then
+      warn "Embedding model not found at ${_embed_path}"
+      warn "Download with: tarx update --models"
+    else
+      "$_llama" \
+        --host 127.0.0.1 \
+        --port $EMBED_PORT \
+        --model "$_embed_path" \
+        --ctx-size 8192 \
+        --embeddings \
+        --pooling mean \
+        --parallel 1 \
+        --no-warmup \
+        > "${TARX_LOGS}/embeddings.log" 2>&1 &
+      echo $! > "$(pid_file embeddings)"
+      log "  Embeddings (${EMBED_PORT}): starting (pid $!)"
+      _started=$(( _started + 1 ))
+    fi
+  fi
+
+  # 3. Mesh server (port 11436)
+  if check_port $MESH_PORT; then
+    log "  Mesh       (${MESH_PORT}): already running"
+  else
+    _mesh="$(find_mesh_binary)" || true
+    if [ -z "$_mesh" ]; then
+      log "  Mesh       (${MESH_PORT}): binary not found (optional)"
+    else
+      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" "$_mesh" \
+        > "${TARX_LOGS}/mesh.log" 2>&1 &
+      echo $! > "$(pid_file mesh)"
+      log "  Mesh       (${MESH_PORT}): starting (pid $!)"
+      _started=$(( _started + 1 ))
+    fi
+  fi
+
+  if [ $_started -gt 0 ]; then
+    log ""
+    log "Waiting for services..."
+    sleep 3
+    cmd_status
+  else
+    log ""
+    log "All services already running."
+  fi
+}
+
+# ── stop ─────────────────────────────────────────────────────────────
+
+cmd_stop() {
+  log "Stopping TARX services..."
+
+  for _svc in inference embeddings mesh; do
+    _pf="$(pid_file "$_svc")"
+    if [ -f "$_pf" ]; then
+      _pid=$(cat "$_pf")
+      if kill -0 "$_pid" 2>/dev/null; then
+        kill "$_pid" 2>/dev/null || true
+        log "  Stopped ${_svc} (pid ${_pid})"
+      fi
+      rm -f "$_pf"
+    else
+      # Try to find by port
+      case "$_svc" in
+        inference)  _port=$INFERENCE_PORT ;;
+        embeddings) _port=$EMBED_PORT ;;
+        mesh)       _port=$MESH_PORT ;;
+      esac
+      _pid=$(lsof -ti ":${_port}" 2>/dev/null | head -1) || true
+      if [ -n "$_pid" ]; then
+        kill "$_pid" 2>/dev/null || true
+        log "  Stopped ${_svc} (pid ${_pid})"
+      else
+        log "  ${_svc}: not running"
+      fi
+    fi
+  done
+
+  log "Done."
+}
+
+# ── status ───────────────────────────────────────────────────────────
+
+cmd_status() {
+  log "TARX Service Status"
+  log "═══════════════════"
+  log ""
+  printf '  %-14s %-8s %s\n' "SERVICE" "PORT" "STATUS"
+  printf '  %-14s %-8s %s\n' "──────────" "─────" "──────"
+
+  for _svc_info in "Inference:${INFERENCE_PORT}" "Mesh:${MESH_PORT}" "Embeddings:${EMBED_PORT}" "Cognitive:${COGNITIVE_PORT}"; do
+    _name="${_svc_info%%:*}"
+    _port="${_svc_info##*:}"
+
+    if check_port "$_port"; then
+      _status="running"
+    elif is_running "$(echo "$_name" | tr '[:upper:]' '[:lower:]')"; then
+      _status="starting"
+    else
+      _status="stopped"
+    fi
+
+    printf '  %-14s %-8s %s\n' "$_name" "$_port" "$_status"
+  done
+
+  log ""
+}
+
+# ── chat ─────────────────────────────────────────────────────────────
+
+cmd_chat() {
+  if [ -z "$1" ]; then
+    err "Usage: tarx chat \"your prompt here\""
+  fi
+
+  if ! check_port $INFERENCE_PORT; then
+    err "Inference server not running on port ${INFERENCE_PORT}. Run: tarx start"
+  fi
+
+  _prompt="$*"
+  # Escape for JSON
+  _escaped=$(printf '%s' "$_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g')
+
+  _payload="{\"model\":\"local\",\"messages\":[{\"role\":\"user\",\"content\":\"${_escaped}\"}],\"stream\":false,\"max_tokens\":2048}"
+
+  _response=$(curl -sf -X POST "http://127.0.0.1:${INFERENCE_PORT}/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "$_payload" 2>/dev/null) || err "Request failed. Is the inference server running?"
+
+  # Extract content — handle both formats
+  _content=$(printf '%s' "$_response" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1)
+
+  if [ -z "$_content" ]; then
+    # Try Python if available for proper JSON parsing
+    if command -v python3 >/dev/null 2>&1; then
+      _content=$(printf '%s' "$_response" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+print(r['choices'][0]['message']['content'])
+" 2>/dev/null) || true
+    fi
+  fi
+
+  if [ -z "$_content" ]; then
+    log "$_response"
+  else
+    printf '%s\n' "$_content"
+  fi
+}
+
+# ── embed ────────────────────────────────────────────────────────────
+
+cmd_embed() {
+  if [ -z "$1" ]; then
+    err "Usage: tarx embed <file>"
+  fi
+
+  _file="$1"
+  if [ ! -f "$_file" ]; then
+    err "File not found: $_file"
+  fi
+
+  if ! check_port $EMBED_PORT; then
+    err "Embedding server not running on port ${EMBED_PORT}. Run: tarx start"
+  fi
+
+  _size=$(wc -c < "$_file" | tr -d ' ')
+  log "Embedding ${_file} (${_size} bytes)..."
+
+  # Read and chunk (512 char chunks, 128 overlap)
+  _content=$(cat "$_file")
+  _len=${#_content}
+  _chunk_size=512
+  _overlap=128
+  _offset=0
+  _chunks=0
+
+  while [ $_offset -lt "$_len" ]; do
+    _chunk=$(printf '%s' "$_content" | cut -c$((_offset + 1))-$((_offset + _chunk_size)))
+    _escaped=$(printf '%s' "$_chunk" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+
+    curl -sf -X POST "http://127.0.0.1:${EMBED_PORT}/embedding" \
+      -H "Content-Type: application/json" \
+      -d "{\"content\":\"${_escaped}\"}" >/dev/null 2>&1 || warn "Failed to embed chunk at offset $_offset"
+
+    _chunks=$((_chunks + 1))
+    _offset=$((_offset + _chunk_size - _overlap))
+  done
+
+  log "Done: ${_chunks} chunks embedded."
+}
+
+# ── search ───────────────────────────────────────────────────────────
+
+cmd_search() {
+  if [ -z "$1" ]; then
+    err "Usage: tarx search \"query\""
+  fi
+
+  if ! check_port $EMBED_PORT; then
+    err "Embedding server not running on port ${EMBED_PORT}. Run: tarx start"
+  fi
+
+  _query="$*"
+  _escaped=$(printf '%s' "$_query" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g')
+
+  log "Searching: ${_query}"
+  log ""
+
+  _result=$(curl -sf -X POST "http://127.0.0.1:${EMBED_PORT}/v1/embeddings" \
+    -H "Content-Type: application/json" \
+    -d "{\"input\":\"${_escaped}\",\"model\":\"local\"}" 2>/dev/null) || err "Search failed. Is the embedding server running?"
+
+  log "$_result"
+}
+
+# ── mesh ─────────────────────────────────────────────────────────────
+
+cmd_mesh() {
+  _subcmd="${1:-status}"
+  shift 2>/dev/null || true
+
+  case "$_subcmd" in
+    status)
+      if ! check_port $MESH_PORT; then
+        err "Mesh server not running on port ${MESH_PORT}. Run: tarx start"
+      fi
+      _resp=$(curl -sf "http://127.0.0.1:${MESH_PORT}/api/v1/status" 2>/dev/null) || err "Mesh status request failed"
+      log "$_resp"
+      ;;
+    join)
+      if ! check_port $MESH_PORT; then
+        err "Mesh server not running on port ${MESH_PORT}. Run: tarx start"
+      fi
+      _resp=$(curl -sf -X POST "http://127.0.0.1:${MESH_PORT}/api/v1/mesh/join" 2>/dev/null) || err "Mesh join failed"
+      log "Joined mesh network."
+      log "$_resp"
+      ;;
+    *)
+      err "Unknown mesh command: $_subcmd (available: status, join)"
+      ;;
+  esac
+}
+
+# ── spaces ───────────────────────────────────────────────────────────
+
+cmd_spaces() {
+  _subcmd="${1:-list}"
+  shift 2>/dev/null || true
+
+  _spaces_dir="${TARX_DATA}/spaces"
+  mkdir -p "$_spaces_dir" 2>/dev/null || true
+
+  case "$_subcmd" in
+    list)
+      log "Project Spaces"
+      log "══════════════"
+      if [ -d "$_spaces_dir" ]; then
+        _count=0
+        for _space in "${_spaces_dir}"/*; do
+          if [ -d "$_space" ]; then
+            _name=$(basename "$_space")
+            _files=$(find "$_space" -type f 2>/dev/null | wc -l | tr -d ' ')
+            printf '  %s (%s files)\n' "$_name" "$_files"
+            _count=$((_count + 1))
+          fi
+        done
+        if [ $_count -eq 0 ]; then
+          log "  No spaces yet. Create one: tarx spaces create \"my-project\""
+        fi
+      fi
+      ;;
+    create)
+      if [ -z "$1" ]; then
+        err "Usage: tarx spaces create \"name\""
+      fi
+      _name="$1"
+      _path="${_spaces_dir}/${_name}"
+      if [ -d "$_path" ]; then
+        err "Space '${_name}' already exists."
+      fi
+      mkdir -p "$_path"
+      log "Created space: ${_name}"
+      log "Path: ${_path}"
+      ;;
+    *)
+      err "Unknown spaces command: $_subcmd (available: list, create)"
+      ;;
+  esac
+}
+
+# ── update ───────────────────────────────────────────────────────────
+
+cmd_update() {
+  log "Checking for updates..."
+
+  _latest=$(curl -fsSL "https://tarx.com/api/cli/latest?format=version" 2>/dev/null | tr -d '[:space:]') || true
+
+  if [ -z "$_latest" ]; then
+    err "Could not check for updates. Check network."
+  fi
+
+  _current="v${TARX_VERSION}"
+  if [ "$_current" = "$_latest" ]; then
+    log "Already on latest version: ${_current}"
+  else
+    log "Update available: ${_current} -> ${_latest}"
+    log "Run: curl -fsSL https://tarx.com/install | sh"
+  fi
+
+  # Check for --models flag
+  if [ "${1:-}" = "--models" ]; then
+    log ""
+    download_models
+  fi
+}
+
+download_models() {
+  log "Checking models..."
+  mkdir -p "$TARX_MODELS" 2>/dev/null || true
+
+  _inference_path="${TARX_MODELS}/${INFERENCE_MODEL}"
+  _embed_path="${TARX_MODELS}/${EMBED_MODEL}"
+
+  if [ -f "$_inference_path" ]; then
+    _size=$(wc -c < "$_inference_path" | tr -d ' ')
+    log "  Inference model: present ($((_size / 1048576)) MB)"
+  else
+    log "  Inference model: missing"
+    log "  Download ~4.4 GB from: https://tarx.com/models/${INFERENCE_MODEL}"
+  fi
+
+  if [ -f "$_embed_path" ]; then
+    _size=$(wc -c < "$_embed_path" | tr -d ' ')
+    log "  Embedding model: present ($((_size / 1048576)) MB)"
+  else
+    log "  Embedding model: missing"
+    log "  Download ~95 MB from: https://tarx.com/models/${EMBED_MODEL}"
+  fi
+}
+
+# ── uninstall ────────────────────────────────────────────────────────
+
+cmd_uninstall() {
+  log "TARX Uninstaller"
+  log ""
+
+  # Stop services first
+  cmd_stop 2>/dev/null || true
+
+  # Remove binary
+  _bin_path="$(command -v tarx 2>/dev/null || true)"
+  if [ -n "$_bin_path" ]; then
+    log "Remove binary: ${_bin_path}"
+    if [ -w "$(dirname "$_bin_path")" ]; then
+      rm -f "$_bin_path"
+    else
+      sudo rm -f "$_bin_path"
+    fi
+    log "  Removed."
+  fi
+
+  # Ask about data
+  log ""
+  log "Data directory: ${TARX_DATA}"
+  if [ -d "$TARX_DATA" ]; then
+    _size=$(du -sh "$TARX_DATA" 2>/dev/null | awk '{print $1}')
+    log "Size: ${_size}"
+    log ""
+    printf 'Delete all TARX data including models? [y/N] '
+    read -r _confirm
+    case "$_confirm" in
+      [yY]|[yY][eE][sS])
+        rm -rf "$TARX_DATA"
+        log "Data deleted."
+        ;;
+      *)
+        log "Data preserved at ${TARX_DATA}"
+        ;;
+    esac
+  fi
+
+  log ""
+  log "TARX uninstalled."
+}
+
+# ── doctor ───────────────────────────────────────────────────────────
+
+cmd_doctor() {
+  log "TARX Doctor"
+  log "═══════════"
+  log ""
+
+  _issues=0
+
+  # Check ports
+  log "Services:"
+  for _svc_info in "Inference:${INFERENCE_PORT}" "Mesh:${MESH_PORT}" "Embeddings:${EMBED_PORT}" "Cognitive:${COGNITIVE_PORT}"; do
+    _name="${_svc_info%%:*}"
+    _port="${_svc_info##*:}"
+    if check_port "$_port"; then
+      printf '  [OK] %-14s port %s\n' "$_name" "$_port"
+    else
+      # Check if port is taken by something else
+      _occupant=$(lsof -ti ":${_port}" 2>/dev/null | head -1) || true
+      if [ -n "$_occupant" ]; then
+        _proc=$(ps -p "$_occupant" -o comm= 2>/dev/null) || _proc="unknown"
+        printf '  [!!] %-14s port %s occupied by %s (pid %s)\n' "$_name" "$_port" "$_proc" "$_occupant"
+        _issues=$((_issues + 1))
+      else
+        printf '  [--] %-14s port %s not running\n' "$_name" "$_port"
+      fi
+    fi
+  done
+
+  # Check disk space
+  log ""
+  log "Disk:"
+  _avail=$(df -h "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
+  log "  Available: ${_avail}"
+  # Rough check: need ~6 GB for models
+  _avail_bytes=$(df "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
+  if [ -n "$_avail_bytes" ] && [ "$_avail_bytes" -lt 6000000 ] 2>/dev/null; then
+    log "  [!!] Less than 6 GB free — models need ~4.5 GB"
+    _issues=$((_issues + 1))
+  else
+    log "  [OK] Sufficient space"
+  fi
+
+  # Check models
+  log ""
+  log "Models:"
+  if [ -f "${TARX_MODELS}/${INFERENCE_MODEL}" ]; then
+    _sz=$(wc -c < "${TARX_MODELS}/${INFERENCE_MODEL}" | tr -d ' ')
+    printf '  [OK] Inference: %s (%s MB)\n' "$INFERENCE_MODEL" "$((_sz / 1048576))"
+  else
+    printf '  [!!] Inference model missing: %s\n' "${TARX_MODELS}/${INFERENCE_MODEL}"
+    _issues=$((_issues + 1))
+  fi
+
+  if [ -f "${TARX_MODELS}/${EMBED_MODEL}" ]; then
+    _sz=$(wc -c < "${TARX_MODELS}/${EMBED_MODEL}" | tr -d ' ')
+    printf '  [OK] Embedding: %s (%s MB)\n' "$EMBED_MODEL" "$((_sz / 1048576))"
+  else
+    printf '  [!!] Embedding model missing: %s\n' "${TARX_MODELS}/${EMBED_MODEL}"
+    _issues=$((_issues + 1))
+  fi
+
+  # Check RAM
+  log ""
+  log "System:"
+  if [ "$_os" = "Darwin" ]; then
+    _ram_bytes=$(sysctl -n hw.memsize 2>/dev/null) || _ram_bytes=0
+    _ram_gb=$((_ram_bytes / 1073741824))
+  else
+    _ram_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}') || _ram_kb=0
+    _ram_gb=$((_ram_kb / 1048576))
+  fi
+
+  if [ "$_ram_gb" -ge 8 ]; then
+    printf '  [OK] RAM: %s GB\n' "$_ram_gb"
+  else
+    printf '  [!!] RAM: %s GB (need 8 GB+)\n' "$_ram_gb"
+    _issues=$((_issues + 1))
+  fi
+
+  # GPU detection
+  if [ "$_os" = "Darwin" ]; then
+    _gpu=$(system_profiler SPDisplaysDataType 2>/dev/null | grep "Chipset Model" | sed 's/.*: //' | head -1) || true
+    if [ -z "$_gpu" ]; then
+      _gpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null | head -1) || _gpu="unknown"
+    fi
+    printf '  [OK] GPU: %s (Metal)\n' "$_gpu"
+  else
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      _gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1) || _gpu="NVIDIA (detected)"
+      printf '  [OK] GPU: %s (CUDA)\n' "$_gpu"
+    else
+      log "  [--] GPU: no NVIDIA GPU detected (CPU inference only)"
+    fi
+  fi
+
+  # Check for Ollama conflicts
+  log ""
+  log "Conflicts:"
+  if pgrep -x ollama >/dev/null 2>&1; then
+    log "  [!!] Ollama is running — may conflict with ports 11434-11437"
+    _issues=$((_issues + 1))
+  else
+    log "  [OK] No Ollama process detected"
+  fi
+
+  # llama-server binary
+  _llama="$(find_llama_server)" || true
+  if [ -n "$_llama" ]; then
+    printf '  [OK] llama-server: %s\n' "$_llama"
+  else
+    log "  [!!] llama-server not found — install with: brew install llama.cpp"
+    _issues=$((_issues + 1))
+  fi
+
+  log ""
+  if [ $_issues -eq 0 ]; then
+    log "All checks passed."
+  else
+    log "${_issues} issue(s) found."
+  fi
+}
+
+# ── version ──────────────────────────────────────────────────────────
+
+cmd_version() {
+  log "${TARX_VERSION}"
+}
+
+# ── tray ────────────────────────────────────────────────────────────
+
+cmd_tray() {
+  # Launch the standalone menu bar tray app
+  _tray_dir=""
+  # Check common locations for the tray app
+  for _d in \
+    "${HOME}/Desktop/tarx-code-oss/apps/tarx-tray" \
+    "/Applications/TARX Workbench.app/Contents/Resources/apps/tarx-tray" \
+    "${HOME}/.tarx/apps/tarx-tray"; do
+    if [ -f "${_d}/main.js" ]; then
+      _tray_dir="$_d"
+      break
+    fi
+  done
+
+  if [ -z "$_tray_dir" ]; then
+    err "Tray app not found. Ensure tarx-code-oss is present at ~/Desktop/tarx-code-oss"
+  fi
+
+  # Find Electron binary
+  _electron=""
+  for _e in \
+    "${_tray_dir}/../../.build/electron/TARX Workbench.app/Contents/MacOS/Electron" \
+    "/Applications/TARX Workbench.app/Contents/MacOS/Electron"; do
+    if [ -x "$_e" ]; then
+      _electron="$_e"
+      break
+    fi
+  done
+
+  if [ -z "$_electron" ]; then
+    err "Electron binary not found. Build tarx-code-oss or install TARX Workbench."
+  fi
+
+  log "Starting TARX tray..."
+  exec "$_electron" "$_tray_dir"
+}
+
+# ── mcp ──────────────────────────────────────────────────────────────
+
+# Detect config file path for each AI client
+_mcp_config_path() {
+  _client="$1"
+  case "$_client" in
+    claude)
+      # Claude Desktop (macOS)
+      if [ "$_os" = "Darwin" ]; then
+        echo "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+      else
+        # Linux — Claude Desktop uses XDG or ~/.config
+        echo "${XDG_CONFIG_HOME:-$HOME/.config}/Claude/claude_desktop_config.json"
+      fi
+      ;;
+    claude-code)
+      echo "$HOME/.claude.json"
+      ;;
+    cursor)
+      echo "$HOME/.cursor/mcp.json"
+      ;;
+    vscode)
+      echo "$HOME/.vscode/mcp.json"
+      ;;
+  esac
+}
+
+# TARX MCP server definitions — NEVER include "type" field
+_mcp_tarx_servers_json() {
+  cat << 'SERVERSEOF'
+{
+    "tarx": {
+      "url": "https://mcp.tarx.com/mcp"
+    },
+    "tarx-core": {
+      "command": "node",
+      "args": ["~/.tarx/servers/tarx-core/server.js"]
+    },
+    "tarx-ops": {
+      "command": "node",
+      "args": ["~/.tarx/servers/tarx-ops/server.js"]
+    },
+    "tarx-ui": {
+      "command": "node",
+      "args": ["~/.tarx/servers/tarx-ui/server.js"]
+    },
+    "tarx-mesh": {
+      "command": "node",
+      "args": ["~/.tarx/servers/tarx-mesh/server.js"]
+    }
+  }
+SERVERSEOF
+}
+
+cmd_mcp() {
+  _subcmd="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$_subcmd" in
+    add)
+      _target="${1:-}"
+      if [ -z "$_target" ]; then
+        err "Usage: tarx mcp add <target> (available: claude, claude-code, cursor, vscode)"
+      fi
+
+      _config_file=""
+      _client_name=""
+      case "$_target" in
+        claude)
+          _config_file="$(_mcp_config_path claude)"
+          _client_name="Claude Desktop"
+          ;;
+        claude-code|cc)
+          _config_file="$(_mcp_config_path claude-code)"
+          _client_name="Claude Code"
+          ;;
+        cursor)
+          _config_file="$(_mcp_config_path cursor)"
+          _client_name="Cursor"
+          ;;
+        vscode|code)
+          _config_file="$(_mcp_config_path vscode)"
+          _client_name="VS Code"
+          ;;
+        *)
+          err "Unknown target: $_target (available: claude, claude-code, cursor, vscode)"
+          ;;
+      esac
+
+      if [ -z "$_config_file" ]; then
+        err "Could not determine config path for $_target"
+      fi
+
+      # Check if already configured
+      if [ -f "$_config_file" ] && grep -q '"tarx"' "$_config_file" 2>/dev/null; then
+        # Validate no "type" fields leaked into existing config
+        if grep -q '"type"' "$_config_file" 2>/dev/null; then
+          log "  TARX found in $_config_file but has stale 'type' fields."
+          log "  Cleaning..."
+        else
+          log "  TARX already configured in $_config_file"
+          return
+        fi
+      fi
+
+      # Require python3 for safe JSON merge
+      if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 required for safe config merge"
+        log ""
+        log "  Add this manually to $_config_file:"
+        log ""
+        printf '  {\n    "mcpServers": %s\n  }\n' "$(_mcp_tarx_servers_json)"
+        log ""
+        log "  IMPORTANT: Do NOT include a \"type\" field on any server."
+        return
+      fi
+
+      # Create parent dir
+      mkdir -p "$(dirname "$_config_file")" 2>/dev/null || true
+
+      # Backup existing config
+      if [ -f "$_config_file" ]; then
+        cp "$_config_file" "${_config_file}.bak" 2>/dev/null || true
+      fi
+
+      # Merge using python3 — NEVER writes "type" field
+      python3 << PYEOF
+import json, sys, os
+
+config_path = "$_config_file"
+
+# Read existing config or start fresh
+config = {}
+if os.path.exists(config_path):
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        config = {}
+
+if 'mcpServers' not in config:
+    config['mcpServers'] = {}
+
+# TARX servers — NEVER include "type" field
+tarx_servers = {
+    "tarx": {
+        "url": "https://mcp.tarx.com/mcp"
+    },
+    "tarx-core": {
+        "command": "node",
+        "args": ["~/.tarx/servers/tarx-core/server.js"]
+    },
+    "tarx-ops": {
+        "command": "node",
+        "args": ["~/.tarx/servers/tarx-ops/server.js"]
+    },
+    "tarx-ui": {
+        "command": "node",
+        "args": ["~/.tarx/servers/tarx-ui/server.js"]
+    },
+    "tarx-mesh": {
+        "command": "node",
+        "args": ["~/.tarx/servers/tarx-mesh/server.js"]
+    }
+}
+
+# Merge — add or replace TARX servers, preserve everything else
+for name, server_config in tarx_servers.items():
+    config['mcpServers'][name] = server_config
+
+# Strip any "type" fields from ALL servers (including non-TARX ones)
+for name, server in config['mcpServers'].items():
+    if isinstance(server, dict) and 'type' in server:
+        del server['type']
+
+# Write
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+    f.write('\n')
+
+# Validate — re-read and check no "type" fields
+with open(config_path, 'r') as f:
+    validated = json.load(f)
+
+has_type = False
+for name, server in validated.get('mcpServers', {}).items():
+    if isinstance(server, dict) and 'type' in server:
+        has_type = True
+        break
+
+if has_type:
+    # Restore backup
+    bak = config_path + '.bak'
+    if os.path.exists(bak):
+        os.replace(bak, config_path)
+    print("  ERROR: Validation failed — 'type' field detected. Config restored from backup.", file=sys.stderr)
+    sys.exit(1)
+
+# Clean up backup on success
+bak = config_path + '.bak'
+if os.path.exists(bak):
+    os.remove(bak)
+
+print("  ok")
+PYEOF
+
+      if [ $? -ne 0 ]; then
+        err "Config write failed. Check $_config_file and retry."
+      fi
+
+      log ""
+      log "  ✓ TARX added to $_client_name"
+      log ""
+      log "  → Restart $_client_name to activate 310 tools"
+      log "  → Docs: howdy.tarx.com/quickstart"
+      log ""
+      ;;
+    status)
+      log "  MCP Configuration Status"
+      log "  ════════════════════════"
+      log ""
+      for _c in claude claude-code cursor vscode; do
+        _cf="$(_mcp_config_path "$_c")"
+        case "$_c" in
+          claude)      _cn="Claude Desktop" ;;
+          claude-code) _cn="Claude Code" ;;
+          cursor)      _cn="Cursor" ;;
+          vscode)      _cn="VS Code" ;;
+        esac
+        if [ -f "$_cf" ] && grep -q '"tarx"' "$_cf" 2>/dev/null; then
+          if grep -q '"type"' "$_cf" 2>/dev/null; then
+            printf '  [!!] %-16s %s (has stale "type" fields — run: tarx mcp add %s)\n' "$_cn" "$_cf" "$_c"
+          else
+            printf '  [OK] %-16s %s\n' "$_cn" "$_cf"
+          fi
+        else
+          printf '  [--] %-16s not configured\n' "$_cn"
+        fi
+      done
+      log ""
+      log "  Remote: https://mcp.tarx.com/mcp"
+      log "  Fix:    tarx mcp add <target>"
+      log ""
+      ;;
+    *)
+      err "Unknown mcp command: $_subcmd (available: add, status)"
+      ;;
+  esac
+}
+
+# ── help ─────────────────────────────────────────────────────────────
+
+cmd_help() {
+  cat <<'USAGE'
+TARX — Local AI Engine
+
+Usage: tarx <command> [options]
+
+Commands:
+  start             Start all services (inference, mesh, embeddings)
+  stop              Graceful shutdown of all services
+  status            Health check all services
+  chat "prompt"     Quick inference via local model
+  embed <file>      Chunk and embed file into RAG store
+  search "query"    Semantic search across embedded files
+  mesh status       Mesh network info
+  mesh join         Opt into mesh network
+  mcp add claude    Connect TARX to Claude Desktop
+  mcp add cc        Connect TARX to Claude Code
+  mcp add cursor    Connect TARX to Cursor
+  mcp add vscode    Connect TARX to VS Code
+  mcp status        Check MCP config across all clients
+  spaces list       List project spaces
+  spaces create     Create a new project space
+  update            Check for CLI updates
+  update --models   Check model status
+  uninstall         Remove TARX (asks before deleting data)
+  version           Print version
+  tray              Launch menu bar tray icon
+  doctor            Diagnose issues (ports, disk, RAM, GPU, models)
+  help              Show this help
+
+Ports:
+  11435  Inference (Qwen 7B)
+  11436  Mesh network
+  11437  Embeddings (nomic-embed)
+  11438  Cognitive engine
+
+Docs: https://tarx.com/docs
+USAGE
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────
+
+_cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$_cmd" in
+  start)     cmd_start ;;
+  stop)      cmd_stop ;;
+  status)    cmd_status ;;
+  chat)      cmd_chat "$@" ;;
+  embed)     cmd_embed "$@" ;;
+  search)    cmd_search "$@" ;;
+  mesh)      cmd_mesh "$@" ;;
+  mcp)       cmd_mcp "$@" ;;
+  spaces)    cmd_spaces "$@" ;;
+  update)    cmd_update "$@" ;;
+  uninstall) cmd_uninstall ;;
+  version)   cmd_version ;;
+  tray)      cmd_tray ;;
+  doctor)    cmd_doctor ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$_cmd" >&2
+    cmd_help >&2
+    exit 1
+    ;;
+esac
