@@ -710,26 +710,27 @@ _mcp_config_path() {
 
 # TARX MCP server definitions — NEVER include "type" field
 _mcp_tarx_servers_json() {
-  cat << 'SERVERSEOF'
+  _tarx_home="${TARX_HOME:-$HOME/.tarx}"
+  cat << SERVERSEOF
 {
     "tarx": {
       "url": "https://mcp.tarx.com/mcp"
     },
     "tarx-core": {
       "command": "node",
-      "args": ["~/.tarx/servers/tarx-core/server.js"]
+      "args": ["${_tarx_home}/servers/tarx-core/dist/server.js"],
+      "env": {
+        "TARX_INFERENCE_URL": "http://localhost:11435",
+        "TARX_EMBEDDING_URL": "http://localhost:11437",
+        "TARX_MESH_URL": "http://localhost:11436"
+      }
     },
     "tarx-ops": {
       "command": "node",
-      "args": ["~/.tarx/servers/tarx-ops/server.js"]
-    },
-    "tarx-ui": {
-      "command": "node",
-      "args": ["~/.tarx/servers/tarx-ui/server.js"]
-    },
-    "tarx-mesh": {
-      "command": "node",
-      "args": ["~/.tarx/servers/tarx-mesh/server.js"]
+      "args": ["${_tarx_home}/servers/tarx-ops/dist/server.js"],
+      "env": {
+        "TARX_CREATOR_KEY": "tarx-creator-2025"
+      }
     }
   }
 SERVERSEOF
@@ -825,25 +826,26 @@ if 'mcpServers' not in config:
     config['mcpServers'] = {}
 
 # TARX servers — NEVER include "type" field
+tarx_home = os.path.expanduser("~/.tarx")
 tarx_servers = {
     "tarx": {
         "url": "https://mcp.tarx.com/mcp"
     },
     "tarx-core": {
         "command": "node",
-        "args": ["~/.tarx/servers/tarx-core/server.js"]
+        "args": [os.path.join(tarx_home, "servers/tarx-core/dist/server.js")],
+        "env": {
+            "TARX_INFERENCE_URL": "http://localhost:11435",
+            "TARX_EMBEDDING_URL": "http://localhost:11437",
+            "TARX_MESH_URL": "http://localhost:11436"
+        }
     },
     "tarx-ops": {
         "command": "node",
-        "args": ["~/.tarx/servers/tarx-ops/server.js"]
-    },
-    "tarx-ui": {
-        "command": "node",
-        "args": ["~/.tarx/servers/tarx-ui/server.js"]
-    },
-    "tarx-mesh": {
-        "command": "node",
-        "args": ["~/.tarx/servers/tarx-mesh/server.js"]
+        "args": [os.path.join(tarx_home, "servers/tarx-ops/dist/server.js")],
+        "env": {
+            "TARX_CREATOR_KEY": "tarx-creator-2025"
+        }
     }
 }
 
@@ -894,7 +896,7 @@ PYEOF
       log ""
       log "  ✓ TARX added to $_client_name"
       log ""
-      log "  → Restart $_client_name to activate 310 tools"
+      log "  → Restart $_client_name to activate TARX tools"
       log "  → Docs: howdy.tarx.com/quickstart"
       log ""
       ;;
