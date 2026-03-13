@@ -421,25 +421,112 @@ cmd_spaces() {
 # ── update ───────────────────────────────────────────────────────────
 
 cmd_update() {
-  log "Checking for updates..."
+  log "  Checking for updates..."
+  log ""
 
-  _latest=$(curl -fsSL "https://tarx.com/api/cli/latest?format=version" 2>/dev/null | tr -d '[:space:]') || true
+  _api_url="https://tarx.com/api/cli/latest"
+  _release_json="$(curl -fsSL "$_api_url" 2>/dev/null)" || true
+  if [ -z "$_release_json" ]; then
+    err "Could not reach update server. Check network."
+  fi
 
+  _latest="$(echo "$_release_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null || echo "")"
   if [ -z "$_latest" ]; then
-    err "Could not check for updates. Check network."
+    err "Could not parse release info."
   fi
 
-  _current="v${TARX_VERSION}"
-  if [ "$_current" = "$_latest" ]; then
-    log "Already on latest version: ${_current}"
-  else
-    log "Update available: ${_current} -> ${_latest}"
-    log "Run: curl -fsSL https://tarx.com/install | sh"
+  if [ "$TARX_VERSION" = "$_latest" ] && [ "${1:-}" != "--force" ]; then
+    log "  Already on latest version: v${TARX_VERSION}"
+    # Check for --models flag
+    if [ "${1:-}" = "--models" ]; then
+      log ""
+      download_models
+    fi
+    return
   fi
+
+  log "  Update available: v${TARX_VERSION} -> v${_latest}"
+  log ""
+
+  # Detect platform
+  _os="$(uname -s)"
+  _arch="$(uname -m)"
+  case "$_os" in
+    Darwin) _platform="darwin" ;;
+    Linux)  _platform="linux" ;;
+    *)      err "Unsupported OS: $_os" ;;
+  esac
+  case "$_arch" in
+    arm64|aarch64) _arch_key="arm64" ;;
+    x86_64)        _arch_key="x64" ;;
+    *)             err "Unsupported architecture: $_arch" ;;
+  esac
+  _target="${_platform}-${_arch_key}"
+
+  _tarx_home="${TARX_HOME:-$HOME/.tarx}"
+  _tarx_bin="${_tarx_home}/bin"
+
+  # 1. Update daemon binary
+  _daemon_url="$(echo "$_release_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['${_target}']['url'])" 2>/dev/null || echo "")"
+  if [ -n "$_daemon_url" ]; then
+    log "  Updating tarxd..."
+    curl -fsSL "$_daemon_url" -o "${_tarx_bin}/tarxd.new" && \
+      chmod +x "${_tarx_bin}/tarxd.new" && \
+      mv "${_tarx_bin}/tarxd.new" "${_tarx_bin}/tarxd" && \
+      log "    ✓ tarxd updated" || log "    ⚠ tarxd update failed (keeping current)"
+  fi
+
+  # 2. Update CLI
+  _cli_url="https://raw.githubusercontent.com/tarx-ai/tarx-cli/main/tarx"
+  log "  Updating CLI..."
+  curl -fsSL "$_cli_url" -o "${_tarx_bin}/tarx.new" 2>/dev/null && \
+    chmod +x "${_tarx_bin}/tarx.new" && \
+    mv "${_tarx_bin}/tarx.new" "${_tarx_bin}/tarx" && \
+    log "    ✓ CLI updated" || log "    ⚠ CLI update failed (keeping current)"
+
+  # 3. Update MCP server bundles
+  log "  Updating MCP servers..."
+  for _srv in tarx-core tarx-ops; do
+    _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
+    if [ -n "$_srv_url" ]; then
+      mkdir -p "${_tarx_home}/servers/${_srv}"
+      curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
+        log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
+    fi
+  done
+
+  # 4. Rebuild native modules if needed
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    for _srv in tarx-core tarx-ops; do
+      if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
+        (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
+          log "    ✓ $_srv native modules" || true
+      fi
+    done
+  fi
+
+  # 5. Restart daemon if running
+  if [ "$_os" = "Darwin" ]; then
+    _plist="$HOME/Library/LaunchAgents/com.tarx.daemon.plist"
+    if [ -f "$_plist" ]; then
+      log "  Restarting daemon..."
+      launchctl kickstart -k "gui/$(id -u)/com.tarx.daemon" 2>/dev/null && \
+        log "    ✓ daemon restarted" || log "    ⚠ restart failed (run: launchctl kickstart -k gui/$(id -u)/com.tarx.daemon)"
+    fi
+  elif [ "$_os" = "Linux" ]; then
+    if systemctl --user is-active tarx >/dev/null 2>&1; then
+      log "  Restarting daemon..."
+      systemctl --user restart tarx && \
+        log "    ✓ daemon restarted" || true
+    fi
+  fi
+
+  log ""
+  log "  ✓ Updated to v${_latest}"
+  log ""
 
   # Check for --models flag
   if [ "${1:-}" = "--models" ]; then
-    log ""
     download_models
   fi
 }
@@ -957,7 +1044,8 @@ Commands:
   mcp status        Check MCP config across all clients
   spaces list       List project spaces
   spaces create     Create a new project space
-  update            Check for CLI updates
+  update            Update daemon, CLI, and MCP servers in-place
+  update --force    Force update even if already on latest
   update --models   Check model status
   uninstall         Remove TARX (asks before deleting data)
   version           Print version
