@@ -9,21 +9,19 @@ TARX_VERSION="1.1.0"
 # ── Platform paths ───────────────────────────────────────────────────
 
 _os="$(uname -s)"
-case "$_os" in
-  Darwin) TARX_DATA="${HOME}/Library/Application Support/tarx" ;;
-  *)      TARX_DATA="${HOME}/.tarx" ;;
-esac
+TARX_DATA="${HOME}/.tarx"
 
 TARX_MODELS="${TARX_DATA}/models"
 TARX_LOGS="${TARX_DATA}/logs"
 TARX_PID_DIR="${TARX_DATA}/pids"
-INFERENCE_PORT=11435
+INFERENCE_PORT=11551
 MESH_PORT=11436
 EMBED_PORT=11437
 COGNITIVE_PORT=11438
 
-INFERENCE_MODEL="tarx-qwen2.5-7b-deep-Q4_K_M.gguf"
-EMBED_MODEL="nomic-embed-text-v1.5-f16.gguf"
+INFERENCE_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
+INFERENCE_ALIAS="tarx-tron-nemotron-4b"
+EMBED_MODEL="nomic-embed-text-v1.5.Q4_K_M.gguf"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -58,6 +56,7 @@ is_running() {
 find_llama_server() {
   # Check common locations
   for _path in \
+    "${HOME}/.tarx/bin/llama-server" \
     /opt/homebrew/bin/llama-server \
     /usr/local/bin/llama-server \
     "${HOME}/.local/bin/llama-server" \
@@ -91,7 +90,7 @@ cmd_start() {
 
   _started=0
 
-  # 1. Inference server (port 11435)
+  # 1. TARX-TRON inference server
   if check_port $INFERENCE_PORT; then
     log "  Inference  (${INFERENCE_PORT}): already running"
   else
@@ -104,12 +103,14 @@ cmd_start() {
       warn "Inference model not found at ${_model_path}"
       warn "Download with: tarx update --models"
     else
-      "$_llama" \
+      nohup "$_llama" \
         --host 127.0.0.1 \
         --port $INFERENCE_PORT \
         --model "$_model_path" \
+        --alias "$INFERENCE_ALIAS" \
         --ctx-size 8192 \
-        --parallel 2 \
+        --parallel 1 \
+        --reasoning off \
         --no-warmup \
         > "${TARX_LOGS}/inference.log" 2>&1 &
       echo $! > "$(pid_file inference)"
@@ -131,7 +132,7 @@ cmd_start() {
       warn "Embedding model not found at ${_embed_path}"
       warn "Download with: tarx update --models"
     else
-      "$_llama" \
+      nohup "$_llama" \
         --host 127.0.0.1 \
         --port $EMBED_PORT \
         --model "$_embed_path" \
@@ -155,7 +156,7 @@ cmd_start() {
     if [ -z "$_mesh" ]; then
       log "  Mesh       (${MESH_PORT}): binary not found (optional)"
     else
-      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" "$_mesh" \
+      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" nohup "$_mesh" \
         > "${TARX_LOGS}/mesh.log" 2>&1 &
       echo $! > "$(pid_file mesh)"
       log "  Mesh       (${MESH_PORT}): starting (pid $!)"
@@ -648,7 +649,7 @@ cmd_doctor() {
   log "Models:"
   if [ -f "${TARX_MODELS}/${INFERENCE_MODEL}" ]; then
     _sz=$(wc -c < "${TARX_MODELS}/${INFERENCE_MODEL}" | tr -d ' ')
-    printf '  [OK] Inference: %s (%s MB)\n' "$INFERENCE_MODEL" "$((_sz / 1048576))"
+    printf '  [OK] Inference: %s (%s MB, alias %s)\n' "$INFERENCE_MODEL" "$((_sz / 1048576))" "$INFERENCE_ALIAS"
   else
     printf '  [!!] Inference model missing: %s\n' "${TARX_MODELS}/${INFERENCE_MODEL}"
     _issues=$((_issues + 1))
@@ -807,7 +808,7 @@ _mcp_tarx_servers_json() {
       "command": "node",
       "args": ["${_tarx_home}/servers/tarx-core/dist/server.js"],
       "env": {
-        "TARX_INFERENCE_URL": "http://localhost:11435",
+        "TARX_INFERENCE_URL": "http://localhost:11551",
         "TARX_EMBEDDING_URL": "http://localhost:11437",
         "TARX_MESH_URL": "http://localhost:11436"
       }
@@ -922,7 +923,7 @@ tarx_servers = {
         "command": "node",
         "args": [os.path.join(tarx_home, "servers/tarx-core/dist/server.js")],
         "env": {
-            "TARX_INFERENCE_URL": "http://localhost:11435",
+            "TARX_INFERENCE_URL": "http://localhost:11551",
             "TARX_EMBEDDING_URL": "http://localhost:11437",
             "TARX_MESH_URL": "http://localhost:11436"
         }
@@ -1054,7 +1055,7 @@ Commands:
   help              Show this help
 
 Ports:
-  11435  Inference (Qwen 7B)
+  11551  TARX-TRON inference (Nemotron 4B)
   11436  Mesh network
   11437  Embeddings (nomic-embed)
   11438  Cognitive engine
