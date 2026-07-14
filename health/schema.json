@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TARX Health Canary",
+  "description": "Public contract for TARX-OS health surface. Control plane remains closed.",
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["ok", "degraded", "down"] },
+    "runtime": { "type": "string" },
+    "inference": { "type": "object", "properties": { "port": { "type": "integer" }, "model": { "type": "string" } } },
+    "embeddings": { "type": "object" },
+    "cognitive": { "type": "object", "description": "Status only — engine closed" },
+    "bridge": { "type": "object", "description": "Public surface status only" },
+    "timestamp": { "type": "string", "format": "date-time" }
+  },
+  "required": ["status", "timestamp"]
+}
