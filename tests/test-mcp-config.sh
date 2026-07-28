@@ -4,13 +4,21 @@ set -eu
 
 TASK_MCP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TASK_MCP_DIR"' EXIT
+TASK_FIXTURES_DIR="$(CDPATH='' cd "$(dirname "$0")/fixtures/mcp" && pwd)"
 export TARX_MCP_CONFIG_DIR="$TASK_MCP_DIR"
+export TARX_HOME="$TASK_MCP_DIR/tarx-home"
+export TASK_MCP_FIXTURES_DIR="$TASK_FIXTURES_DIR"
 
-# A third-party Cursor entry must survive the TARX merge unchanged.
-printf '%s\n' \
-  '{"mcpServers":{"other":{"type":"custom","url":"https://example.com/mcp"}}}' \
-  > "$TASK_MCP_DIR/cursor.json"
+for client in claude claude-code cursor vscode; do
+  cp "$TASK_FIXTURES_DIR/$client.initial.json" "$TASK_MCP_DIR/$client.json"
+done
 
+./tarx mcp add claude >/dev/null
+./tarx mcp add cc >/dev/null
+./tarx mcp add cursor >/dev/null
+./tarx mcp add vscode >/dev/null
+
+# Repeating the merge must be idempotent.
 ./tarx mcp add claude >/dev/null
 ./tarx mcp add cc >/dev/null
 ./tarx mcp add cursor >/dev/null
@@ -22,23 +30,18 @@ import os
 from pathlib import Path
 
 root = Path(os.environ["TARX_MCP_CONFIG_DIR"])
+fixtures = Path(os.environ["TASK_MCP_FIXTURES_DIR"])
+tarx_home = os.environ["TARX_HOME"]
 
 for client in ("claude", "claude-code", "cursor"):
-    config = json.loads((root / f"{client}.json").read_text())
-    servers = config["mcpServers"]
-    assert servers["tarx"]["url"] == "https://mcp.tarx.com/mcp"
-    assert servers["tarx-core"]["command"] == "node"
+    assert "mcpServers" in json.loads((root / f"{client}.json").read_text())
 
-cursor = json.loads((root / "cursor.json").read_text())
-assert cursor["mcpServers"]["other"] == {
-    "type": "custom",
-    "url": "https://example.com/mcp",
-}
-
-vscode = json.loads((root / "vscode.json").read_text())
-assert "mcpServers" not in vscode
-assert vscode["servers"]["tarx"]["type"] == "http"
-assert vscode["servers"]["tarx-core"]["type"] == "stdio"
+for client in ("claude", "claude-code", "cursor", "vscode"):
+    actual = json.loads((root / f"{client}.json").read_text())
+    expected_text = (fixtures / f"{client}.expected.json").read_text()
+    expected = json.loads(expected_text.replace("__TARX_HOME__", tarx_home))
+    assert actual == expected, f"{client} output differs from its host fixture"
+    assert not (root / f"{client}.json.bak").exists()
 PYEOF
 
 # Invalid existing JSON must not be replaced.

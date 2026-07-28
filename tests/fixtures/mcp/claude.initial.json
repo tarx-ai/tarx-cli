@@ -1,0 +1,12 @@
+{
+  "globalShortcut": "CommandOrControl+Shift+Space",
+  "mcpServers": {
+    "other": {
+      "command": "uvx",
+      "args": ["other-mcp"],
+      "env": {
+        "OTHER_TOKEN": "${OTHER_TOKEN}"
+      }
+    }
+  }
+}

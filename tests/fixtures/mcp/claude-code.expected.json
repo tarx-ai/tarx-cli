@@ -1,0 +1,25 @@
+{
+  "projects": {
+    "/workspace": {
+      "allowedTools": ["Read"]
+    }
+  },
+  "mcpServers": {
+    "other": {
+      "command": "node",
+      "args": ["/opt/other/server.js"]
+    },
+    "tarx": {
+      "url": "https://mcp.tarx.com/mcp"
+    },
+    "tarx-core": {
+      "command": "node",
+      "args": ["__TARX_HOME__/servers/tarx-core/dist/server.js"],
+      "env": {
+        "TARX_INFERENCE_URL": "http://localhost:11435",
+        "TARX_EMBEDDING_URL": "http://localhost:11437",
+        "TARX_MESH_URL": "http://localhost:11436"
+      }
+    }
+  }
+}

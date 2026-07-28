@@ -1,0 +1,36 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "other-token",
+      "description": "Token for the other server",
+      "password": true
+    }
+  ],
+  "servers": {
+    "other": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:other-token}"
+      }
+    },
+    "tarx": {
+      "url": "https://mcp.tarx.com/mcp",
+      "type": "http"
+    },
+    "tarx-core": {
+      "command": "node",
+      "args": ["__TARX_HOME__/servers/tarx-core/dist/server.js"],
+      "env": {
+        "TARX_INFERENCE_URL": "http://localhost:11435",
+        "TARX_EMBEDDING_URL": "http://localhost:11437",
+        "TARX_MESH_URL": "http://localhost:11436"
+      },
+      "type": "stdio"
+    }
+  },
+  "unrelated": {
+    "keep": true
+  }
+}
