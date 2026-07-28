@@ -597,6 +597,239 @@ cmd_uninstall() {
   log "TARX uninstalled."
 }
 
+# ── route ────────────────────────────────────────────────────────────
+
+run_route_preflight() {
+  _route_target="$1"
+  _route_endpoint="$2"
+  _route_model="$3"
+  _route_timeout="${TARX_ROUTE_PREFLIGHT_TIMEOUT_SECONDS:-10}"
+
+  TARX_ROUTE_PREFLIGHT_KEY="${_route_key:-}" \
+    python3 - "$_route_target" "$_route_endpoint" "$_route_model" "$_route_timeout" <<'PYEOF'
+import json
+import os
+import socket
+import ssl
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+target, endpoint, model, timeout_raw = sys.argv[1:]
+key = os.environ.get("TARX_ROUTE_PREFLIGHT_KEY", "")
+
+
+class RouteError(Exception):
+    def __init__(self, category, detail, exit_code):
+        super().__init__(detail)
+        self.category = category
+        self.detail = detail
+        self.exit_code = exit_code
+
+    def __str__(self):
+        return f"Route preflight failed ({self.category}): {self.detail}"
+
+
+def completion_url(value):
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RouteError("endpoint", "endpoint must be an http(s) URL", 3)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RouteError(
+            "endpoint",
+            "endpoint must not contain credentials, query values, or fragments",
+            3,
+        )
+    if target == "remote" and parsed.scheme != "https":
+        raise RouteError("policy", "approved remote inference requires HTTPS", 2)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path = f"{path}/chat/completions"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def display_endpoint(value):
+    parsed = urllib.parse.urlsplit(value)
+    port = f":{parsed.port}" if parsed.port else ""
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, f"{parsed.hostname}{port}", parsed.path.rstrip("/"), "", "")
+    )
+
+
+def response_mentions_model(body):
+    text = body.decode("utf-8", errors="replace").lower()
+    return "model" in text and any(
+        marker in text
+        for marker in ("not found", "unknown", "unavailable", "does not exist", "access")
+    )
+
+
+try:
+    timeout = float(timeout_raw)
+except ValueError:
+    raise SystemExit(
+        "Route preflight failed (configuration): "
+        "TARX_ROUTE_PREFLIGHT_TIMEOUT_SECONDS must be numeric"
+    )
+if timeout <= 0:
+    raise SystemExit(
+        "Route preflight failed (configuration): timeout must be greater than zero"
+    )
+
+payload = json.dumps(
+    {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply OK."}],
+        "max_tokens": 1,
+        "stream": False,
+    }
+).encode("utf-8")
+headers = {"Content-Type": "application/json"}
+try:
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(
+        completion_url(endpoint),
+        data=payload,
+        method="POST",
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(16384)
+    try:
+        result = json.loads(body)
+    except (TypeError, ValueError):
+        raise RouteError(
+            "provider-response",
+            "provider returned a non-JSON success response",
+            6,
+        )
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("choices"), list)
+        or not result["choices"]
+    ):
+        raise RouteError(
+            "provider-response",
+            "provider response did not include a completion choice",
+            6,
+        )
+except urllib.error.HTTPError as error:
+    body = error.read(16384)
+    if error.code in {401, 403}:
+        failure = RouteError(
+            "authentication",
+            f"provider rejected the credential (HTTP {error.code})",
+            4,
+        )
+    elif error.code in {400, 404} and response_mentions_model(body):
+        failure = RouteError(
+            "model-access",
+            f"configured model is unavailable or unauthorized (HTTP {error.code})",
+            5,
+        )
+    elif error.code == 404:
+        failure = RouteError(
+            "endpoint",
+            "OpenAI-compatible chat completions route was not found (HTTP 404)",
+            3,
+        )
+    elif error.code in {408, 409, 425, 429} or error.code >= 500:
+        failure = RouteError(
+            "provider-availability",
+            f"provider could not serve the preflight request (HTTP {error.code})",
+            6,
+        )
+    else:
+        failure = RouteError(
+            "provider-response",
+            f"provider rejected the preflight request (HTTP {error.code})",
+            6,
+        )
+    print(failure, file=sys.stderr)
+    raise SystemExit(failure.exit_code)
+except (TimeoutError, socket.timeout):
+    print(
+        f"Route preflight failed (timeout): provider did not respond within {timeout:g} seconds",
+        file=sys.stderr,
+    )
+    raise SystemExit(7)
+except urllib.error.URLError as error:
+    if isinstance(error.reason, (TimeoutError, socket.timeout)):
+        category = "timeout"
+        detail = f"provider did not respond within {timeout:g} seconds"
+        exit_code = 7
+    else:
+        category = "endpoint"
+        detail = "provider endpoint is unreachable or its TLS certificate is invalid"
+        exit_code = 3
+    print(f"Route preflight failed ({category}): {detail}", file=sys.stderr)
+    raise SystemExit(exit_code)
+except (ssl.SSLError, ConnectionError, OSError):
+    print(
+        "Route preflight failed (endpoint): "
+        "provider endpoint is unreachable or its TLS certificate is invalid",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+except RouteError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(error.exit_code)
+
+print(
+    "Route preflight passed: "
+    f"target={target} model={model} endpoint={display_endpoint(endpoint)}"
+)
+PYEOF
+}
+
+cmd_route() {
+  _route_subcommand="${1:-help}"
+  shift 2>/dev/null || true
+
+  case "$_route_subcommand" in
+    check)
+      _route_target="${1:-local}"
+      _route_mode="${2:-}"
+      case "$_route_target" in
+        local)
+          [ -z "$_route_mode" ] || err "Local route check does not accept $_route_mode"
+          _route_endpoint="${TARX_LOCAL_INFERENCE_URL:-http://127.0.0.1:${INFERENCE_PORT}/v1}"
+          _route_model="${TARX_LOCAL_INFERENCE_MODEL:-local}"
+          _route_key="${TARX_LOCAL_INFERENCE_API_KEY:-}"
+          ;;
+        remote)
+          if [ "$_route_mode" = "--offline" ] || [ "${TARX_OFFLINE:-0}" = "1" ]; then
+            log "Remote route preflight skipped: offline mode; remote inference remains disabled."
+            return 0
+          fi
+          [ -z "$_route_mode" ] || err "Unknown remote route option: $_route_mode"
+          [ "${TARX_ALLOW_REMOTE_INFERENCE:-0}" = "1" ] || \
+            err "Remote inference is disabled. Set TARX_ALLOW_REMOTE_INFERENCE=1 to approve this check."
+          _route_endpoint="${TARX_REMOTE_INFERENCE_URL:-}"
+          _route_model="${TARX_REMOTE_INFERENCE_MODEL:-}"
+          _route_key="${TARX_REMOTE_INFERENCE_API_KEY:-}"
+          [ -n "$_route_endpoint" ] || err "TARX_REMOTE_INFERENCE_URL is required."
+          [ -n "$_route_model" ] || err "TARX_REMOTE_INFERENCE_MODEL is required."
+          [ -n "$_route_key" ] || err "TARX_REMOTE_INFERENCE_API_KEY is required."
+          ;;
+        *)
+          err "Unknown route target: $_route_target (available: local, remote)"
+          ;;
+      esac
+
+      run_route_preflight "$_route_target" "$_route_endpoint" "$_route_model"
+      ;;
+    help|--help|-h)
+      log "Usage: tarx route check [local|remote] [--offline]"
+      ;;
+    *)
+      err "Unknown route command: $_route_subcommand (available: check)"
+      ;;
+  esac
+}
+
 # ── doctor ───────────────────────────────────────────────────────────
 
 cmd_doctor() {
@@ -1053,6 +1286,9 @@ Commands:
   mcp add cursor    Connect TARX to Cursor
   mcp add vscode    Connect TARX to VS Code
   mcp status        Check MCP config across all clients
+  route check local Verify the local OpenAI-compatible inference route
+  route check remote
+                    Verify an explicitly approved remote inference route
   spaces list       List project spaces
   spaces create     Create a new project space
   update            Update daemon, CLI, and MCP servers in-place
@@ -1088,6 +1324,7 @@ case "$_cmd" in
   search)    cmd_search "$@" ;;
   mesh)      cmd_mesh "$@" ;;
   mcp)       cmd_mcp "$@" ;;
+  route)     cmd_route "$@" ;;
   spaces)    cmd_spaces "$@" ;;
   update)    cmd_update "$@" ;;
   uninstall) cmd_uninstall ;;

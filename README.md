@@ -59,6 +59,33 @@ tarx mcp status
 
 Run `tarx help` for the complete command list.
 
+## Route preflight
+
+TARX can prove an inference route before a workflow depends on it:
+
+```sh
+tarx route check local
+```
+
+The local check sends one bounded, one-token request to the loopback inference
+server. It distinguishes endpoint, authentication, model-access, availability,
+and timeout failures without printing credentials or response bodies.
+
+Remote inference remains fail-closed. Checking a remote route requires explicit
+approval plus an HTTPS endpoint, model, and credential:
+
+```sh
+TARX_ALLOW_REMOTE_INFERENCE=1 \
+TARX_REMOTE_INFERENCE_URL=https://inference.example.com/v1 \
+TARX_REMOTE_INFERENCE_MODEL=approved-model \
+TARX_REMOTE_INFERENCE_API_KEY=... \
+tarx route check remote
+```
+
+For an intentional offline installation, `tarx route check remote --offline`
+makes no network request and leaves remote inference disabled. The optional
+`TARX_ROUTE_PREFLIGHT_TIMEOUT_SECONDS` setting defaults to 10 seconds.
+
 ## Runtime ports
 
 | Port | Service |
@@ -92,6 +119,7 @@ shellcheck -S warning tarx
 ./tarx version
 ./tarx help
 sh tests/test-mcp-config.sh
+sh tests/test-route-preflight.sh
 ```
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

@@ -24,3 +24,5 @@ jobs:
           ./tarx help
       - name: Test client-specific MCP configuration
         run: sh tests/test-mcp-config.sh
+      - name: Test inference route preflight
+        run: sh tests/test-route-preflight.sh
