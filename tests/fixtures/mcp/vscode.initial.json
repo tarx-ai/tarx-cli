@@ -1,0 +1,22 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "other-token",
+      "description": "Token for the other server",
+      "password": true
+    }
+  ],
+  "servers": {
+    "other": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:other-token}"
+      }
+    }
+  },
+  "unrelated": {
+    "keep": true
+  }
+}

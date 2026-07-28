@@ -1,0 +1,12 @@
+{
+  "theme": "dark",
+  "mcpServers": {
+    "other": {
+      "type": "custom",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "${env:OTHER_TOKEN}"
+      }
+    }
+  }
+}

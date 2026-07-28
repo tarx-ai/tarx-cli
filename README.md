@@ -99,6 +99,8 @@ Services bind to localhost by default. MCP configuration changes are backed up,
 merged, validated, and written without replacing unrelated client settings.
 The CLI uses each client's documented configuration envelope: `mcpServers` for
 Claude and Cursor, and `servers` with explicit transport types for VS Code.
+The tested [host adapter fixtures](tests/fixtures/mcp/README.md) document the
+translation and merge invariants behind those client-specific writes.
 
 ## Public boundary
 

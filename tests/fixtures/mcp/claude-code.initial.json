@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "/workspace": {
+      "allowedTools": ["Read"]
+    }
+  },
+  "mcpServers": {
+    "other": {
+      "command": "node",
+      "args": ["/opt/other/server.js"]
+    }
+  }
+}
