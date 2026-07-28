@@ -484,25 +484,22 @@ cmd_update() {
     mv "${_tarx_bin}/tarx.new" "${_tarx_bin}/tarx" && \
     log "    ✓ CLI updated" || log "    ⚠ CLI update failed (keeping current)"
 
-  # 3. Update MCP server bundles
+  # 3. Update the public MCP server bundle
   log "  Updating MCP servers..."
-  for _srv in tarx-core tarx-ops; do
-    _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
-    if [ -n "$_srv_url" ]; then
-      mkdir -p "${_tarx_home}/servers/${_srv}"
-      curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
-        log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
-    fi
-  done
+  _srv="tarx-core"
+  _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
+  if [ -n "$_srv_url" ]; then
+    mkdir -p "${_tarx_home}/servers/${_srv}"
+    curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
+      log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
+  fi
 
   # 4. Rebuild native modules if needed
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-    for _srv in tarx-core tarx-ops; do
-      if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
-        (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
-          log "    ✓ $_srv native modules" || true
-      fi
-    done
+    if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
+      (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
+        log "    ✓ $_srv native modules" || true
+    fi
   fi
 
   # 5. Restart daemon if running
@@ -795,7 +792,7 @@ _mcp_config_path() {
   esac
 }
 
-# TARX MCP server definitions — NEVER include "type" field
+# Public TARX MCP server definitions — NEVER include "type" field
 _mcp_tarx_servers_json() {
   _tarx_home="${TARX_HOME:-$HOME/.tarx}"
   cat << SERVERSEOF
@@ -810,13 +807,6 @@ _mcp_tarx_servers_json() {
         "TARX_INFERENCE_URL": "http://localhost:11435",
         "TARX_EMBEDDING_URL": "http://localhost:11437",
         "TARX_MESH_URL": "http://localhost:11436"
-      }
-    },
-    "tarx-ops": {
-      "command": "node",
-      "args": ["${_tarx_home}/servers/tarx-ops/dist/server.js"],
-      "env": {
-        "TARX_CREATOR_KEY": "tarx-creator-2025"
       }
     }
   }
@@ -912,8 +902,8 @@ if os.path.exists(config_path):
 if 'mcpServers' not in config:
     config['mcpServers'] = {}
 
-# TARX servers — NEVER include "type" field
-tarx_home = os.path.expanduser("~/.tarx")
+# Public TARX servers — NEVER include "type" field
+tarx_home = os.path.expanduser(os.environ.get("TARX_HOME", "~/.tarx"))
 tarx_servers = {
     "tarx": {
         "url": "https://mcp.tarx.com/mcp"
@@ -926,24 +916,12 @@ tarx_servers = {
             "TARX_EMBEDDING_URL": "http://localhost:11437",
             "TARX_MESH_URL": "http://localhost:11436"
         }
-    },
-    "tarx-ops": {
-        "command": "node",
-        "args": [os.path.join(tarx_home, "servers/tarx-ops/dist/server.js")],
-        "env": {
-            "TARX_CREATOR_KEY": "tarx-creator-2025"
-        }
     }
 }
 
 # Merge — add or replace TARX servers, preserve everything else
 for name, server_config in tarx_servers.items():
     config['mcpServers'][name] = server_config
-
-# Strip any "type" fields from ALL servers (including non-TARX ones)
-for name, server in config['mcpServers'].items():
-    if isinstance(server, dict) and 'type' in server:
-        del server['type']
 
 # Write
 with open(config_path, 'w') as f:
@@ -955,7 +933,8 @@ with open(config_path, 'r') as f:
     validated = json.load(f)
 
 has_type = False
-for name, server in validated.get('mcpServers', {}).items():
+for name in tarx_servers:
+    server = validated.get('mcpServers', {}).get(name, {})
     if isinstance(server, dict) and 'type' in server:
         has_type = True
         break
