@@ -70,6 +70,8 @@ Run `tarx help` for the complete command list.
 
 Services bind to localhost by default. MCP configuration changes are backed up,
 merged, validated, and written without replacing unrelated client settings.
+The CLI uses each client's documented configuration envelope: `mcpServers` for
+Claude and Cursor, and `servers` with explicit transport types for VS Code.
 
 ## Public boundary
 
@@ -89,6 +91,7 @@ sh -n tarx
 shellcheck -S warning tarx
 ./tarx version
 ./tarx help
+sh tests/test-mcp-config.sh
 ```
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

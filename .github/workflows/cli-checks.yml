@@ -22,3 +22,5 @@ jobs:
         run: |
           ./tarx version
           ./tarx help
+      - name: Test client-specific MCP configuration
+        run: sh tests/test-mcp-config.sh
