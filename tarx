@@ -484,25 +484,22 @@ cmd_update() {
     mv "${_tarx_bin}/tarx.new" "${_tarx_bin}/tarx" && \
     log "    ✓ CLI updated" || log "    ⚠ CLI update failed (keeping current)"
 
-  # 3. Update MCP server bundles
+  # 3. Update the public MCP server bundle
   log "  Updating MCP servers..."
-  for _srv in tarx-core tarx-ops; do
-    _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
-    if [ -n "$_srv_url" ]; then
-      mkdir -p "${_tarx_home}/servers/${_srv}"
-      curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
-        log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
-    fi
-  done
+  _srv="tarx-core"
+  _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
+  if [ -n "$_srv_url" ]; then
+    mkdir -p "${_tarx_home}/servers/${_srv}"
+    curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
+      log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
+  fi
 
   # 4. Rebuild native modules if needed
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-    for _srv in tarx-core tarx-ops; do
-      if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
-        (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
-          log "    ✓ $_srv native modules" || true
-      fi
-    done
+    if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
+      (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
+        log "    ✓ $_srv native modules" || true
+    fi
   fi
 
   # 5. Restart daemon if running
@@ -773,6 +770,10 @@ cmd_tray() {
 # Detect config file path for each AI client
 _mcp_config_path() {
   _client="$1"
+  if [ -n "${TARX_MCP_CONFIG_DIR:-}" ]; then
+    echo "${TARX_MCP_CONFIG_DIR}/${_client}.json"
+    return
+  fi
   case "$_client" in
     claude)
       # Claude Desktop (macOS)
@@ -790,33 +791,48 @@ _mcp_config_path() {
       echo "$HOME/.cursor/mcp.json"
       ;;
     vscode)
-      echo "$HOME/.vscode/mcp.json"
+      if [ "$_os" = "Darwin" ]; then
+        echo "$HOME/Library/Application Support/Code/User/mcp.json"
+      else
+        echo "${XDG_CONFIG_HOME:-$HOME/.config}/Code/User/mcp.json"
+      fi
       ;;
   esac
 }
 
-# TARX MCP server definitions — NEVER include "type" field
+# MCP clients do not yet share a standard configuration envelope.
+_mcp_root_key() {
+  case "$1" in
+    vscode) echo "servers" ;;
+    *)      echo "mcpServers" ;;
+  esac
+}
+
+# Public TARX MCP server definitions for manual installation.
 _mcp_tarx_servers_json() {
+  _target="$1"
   _tarx_home="${TARX_HOME:-$HOME/.tarx}"
+  if [ "$_target" = "vscode" ]; then
+    _remote_type='"type": "http",'
+    _local_type='"type": "stdio",'
+  else
+    _remote_type=""
+    _local_type=""
+  fi
   cat << SERVERSEOF
 {
     "tarx": {
+      ${_remote_type}
       "url": "https://mcp.tarx.com/mcp"
     },
     "tarx-core": {
+      ${_local_type}
       "command": "node",
       "args": ["${_tarx_home}/servers/tarx-core/dist/server.js"],
       "env": {
         "TARX_INFERENCE_URL": "http://localhost:11435",
         "TARX_EMBEDDING_URL": "http://localhost:11437",
         "TARX_MESH_URL": "http://localhost:11436"
-      }
-    },
-    "tarx-ops": {
-      "command": "node",
-      "args": ["${_tarx_home}/servers/tarx-ops/dist/server.js"],
-      "env": {
-        "TARX_CREATOR_KEY": "tarx-creator-2025"
       }
     }
   }
@@ -836,12 +852,14 @@ cmd_mcp() {
 
       _config_file=""
       _client_name=""
+      _root_key=""
       case "$_target" in
         claude)
           _config_file="$(_mcp_config_path claude)"
           _client_name="Claude Desktop"
           ;;
         claude-code|cc)
+          _target="claude-code"
           _config_file="$(_mcp_config_path claude-code)"
           _client_name="Claude Code"
           ;;
@@ -850,6 +868,7 @@ cmd_mcp() {
           _client_name="Cursor"
           ;;
         vscode|code)
+          _target="vscode"
           _config_file="$(_mcp_config_path vscode)"
           _client_name="VS Code"
           ;;
@@ -857,21 +876,15 @@ cmd_mcp() {
           err "Unknown target: $_target (available: claude, claude-code, cursor, vscode)"
           ;;
       esac
+      _root_key="$(_mcp_root_key "$_target")"
 
       if [ -z "$_config_file" ]; then
         err "Could not determine config path for $_target"
       fi
 
-      # Check if already configured
-      if [ -f "$_config_file" ] && grep -q '"tarx"' "$_config_file" 2>/dev/null; then
-        # Validate no "type" fields leaked into existing config
-        if grep -q '"type"' "$_config_file" 2>/dev/null; then
-          log "  TARX found in $_config_file but has stale 'type' fields."
-          log "  Cleaning..."
-        else
-          log "  TARX already configured in $_config_file"
-          return
-        fi
+      if [ "$_target" = "vscode" ] && [ -f "$HOME/.vscode/mcp.json" ]; then
+        warn "Legacy TARX VS Code config found at $HOME/.vscode/mcp.json"
+        warn "VS Code's user config now lives at $_config_file"
       fi
 
       # Require python3 for safe JSON merge
@@ -880,9 +893,7 @@ cmd_mcp() {
         log ""
         log "  Add this manually to $_config_file:"
         log ""
-        printf '  {\n    "mcpServers": %s\n  }\n' "$(_mcp_tarx_servers_json)"
-        log ""
-        log "  IMPORTANT: Do NOT include a \"type\" field on any server."
+        printf '  {\n    "%s": %s\n  }\n' "$_root_key" "$(_mcp_tarx_servers_json "$_target")"
         return
       fi
 
@@ -894,11 +905,13 @@ cmd_mcp() {
         cp "$_config_file" "${_config_file}.bak" 2>/dev/null || true
       fi
 
-      # Merge using python3 — NEVER writes "type" field
+      # Merge using the client-specific envelope without touching other entries.
       python3 << PYEOF
 import json, sys, os
 
 config_path = "$_config_file"
+target = "$_target"
+root_key = "$_root_key"
 
 # Read existing config or start fresh
 config = {}
@@ -906,14 +919,20 @@ if os.path.exists(config_path):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-    except (json.JSONDecodeError, ValueError):
-        config = {}
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"  ERROR: Existing config is not valid JSON: {exc}", file=sys.stderr)
+        print(f"  Original preserved at {config_path}.bak", file=sys.stderr)
+        sys.exit(1)
 
-if 'mcpServers' not in config:
-    config['mcpServers'] = {}
+if root_key not in config:
+    config[root_key] = {}
+if not isinstance(config[root_key], dict):
+    print(f"  ERROR: Existing {root_key} value is not an object.", file=sys.stderr)
+    sys.exit(1)
 
-# TARX servers — NEVER include "type" field
-tarx_home = os.path.expanduser("~/.tarx")
+# VS Code requires a servers envelope and explicit transport types. Claude and
+# Cursor use an mcpServers envelope; local stdio entries need no type field.
+tarx_home = os.path.expanduser(os.environ.get("TARX_HOME", "~/.tarx"))
 tarx_servers = {
     "tarx": {
         "url": "https://mcp.tarx.com/mcp"
@@ -926,46 +945,40 @@ tarx_servers = {
             "TARX_EMBEDDING_URL": "http://localhost:11437",
             "TARX_MESH_URL": "http://localhost:11436"
         }
-    },
-    "tarx-ops": {
-        "command": "node",
-        "args": [os.path.join(tarx_home, "servers/tarx-ops/dist/server.js")],
-        "env": {
-            "TARX_CREATOR_KEY": "tarx-creator-2025"
-        }
     }
 }
+if target == "vscode":
+    tarx_servers["tarx"]["type"] = "http"
+    tarx_servers["tarx-core"]["type"] = "stdio"
 
 # Merge — add or replace TARX servers, preserve everything else
 for name, server_config in tarx_servers.items():
-    config['mcpServers'][name] = server_config
-
-# Strip any "type" fields from ALL servers (including non-TARX ones)
-for name, server in config['mcpServers'].items():
-    if isinstance(server, dict) and 'type' in server:
-        del server['type']
+    config[root_key][name] = server_config
 
 # Write
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
     f.write('\n')
 
-# Validate — re-read and check no "type" fields
+# Validate the client-specific envelope and TARX entries.
 with open(config_path, 'r') as f:
     validated = json.load(f)
 
-has_type = False
-for name, server in validated.get('mcpServers', {}).items():
-    if isinstance(server, dict) and 'type' in server:
-        has_type = True
-        break
+valid_root = validated.get(root_key, {})
+valid = (
+    isinstance(valid_root, dict)
+    and all(isinstance(valid_root.get(name), dict) for name in tarx_servers)
+)
+if target == "vscode":
+    valid = valid and valid_root["tarx"].get("type") == "http"
+    valid = valid and valid_root["tarx-core"].get("type") == "stdio"
 
-if has_type:
+if not valid:
     # Restore backup
     bak = config_path + '.bak'
     if os.path.exists(bak):
         os.replace(bak, config_path)
-    print("  ERROR: Validation failed — 'type' field detected. Config restored from backup.", file=sys.stderr)
+    print("  ERROR: Validation failed. Config restored from backup.", file=sys.stderr)
     sys.exit(1)
 
 # Clean up backup on success
@@ -1000,11 +1013,9 @@ PYEOF
           vscode)      _cn="VS Code" ;;
         esac
         if [ -f "$_cf" ] && grep -q '"tarx"' "$_cf" 2>/dev/null; then
-          if grep -q '"type"' "$_cf" 2>/dev/null; then
-            printf '  [!!] %-16s %s (has stale "type" fields — run: tarx mcp add %s)\n' "$_cn" "$_cf" "$_c"
-          else
-            printf '  [OK] %-16s %s\n' "$_cn" "$_cf"
-          fi
+          printf '  [OK] %-16s %s\n' "$_cn" "$_cf"
+        elif [ "$_c" = "vscode" ] && [ -f "$HOME/.vscode/mcp.json" ]; then
+          printf '  [!!] %-16s legacy config at %s (run: tarx mcp add vscode)\n' "$_cn" "$HOME/.vscode/mcp.json"
         else
           printf '  [--] %-16s not configured\n' "$_cn"
         fi

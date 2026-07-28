@@ -1,0 +1,26 @@
+name: CLI checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: sh -n tarx
+      - name: Run ShellCheck
+        run: shellcheck -S warning tarx
+      - name: Exercise read-only commands
+        run: |
+          ./tarx version
+          ./tarx help
+      - name: Test client-specific MCP configuration
+        run: sh tests/test-mcp-config.sh
