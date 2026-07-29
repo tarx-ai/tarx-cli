@@ -12,6 +12,18 @@ a third-party inference service.
 > **Status:** Public developer preview. Interfaces may change before the first
 > stable release.
 
+## Public proofs in this stack
+
+| Proof | Where |
+| --- | --- |
+| Fail-closed local/remote inference preflight | `tarx route check local` / `remote` (this repo) |
+| Four-host MCP install matrix | [fixtures](tests/fixtures/mcp/) + matrix below |
+| Portable proposal → decision → evidence | [governed-agent-contracts](https://github.com/tarx-ai/governed-agent-contracts) |
+| Enterprise Foundry/local/deny → TARX runtimes | [palantir-aip-local-first](https://github.com/wantzjt/palantir-aip-local-first) |
+| Computer-canonical Desktop entry | [tarx-desktop](https://github.com/tarx-ai/tarx-desktop) |
+
+**Computer by default. Supercomputer by permission.**
+
 ## What it demonstrates
 
 - Local inference and embeddings through
