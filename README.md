@@ -102,6 +102,20 @@ Claude and Cursor, and `servers` with explicit transport types for VS Code.
 The tested [host adapter fixtures](tests/fixtures/mcp/README.md) document the
 translation and merge invariants behind those client-specific writes.
 
+### MCP host interop matrix
+
+| Host | Envelope | Local stdio | Remote HTTP | Merge guarantee |
+| --- | --- | --- | --- | --- |
+| Claude Desktop | `mcpServers` | `command`, `args`, `env` | `url` | Preserve unknown third-party servers |
+| Claude Code | `mcpServers` | `command`, `args`, `env` | `url` | Same as Desktop; fail-closed on invalid JSON |
+| Cursor | `mcpServers` | `command`, `args`, `env` | `url` / host fields | Idempotent rewrite; backup before write |
+| VS Code | `servers` | `type: "stdio"`, `command`, `args`, `env` | `type: "http"`, `url` | Never write Claude-shaped config into VS Code |
+
+Fixtures live under `tests/fixtures/mcp/` and are exercised by
+`tests/test-mcp-config.sh`. This matrix is also evidence for
+[MCP issue #292](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/292)
+and [SEP-2633](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2633).
+
 ## Public boundary
 
 This repository contains the public CLI and a health-canary schema. It does not
