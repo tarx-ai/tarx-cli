@@ -37,30 +37,61 @@ const TARX_CYAN   = chalk.hex('#22D3EE')
 // Slot for custom TARX ASCII art. Replace TARX_ASCII_ART with your graphic.
 // Keep width ≤ 78 chars for universal terminal compatibility.
 
-const TARX_ASCII_ART = `
- ████████╗ █████╗ ██████╗ ██╗  ██╗
-    ██╔══╝██╔══██╗██╔══██╗╚██╗██╔╝
-    ██║   ███████║██████╔╝ ╚███╔╝ 
-    ██║   ██╔══██║██╔══██╗ ██╔██╗ 
-    ██║   ██║  ██║██║  ██║██╔╝ ██╗
-    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝`.trimStart()
+const TARX_ASCII_ART = `        *****      ******      *****        
+       *******     ******     *******       
+      ********    ********    ********      
+      *********   ********    ********      
+     **********  **********  **********     
+     ***** ***** ********** ***** *****     
+     ***** **********  ********** ******    
+    *****  **********  **********  *****    
+      **    *********  *********            
+            ********    ********            
+             ******      ******             
+****          ****        ****          ****
+****                                    ****
+*****                                  *****
+ *****                                ***** 
+  ******                            ******  
+    ******                        ******    
+     *******                    *******     
+       **********           *********       
+          ************************          
+              ****************              `
 
-export function printHeader(subtitle?: string) {
+export function printHeader(subtitle?: string, version = '1.0.0') {
   const cols = stdout.columns || 80
   const divider = TARX_DIM('─'.repeat(Math.min(cols, 78)))
 
   stdout.write('\n')
-  // Print each line of ASCII art centered in TARX blue
+
+  // ASCII art — has its own internal spacing, render as-is in white
   for (const line of TARX_ASCII_ART.split('\n')) {
-    const pad = Math.max(0, Math.floor((cols - line.length) / 2))
-    stdout.write(' '.repeat(pad) + TARX_BLUE(line) + '\n')
+    stdout.write(TARX_WHITE(line) + '\n')
   }
+
   stdout.write('\n')
+
+  // Tagline: FREE TO THINK · version · Designed in Austin TX.
+  const tagline = `FREE TO THINK  ·  v${version}  ·  Designed in Austin TX.`
+  const tagPad = Math.max(0, Math.floor((cols - tagline.length) / 2))
+  stdout.write(
+    ' '.repeat(tagPad) +
+    TARX_BLUE('FREE TO THINK') +
+    TARX_DIM('  ·  ') +
+    TARX_DIM(`v${version}`) +
+    TARX_DIM('  ·  ') +
+    TARX_DIM('Designed in Austin TX.') +
+    '\n'
+  )
+
   if (subtitle) {
+    stdout.write('\n')
     const pad = Math.max(0, Math.floor((cols - subtitle.length) / 2))
     stdout.write(' '.repeat(pad) + TARX_DIM(subtitle) + '\n')
   }
-  stdout.write(divider + '\n\n')
+
+  stdout.write('\n' + divider + '\n\n')
 }
 
 // ── Status Bar ────────────────────────────────────────────────────────────────
