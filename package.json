@@ -1,0 +1,20 @@
+{
+  "name": "@tarx-ai/cli",
+  "version": "1.0.0",
+  "description": "TARX CLI — sovereign AI terminal experience",
+  "type": "module",
+  "bin": {
+    "tarx": "./bin/tarx.mjs"
+  },
+  "scripts": {
+    "dev": "node --experimental-strip-types src/cli.ts",
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node22 --outfile=dist/cli.js --external:chalk",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "chalk": "5.3.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
