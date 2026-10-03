@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tarx.self-heal</string>
+  <key>NSHumanReadableDescription</key>
+  <string>TARX Self-Healing Watchdog — checks Mind :11435, Cognitive :11438, Bridge :11440 every 60s</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/master/.tarx/scripts/tarx-self-heal.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/master/.tarx/logs/self-heal.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/master/.tarx/logs/self-heal.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/master</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/node@22/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>TARX_HOME</key>
+    <string>/Users/master/.tarx</string>
+  </dict>
+</dict>
+</plist>

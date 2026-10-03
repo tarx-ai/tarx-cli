@@ -9,18 +9,29 @@ TARX_VERSION="1.1.0"
 # ── Platform paths ───────────────────────────────────────────────────
 
 _os="$(uname -s)"
-TARX_DATA="${HOME}/.tarx"
+case "$_os" in
+  Darwin) TARX_DATA="${HOME}/Library/Application Support/tarx" ;;
+  *)      TARX_DATA="${HOME}/.tarx" ;;
+esac
 
+TARX_HOME="${TARX_HOME:-${HOME}/.tarx}"
 TARX_MODELS="${TARX_DATA}/models"
+TARX_HOME_MODELS="${TARX_HOME}/models"
 TARX_LOGS="${TARX_DATA}/logs"
 TARX_PID_DIR="${TARX_DATA}/pids"
-INFERENCE_PORT=11551
+INFERENCE_PORT=11435
 MESH_PORT=11436
 EMBED_PORT=11437
 COGNITIVE_PORT=11438
 
-INFERENCE_MODEL="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
-INFERENCE_ALIAS="tarx-tron-nemotron-4b"
+# Supercomputer door (display/health only — set by their own launchd jobs,
+# NOT bound by this CLI). Gateway is the public door via https://compute.tarx.com.
+SUPERCOMPUTER_GATEWAY_PORT=11450
+SUPERCOMPUTER_MODEL_PORT=11445
+BRIDGE_PORT=11440
+
+INFERENCE_MODEL="gemma-4-26B-A4B-it-Q4_K_M.gguf"
+INFERENCE_MODEL_FALLBACK="NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"
 EMBED_MODEL="nomic-embed-text-v1.5.Q4_K_M.gguf"
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -56,7 +67,6 @@ is_running() {
 find_llama_server() {
   # Check common locations
   for _path in \
-    "${HOME}/.tarx/bin/llama-server" \
     /opt/homebrew/bin/llama-server \
     /usr/local/bin/llama-server \
     "${HOME}/.local/bin/llama-server" \
@@ -82,6 +92,29 @@ find_mesh_binary() {
   return 1
 }
 
+find_model_file() {
+  for _candidate in "$@"; do
+    [ -n "$_candidate" ] || continue
+    case "$_candidate" in
+      /*)
+        if [ -f "$_candidate" ]; then
+          echo "$_candidate"
+          return 0
+        fi
+        ;;
+      *)
+        for _dir in "$TARX_MODELS" "$TARX_HOME_MODELS"; do
+          if [ -f "${_dir}/${_candidate}" ]; then
+            echo "${_dir}/${_candidate}"
+            return 0
+          fi
+        done
+        ;;
+    esac
+  done
+  return 1
+}
+
 # ── start ────────────────────────────────────────────────────────────
 
 cmd_start() {
@@ -90,27 +123,25 @@ cmd_start() {
 
   _started=0
 
-  # 1. TARX-TRON inference server
+  # 1. Inference server (port 11435)
   if check_port $INFERENCE_PORT; then
     log "  Inference  (${INFERENCE_PORT}): already running"
   else
     _llama="$(find_llama_server)" || true
-    _model_path="${TARX_MODELS}/${INFERENCE_MODEL}"
+    _model_path="$(find_model_file "${TARX_INFERENCE_MODEL:-}" "$INFERENCE_MODEL" "$INFERENCE_MODEL_FALLBACK" || true)"
 
     if [ -z "$_llama" ]; then
       warn "llama-server not found — install with: brew install llama.cpp"
-    elif [ ! -f "$_model_path" ]; then
-      warn "Inference model not found at ${_model_path}"
+    elif [ -z "$_model_path" ]; then
+      warn "Inference model not found in ${TARX_MODELS} or ${TARX_HOME_MODELS}"
       warn "Download with: tarx update --models"
     else
-      nohup "$_llama" \
+      "$_llama" \
         --host 127.0.0.1 \
         --port $INFERENCE_PORT \
         --model "$_model_path" \
-        --alias "$INFERENCE_ALIAS" \
         --ctx-size 8192 \
-        --parallel 1 \
-        --reasoning off \
+        --parallel 2 \
         --no-warmup \
         > "${TARX_LOGS}/inference.log" 2>&1 &
       echo $! > "$(pid_file inference)"
@@ -124,15 +155,15 @@ cmd_start() {
     log "  Embeddings (${EMBED_PORT}): already running"
   else
     _llama="$(find_llama_server)" || true
-    _embed_path="${TARX_MODELS}/${EMBED_MODEL}"
+    _embed_path="$(find_model_file "${TARX_EMBED_MODEL:-}" "$EMBED_MODEL" || true)"
 
     if [ -z "$_llama" ]; then
       warn "llama-server not found — install with: brew install llama.cpp"
-    elif [ ! -f "$_embed_path" ]; then
-      warn "Embedding model not found at ${_embed_path}"
+    elif [ -z "$_embed_path" ]; then
+      warn "Embedding model not found in ${TARX_MODELS} or ${TARX_HOME_MODELS}"
       warn "Download with: tarx update --models"
     else
-      nohup "$_llama" \
+      "$_llama" \
         --host 127.0.0.1 \
         --port $EMBED_PORT \
         --model "$_embed_path" \
@@ -156,7 +187,7 @@ cmd_start() {
     if [ -z "$_mesh" ]; then
       log "  Mesh       (${MESH_PORT}): binary not found (optional)"
     else
-      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" nohup "$_mesh" \
+      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" "$_mesh" \
         > "${TARX_LOGS}/mesh.log" 2>&1 &
       echo $! > "$(pid_file mesh)"
       log "  Mesh       (${MESH_PORT}): starting (pid $!)"
@@ -218,7 +249,7 @@ cmd_status() {
   printf '  %-14s %-8s %s\n' "SERVICE" "PORT" "STATUS"
   printf '  %-14s %-8s %s\n' "──────────" "─────" "──────"
 
-  for _svc_info in "Inference:${INFERENCE_PORT}" "Mesh:${MESH_PORT}" "Embeddings:${EMBED_PORT}" "Cognitive:${COGNITIVE_PORT}"; do
+  for _svc_info in "Inference(local):${INFERENCE_PORT}" "Mesh(local):${MESH_PORT}" "Embeddings(local):${EMBED_PORT}" "Cognitive(local):${COGNITIVE_PORT}" "Bridge(local):${BRIDGE_PORT}" "Supercomputer:${SUPERCOMPUTER_GATEWAY_PORT}" "SC-model:${SUPERCOMPUTER_MODEL_PORT}"; do
     _name="${_svc_info%%:*}"
     _port="${_svc_info##*:}"
 
@@ -239,10 +270,130 @@ cmd_status() {
 # ── chat ─────────────────────────────────────────────────────────────
 
 cmd_chat() {
+  # Door for interactive/engaged chat = Supercomputer gateway (tarx/t-supercomputer).
+  # One-shot (with args) keeps local Mind for speed; interactive uses the door.
+  _gw="http://127.0.0.1:${SUPERCOMPUTER_GATEWAY_PORT}"
+
+  # Pull the gateway bearer from the running gateway process env. Never printed.
+  _chat_key() {
+    _p=$(lsof -ti tcp:${SUPERCOMPUTER_GATEWAY_PORT} -sTCP:LISTEN 2>/dev/null | head -1)
+    [ -n "$_p" ] && ps eww -o command= -p "$_p" 2>/dev/null | tr ' ' '\n' | grep '^TARX_GATEWAY_API_KEY=' | cut -d= -f2-
+  }
+
+  # One request to the door. $1 = JSON messages array. Prints assistant text.
+  _chat_once() {
+    _msgs="$1"; _key="$2"
+    # Stream SSE live. Show a "thinking" indicator immediately (first token can be
+    # 30–60s on the cold/slow 27B) and clear it the moment real tokens arrive, so a
+    # slow first token never looks like a hang. Returns full text for history.
+    _pl=$(MSGS="$_msgs" python3 -c "import os,json;print(json.dumps({'model':'tarx/t-supercomputer','messages':json.loads(os.environ['MSGS']),'stream':True,'max_tokens':1024}))" 2>/dev/null)
+
+    # background spinner on the tty until a signal file appears
+    _spin="/tmp/.tarx_spin_$$"; : > "$_spin"
+    (
+      i=0
+      while [ -f "$_spin" ]; do
+        case $((i % 4)) in 0) c='·  ';; 1) c='·· ';; 2) c='···';; 3) c=' ··';; esac
+        printf '\r\033[2m(thinking %s t=%ss)\033[0m' "$c" "$i" > /dev/tty 2>/dev/null
+        i=$((i+1)); sleep 1
+      done
+    ) &
+    _spinpid=$!
+
+    curl -sf -N -m 300 -X POST "${_gw}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${_key}" \
+      -d "$_pl" 2>/dev/null | SPIN="$_spin" python3 -c "
+import sys,json,os
+full=[]; first=True
+try: tty=open('/dev/tty','w')
+except Exception: tty=None
+for line in sys.stdin:
+    line=line.strip()
+    if not line.startswith('data:'): continue
+    p=line[5:].strip()
+    if p=='[DONE]': break
+    try:
+        d=json.loads(p); delta=d.get('choices',[{}])[0].get('delta',{}).get('content')
+        if delta:
+            if first:
+                # stop spinner + clear its line before first token
+                try: os.remove(os.environ['SPIN'])
+                except Exception: pass
+                if tty: tty.write('\r\033[K'); tty.flush()
+                first=False
+            if tty: tty.write(delta); tty.flush()
+            full.append(delta)
+    except Exception: pass
+if tty: tty.write('\n\n'); tty.flush()
+sys.stdout.write(''.join(full))
+" 2>/dev/null
+    rm -f "$_spin" 2>/dev/null; kill "$_spinpid" 2>/dev/null; wait "$_spinpid" 2>/dev/null
+  }
+
+  _esc() { printf '%s' "$1" | python3 -c "import sys,json;print(json.dumps(sys.stdin.read()))" 2>/dev/null; }
+
+  # ── Interactive session (no args): a place to type and engage TARX ──
   if [ -z "$1" ]; then
-    err "Usage: tarx chat \"your prompt here\""
+    if ! check_port "$SUPERCOMPUTER_GATEWAY_PORT"; then
+      err "Supercomputer door not running on :${SUPERCOMPUTER_GATEWAY_PORT}."
+    fi
+    _key=$(_chat_key)
+    [ -z "$_key" ] && err "Supercomputer door needs its key (TARX_GATEWAY_API_KEY) to engage."
+    if [ -t 1 ]; then _dim='\033[2m'; _rst='\033[0m'; else _dim=''; _rst=''; fi
+    printf '%b────────────────────────────────────────────────────────%b\n' "$_dim" "$_rst"
+    printf '%bTARX · Supercomputer · talk below · "exit" to leave%b\n\n' "$_dim" "$_rst"
+    _spf="$HOME/.tarx/always-on/session-prompt.md"
+    _histfile="$HOME/.tarx/always-on/session-history.json"
+    _livectx=$("$HOME/.tarx/bin/tarx-live-context.sh" 2>/dev/null)
+
+    # Build system message = static moment + LIVE state (current reality).
+    _sysmsg=$(SPF="$_spf" LCTX="$_livectx" python3 -c "
+import json,os
+base=''
+try: base=open(os.environ['SPF']).read()
+except Exception: base='You are TARX.'
+print(json.dumps(base + '\n\n' + os.environ.get('LCTX','')))
+" 2>/dev/null)
+
+    # Resume recent conversation across launches (last ~12 turns), else fresh.
+    _hist=$(SYS="$_sysmsg" HF="$_histfile" python3 -c "
+import json,os
+sys_content=json.loads(os.environ['SYS'])
+h=[{'role':'system','content':sys_content}]
+hf=os.environ['HF']
+try:
+    prior=json.load(open(hf))
+    prior=[m for m in prior if m.get('role') in ('user','assistant')][-12:]
+    h+=prior
+except Exception: pass
+print(json.dumps(h))
+" 2>/dev/null)
+    [ -z "${_hist:-}" ] && _hist="[]"
+
+    while :; do
+      printf 'you › '
+      if ! IFS= read -r _line; then printf '\n'; break; fi
+      case "$_line" in exit|quit|:q) break ;; "") continue ;; esac
+      _ujson=$(_esc "$_line")
+      _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'user','content':$_ujson});print(json.dumps(h))" 2>/dev/null)
+      printf 'tarx › '
+      _ans=$(_chat_once "$_hist" "$_key")
+      if [ -z "$_ans" ]; then printf '(no response — door may be cold; try again)\n\n'; continue; fi
+      _ajson=$(_esc "$_ans")
+      _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'assistant','content':$_ajson});print(json.dumps(h))" 2>/dev/null)
+      # Persist conversation (user/assistant only) so the next launch resumes.
+      printf '%s' "$_hist" | python3 -c "
+import sys,json
+h=json.load(sys.stdin)
+keep=[m for m in h if m.get('role') in ('user','assistant')][-40:]
+json.dump(keep, open('$_histfile','w'))
+" 2>/dev/null
+    done
+    return 0
   fi
 
+  # ── One-shot (with args): fast local Mind ──
   if ! check_port $INFERENCE_PORT; then
     err "Inference server not running on port ${INFERENCE_PORT}. Run: tarx start"
   fi
@@ -257,18 +408,18 @@ cmd_chat() {
     -H "Content-Type: application/json" \
     -d "$_payload" 2>/dev/null) || err "Request failed. Is the inference server running?"
 
-  # Extract content — handle both formats
-  _content=$(printf '%s' "$_response" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1)
-
-  if [ -z "$_content" ]; then
-    # Try Python if available for proper JSON parsing
-    if command -v python3 >/dev/null 2>&1; then
-      _content=$(printf '%s' "$_response" | python3 -c "
+  _content=""
+  if command -v python3 >/dev/null 2>&1; then
+    _content=$(printf '%s' "$_response" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
-print(r['choices'][0]['message']['content'])
+message = r.get('choices', [{}])[0].get('message', {})
+print(message.get('content') or message.get('reasoning_content') or '')
 " 2>/dev/null) || true
-    fi
+  fi
+
+  if [ -z "$_content" ]; then
+    _content=$(printf '%s' "$_response" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   fi
 
   if [ -z "$_content" ]; then
@@ -485,22 +636,25 @@ cmd_update() {
     mv "${_tarx_bin}/tarx.new" "${_tarx_bin}/tarx" && \
     log "    ✓ CLI updated" || log "    ⚠ CLI update failed (keeping current)"
 
-  # 3. Update the public MCP server bundle
+  # 3. Update MCP server bundles
   log "  Updating MCP servers..."
-  _srv="tarx-core"
-  _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
-  if [ -n "$_srv_url" ]; then
-    mkdir -p "${_tarx_home}/servers/${_srv}"
-    curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
-      log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
-  fi
+  for _srv in tarx-core tarx-ops; do
+    _srv_url="$(echo "$_release_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('servers',{}).get('$_srv',{}).get('url',''))" 2>/dev/null || echo "")"
+    if [ -n "$_srv_url" ]; then
+      mkdir -p "${_tarx_home}/servers/${_srv}"
+      curl -fsSL "$_srv_url" | tar xz -C "${_tarx_home}/servers/${_srv}" 2>/dev/null && \
+        log "    ✓ $_srv" || log "    ⚠ $_srv update failed (keeping current)"
+    fi
+  done
 
   # 4. Rebuild native modules if needed
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-    if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
-      (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
-        log "    ✓ $_srv native modules" || true
-    fi
+    for _srv in tarx-core tarx-ops; do
+      if [ -d "${_tarx_home}/servers/${_srv}/node_modules/better-sqlite3" ]; then
+        (cd "${_tarx_home}/servers/${_srv}" && npm rebuild better-sqlite3 2>/dev/null) && \
+          log "    ✓ $_srv native modules" || true
+      fi
+    done
   fi
 
   # 5. Restart daemon if running
@@ -533,10 +687,10 @@ download_models() {
   log "Checking models..."
   mkdir -p "$TARX_MODELS" 2>/dev/null || true
 
-  _inference_path="${TARX_MODELS}/${INFERENCE_MODEL}"
-  _embed_path="${TARX_MODELS}/${EMBED_MODEL}"
+  _inference_path="$(find_model_file "${TARX_INFERENCE_MODEL:-}" "$INFERENCE_MODEL" "$INFERENCE_MODEL_FALLBACK" || true)"
+  _embed_path="$(find_model_file "${TARX_EMBED_MODEL:-}" "$EMBED_MODEL" || true)"
 
-  if [ -f "$_inference_path" ]; then
+  if [ -n "$_inference_path" ]; then
     _size=$(wc -c < "$_inference_path" | tr -d ' ')
     log "  Inference model: present ($((_size / 1048576)) MB)"
   else
@@ -544,7 +698,7 @@ download_models() {
     log "  Download ~4.4 GB from: https://tarx.com/models/${INFERENCE_MODEL}"
   fi
 
-  if [ -f "$_embed_path" ]; then
+  if [ -n "$_embed_path" ]; then
     _size=$(wc -c < "$_embed_path" | tr -d ' ')
     log "  Embedding model: present ($((_size / 1048576)) MB)"
   else
@@ -598,239 +752,6 @@ cmd_uninstall() {
   log "TARX uninstalled."
 }
 
-# ── route ────────────────────────────────────────────────────────────
-
-run_route_preflight() {
-  _route_target="$1"
-  _route_endpoint="$2"
-  _route_model="$3"
-  _route_timeout="${TARX_ROUTE_PREFLIGHT_TIMEOUT_SECONDS:-10}"
-
-  TARX_ROUTE_PREFLIGHT_KEY="${_route_key:-}" \
-    python3 - "$_route_target" "$_route_endpoint" "$_route_model" "$_route_timeout" <<'PYEOF'
-import json
-import os
-import socket
-import ssl
-import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-
-target, endpoint, model, timeout_raw = sys.argv[1:]
-key = os.environ.get("TARX_ROUTE_PREFLIGHT_KEY", "")
-
-
-class RouteError(Exception):
-    def __init__(self, category, detail, exit_code):
-        super().__init__(detail)
-        self.category = category
-        self.detail = detail
-        self.exit_code = exit_code
-
-    def __str__(self):
-        return f"Route preflight failed ({self.category}): {self.detail}"
-
-
-def completion_url(value):
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RouteError("endpoint", "endpoint must be an http(s) URL", 3)
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise RouteError(
-            "endpoint",
-            "endpoint must not contain credentials, query values, or fragments",
-            3,
-        )
-    if target == "remote" and parsed.scheme != "https":
-        raise RouteError("policy", "approved remote inference requires HTTPS", 2)
-    path = parsed.path.rstrip("/")
-    if not path.endswith("/chat/completions"):
-        path = f"{path}/chat/completions"
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
-
-
-def display_endpoint(value):
-    parsed = urllib.parse.urlsplit(value)
-    port = f":{parsed.port}" if parsed.port else ""
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, f"{parsed.hostname}{port}", parsed.path.rstrip("/"), "", "")
-    )
-
-
-def response_mentions_model(body):
-    text = body.decode("utf-8", errors="replace").lower()
-    return "model" in text and any(
-        marker in text
-        for marker in ("not found", "unknown", "unavailable", "does not exist", "access")
-    )
-
-
-try:
-    timeout = float(timeout_raw)
-except ValueError:
-    raise SystemExit(
-        "Route preflight failed (configuration): "
-        "TARX_ROUTE_PREFLIGHT_TIMEOUT_SECONDS must be numeric"
-    )
-if timeout <= 0:
-    raise SystemExit(
-        "Route preflight failed (configuration): timeout must be greater than zero"
-    )
-
-payload = json.dumps(
-    {
-        "model": model,
-        "messages": [{"role": "user", "content": "Reply OK."}],
-        "max_tokens": 1,
-        "stream": False,
-    }
-).encode("utf-8")
-headers = {"Content-Type": "application/json"}
-try:
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    request = urllib.request.Request(
-        completion_url(endpoint),
-        data=payload,
-        method="POST",
-        headers=headers,
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read(16384)
-    try:
-        result = json.loads(body)
-    except (TypeError, ValueError):
-        raise RouteError(
-            "provider-response",
-            "provider returned a non-JSON success response",
-            6,
-        )
-    if (
-        not isinstance(result, dict)
-        or not isinstance(result.get("choices"), list)
-        or not result["choices"]
-    ):
-        raise RouteError(
-            "provider-response",
-            "provider response did not include a completion choice",
-            6,
-        )
-except urllib.error.HTTPError as error:
-    body = error.read(16384)
-    if error.code in {401, 403}:
-        failure = RouteError(
-            "authentication",
-            f"provider rejected the credential (HTTP {error.code})",
-            4,
-        )
-    elif error.code in {400, 404} and response_mentions_model(body):
-        failure = RouteError(
-            "model-access",
-            f"configured model is unavailable or unauthorized (HTTP {error.code})",
-            5,
-        )
-    elif error.code == 404:
-        failure = RouteError(
-            "endpoint",
-            "OpenAI-compatible chat completions route was not found (HTTP 404)",
-            3,
-        )
-    elif error.code in {408, 409, 425, 429} or error.code >= 500:
-        failure = RouteError(
-            "provider-availability",
-            f"provider could not serve the preflight request (HTTP {error.code})",
-            6,
-        )
-    else:
-        failure = RouteError(
-            "provider-response",
-            f"provider rejected the preflight request (HTTP {error.code})",
-            6,
-        )
-    print(failure, file=sys.stderr)
-    raise SystemExit(failure.exit_code)
-except (TimeoutError, socket.timeout):
-    print(
-        f"Route preflight failed (timeout): provider did not respond within {timeout:g} seconds",
-        file=sys.stderr,
-    )
-    raise SystemExit(7)
-except urllib.error.URLError as error:
-    if isinstance(error.reason, (TimeoutError, socket.timeout)):
-        category = "timeout"
-        detail = f"provider did not respond within {timeout:g} seconds"
-        exit_code = 7
-    else:
-        category = "endpoint"
-        detail = "provider endpoint is unreachable or its TLS certificate is invalid"
-        exit_code = 3
-    print(f"Route preflight failed ({category}): {detail}", file=sys.stderr)
-    raise SystemExit(exit_code)
-except (ssl.SSLError, ConnectionError, OSError):
-    print(
-        "Route preflight failed (endpoint): "
-        "provider endpoint is unreachable or its TLS certificate is invalid",
-        file=sys.stderr,
-    )
-    raise SystemExit(3)
-except RouteError as error:
-    print(error, file=sys.stderr)
-    raise SystemExit(error.exit_code)
-
-print(
-    "Route preflight passed: "
-    f"target={target} model={model} endpoint={display_endpoint(endpoint)}"
-)
-PYEOF
-}
-
-cmd_route() {
-  _route_subcommand="${1:-help}"
-  shift 2>/dev/null || true
-
-  case "$_route_subcommand" in
-    check)
-      _route_target="${1:-local}"
-      _route_mode="${2:-}"
-      case "$_route_target" in
-        local)
-          [ -z "$_route_mode" ] || err "Local route check does not accept $_route_mode"
-          _route_endpoint="${TARX_LOCAL_INFERENCE_URL:-http://127.0.0.1:${INFERENCE_PORT}/v1}"
-          _route_model="${TARX_LOCAL_INFERENCE_MODEL:-local}"
-          _route_key="${TARX_LOCAL_INFERENCE_API_KEY:-}"
-          ;;
-        remote)
-          if [ "$_route_mode" = "--offline" ] || [ "${TARX_OFFLINE:-0}" = "1" ]; then
-            log "Remote route preflight skipped: offline mode; remote inference remains disabled."
-            return 0
-          fi
-          [ -z "$_route_mode" ] || err "Unknown remote route option: $_route_mode"
-          [ "${TARX_ALLOW_REMOTE_INFERENCE:-0}" = "1" ] || \
-            err "Remote inference is disabled. Set TARX_ALLOW_REMOTE_INFERENCE=1 to approve this check."
-          _route_endpoint="${TARX_REMOTE_INFERENCE_URL:-}"
-          _route_model="${TARX_REMOTE_INFERENCE_MODEL:-}"
-          _route_key="${TARX_REMOTE_INFERENCE_API_KEY:-}"
-          [ -n "$_route_endpoint" ] || err "TARX_REMOTE_INFERENCE_URL is required."
-          [ -n "$_route_model" ] || err "TARX_REMOTE_INFERENCE_MODEL is required."
-          [ -n "$_route_key" ] || err "TARX_REMOTE_INFERENCE_API_KEY is required."
-          ;;
-        *)
-          err "Unknown route target: $_route_target (available: local, remote)"
-          ;;
-      esac
-
-      run_route_preflight "$_route_target" "$_route_endpoint" "$_route_model"
-      ;;
-    help|--help|-h)
-      log "Usage: tarx route check [local|remote] [--offline]"
-      ;;
-    *)
-      err "Unknown route command: $_route_subcommand (available: check)"
-      ;;
-  esac
-}
-
 # ── doctor ───────────────────────────────────────────────────────────
 
 cmd_doctor() {
@@ -842,7 +763,7 @@ cmd_doctor() {
 
   # Check ports
   log "Services:"
-  for _svc_info in "Inference:${INFERENCE_PORT}" "Mesh:${MESH_PORT}" "Embeddings:${EMBED_PORT}" "Cognitive:${COGNITIVE_PORT}"; do
+  for _svc_info in "Inference(local):${INFERENCE_PORT}" "Mesh(local):${MESH_PORT}" "Embeddings(local):${EMBED_PORT}" "Cognitive(local):${COGNITIVE_PORT}" "Bridge(local):${BRIDGE_PORT}" "Supercomputer:${SUPERCOMPUTER_GATEWAY_PORT}" "SC-model:${SUPERCOMPUTER_MODEL_PORT}"; do
     _name="${_svc_info%%:*}"
     _port="${_svc_info##*:}"
     if check_port "$_port"; then
@@ -877,19 +798,21 @@ cmd_doctor() {
   # Check models
   log ""
   log "Models:"
-  if [ -f "${TARX_MODELS}/${INFERENCE_MODEL}" ]; then
-    _sz=$(wc -c < "${TARX_MODELS}/${INFERENCE_MODEL}" | tr -d ' ')
-    printf '  [OK] Inference: %s (%s MB, alias %s)\n' "$INFERENCE_MODEL" "$((_sz / 1048576))" "$INFERENCE_ALIAS"
+  _inference_path="$(find_model_file "${TARX_INFERENCE_MODEL:-}" "$INFERENCE_MODEL" "$INFERENCE_MODEL_FALLBACK" || true)"
+  if [ -n "$_inference_path" ]; then
+    _sz=$(wc -c < "$_inference_path" | tr -d ' ')
+    printf '  [OK] Inference: %s (%s MB)\n' "$(basename "$_inference_path")" "$((_sz / 1048576))"
   else
-    printf '  [!!] Inference model missing: %s\n' "${TARX_MODELS}/${INFERENCE_MODEL}"
+    printf '  [!!] Inference model missing in %s or %s\n' "$TARX_MODELS" "$TARX_HOME_MODELS"
     _issues=$((_issues + 1))
   fi
 
-  if [ -f "${TARX_MODELS}/${EMBED_MODEL}" ]; then
-    _sz=$(wc -c < "${TARX_MODELS}/${EMBED_MODEL}" | tr -d ' ')
-    printf '  [OK] Embedding: %s (%s MB)\n' "$EMBED_MODEL" "$((_sz / 1048576))"
+  _embed_path="$(find_model_file "${TARX_EMBED_MODEL:-}" "$EMBED_MODEL" || true)"
+  if [ -n "$_embed_path" ]; then
+    _sz=$(wc -c < "$_embed_path" | tr -d ' ')
+    printf '  [OK] Embedding: %s (%s MB)\n' "$(basename "$_embed_path")" "$((_sz / 1048576))"
   else
-    printf '  [!!] Embedding model missing: %s\n' "${TARX_MODELS}/${EMBED_MODEL}"
+    printf '  [!!] Embedding model missing in %s or %s\n' "$TARX_MODELS" "$TARX_HOME_MODELS"
     _issues=$((_issues + 1))
   fi
 
@@ -925,16 +848,6 @@ cmd_doctor() {
     else
       log "  [--] GPU: no NVIDIA GPU detected (CPU inference only)"
     fi
-  fi
-
-  # Check for Ollama conflicts
-  log ""
-  log "Conflicts:"
-  if pgrep -x ollama >/dev/null 2>&1; then
-    log "  [!!] Ollama is running — may conflict with ports 11434-11437"
-    _issues=$((_issues + 1))
-  else
-    log "  [OK] No Ollama process detected"
   fi
 
   # llama-server binary
@@ -1004,10 +917,6 @@ cmd_tray() {
 # Detect config file path for each AI client
 _mcp_config_path() {
   _client="$1"
-  if [ -n "${TARX_MCP_CONFIG_DIR:-}" ]; then
-    echo "${TARX_MCP_CONFIG_DIR}/${_client}.json"
-    return
-  fi
   case "$_client" in
     claude)
       # Claude Desktop (macOS)
@@ -1025,48 +934,33 @@ _mcp_config_path() {
       echo "$HOME/.cursor/mcp.json"
       ;;
     vscode)
-      if [ "$_os" = "Darwin" ]; then
-        echo "$HOME/Library/Application Support/Code/User/mcp.json"
-      else
-        echo "${XDG_CONFIG_HOME:-$HOME/.config}/Code/User/mcp.json"
-      fi
+      echo "$HOME/.vscode/mcp.json"
       ;;
   esac
 }
 
-# MCP clients do not yet share a standard configuration envelope.
-_mcp_root_key() {
-  case "$1" in
-    vscode) echo "servers" ;;
-    *)      echo "mcpServers" ;;
-  esac
-}
-
-# Public TARX MCP server definitions for manual installation.
+# TARX MCP server definitions — NEVER include "type" field
 _mcp_tarx_servers_json() {
-  _target="$1"
   _tarx_home="${TARX_HOME:-$HOME/.tarx}"
-  if [ "$_target" = "vscode" ]; then
-    _remote_type='"type": "http",'
-    _local_type='"type": "stdio",'
-  else
-    _remote_type=""
-    _local_type=""
-  fi
   cat << SERVERSEOF
 {
     "tarx": {
-      ${_remote_type}
       "url": "https://mcp.tarx.com/mcp"
     },
     "tarx-core": {
-      ${_local_type}
       "command": "node",
       "args": ["${_tarx_home}/servers/tarx-core/dist/server.js"],
       "env": {
-        "TARX_INFERENCE_URL": "http://localhost:11551",
+        "TARX_INFERENCE_URL": "http://localhost:11435",
         "TARX_EMBEDDING_URL": "http://localhost:11437",
         "TARX_MESH_URL": "http://localhost:11436"
+      }
+    },
+    "tarx-ops": {
+      "command": "node",
+      "args": ["${_tarx_home}/servers/tarx-ops/dist/server.js"],
+      "env": {
+        "TARX_CREATOR_KEY": "tarx-creator-2025"
       }
     }
   }
@@ -1086,14 +980,12 @@ cmd_mcp() {
 
       _config_file=""
       _client_name=""
-      _root_key=""
       case "$_target" in
         claude)
           _config_file="$(_mcp_config_path claude)"
           _client_name="Claude Desktop"
           ;;
         claude-code|cc)
-          _target="claude-code"
           _config_file="$(_mcp_config_path claude-code)"
           _client_name="Claude Code"
           ;;
@@ -1102,7 +994,6 @@ cmd_mcp() {
           _client_name="Cursor"
           ;;
         vscode|code)
-          _target="vscode"
           _config_file="$(_mcp_config_path vscode)"
           _client_name="VS Code"
           ;;
@@ -1110,15 +1001,21 @@ cmd_mcp() {
           err "Unknown target: $_target (available: claude, claude-code, cursor, vscode)"
           ;;
       esac
-      _root_key="$(_mcp_root_key "$_target")"
 
       if [ -z "$_config_file" ]; then
         err "Could not determine config path for $_target"
       fi
 
-      if [ "$_target" = "vscode" ] && [ -f "$HOME/.vscode/mcp.json" ]; then
-        warn "Legacy TARX VS Code config found at $HOME/.vscode/mcp.json"
-        warn "VS Code's user config now lives at $_config_file"
+      # Check if already configured
+      if [ -f "$_config_file" ] && grep -q '"tarx"' "$_config_file" 2>/dev/null; then
+        # Validate no "type" fields leaked into existing config
+        if grep -q '"type"' "$_config_file" 2>/dev/null; then
+          log "  TARX found in $_config_file but has stale 'type' fields."
+          log "  Cleaning..."
+        else
+          log "  TARX already configured in $_config_file"
+          return
+        fi
       fi
 
       # Require python3 for safe JSON merge
@@ -1127,7 +1024,9 @@ cmd_mcp() {
         log ""
         log "  Add this manually to $_config_file:"
         log ""
-        printf '  {\n    "%s": %s\n  }\n' "$_root_key" "$(_mcp_tarx_servers_json "$_target")"
+        printf '  {\n    "mcpServers": %s\n  }\n' "$(_mcp_tarx_servers_json)"
+        log ""
+        log "  IMPORTANT: Do NOT include a \"type\" field on any server."
         return
       fi
 
@@ -1139,13 +1038,11 @@ cmd_mcp() {
         cp "$_config_file" "${_config_file}.bak" 2>/dev/null || true
       fi
 
-      # Merge using the client-specific envelope without touching other entries.
+      # Merge using python3 — NEVER writes "type" field
       python3 << PYEOF
 import json, sys, os
 
 config_path = "$_config_file"
-target = "$_target"
-root_key = "$_root_key"
 
 # Read existing config or start fresh
 config = {}
@@ -1153,20 +1050,14 @@ if os.path.exists(config_path):
     try:
         with open(config_path, 'r') as f:
             config = json.load(f)
-    except (json.JSONDecodeError, ValueError) as exc:
-        print(f"  ERROR: Existing config is not valid JSON: {exc}", file=sys.stderr)
-        print(f"  Original preserved at {config_path}.bak", file=sys.stderr)
-        sys.exit(1)
+    except (json.JSONDecodeError, ValueError):
+        config = {}
 
-if root_key not in config:
-    config[root_key] = {}
-if not isinstance(config[root_key], dict):
-    print(f"  ERROR: Existing {root_key} value is not an object.", file=sys.stderr)
-    sys.exit(1)
+if 'mcpServers' not in config:
+    config['mcpServers'] = {}
 
-# VS Code requires a servers envelope and explicit transport types. Claude and
-# Cursor use an mcpServers envelope; local stdio entries need no type field.
-tarx_home = os.path.expanduser(os.environ.get("TARX_HOME", "~/.tarx"))
+# TARX servers — NEVER include "type" field
+tarx_home = os.path.expanduser("~/.tarx")
 tarx_servers = {
     "tarx": {
         "url": "https://mcp.tarx.com/mcp"
@@ -1175,44 +1066,50 @@ tarx_servers = {
         "command": "node",
         "args": [os.path.join(tarx_home, "servers/tarx-core/dist/server.js")],
         "env": {
-            "TARX_INFERENCE_URL": "http://localhost:11551",
+            "TARX_INFERENCE_URL": "http://localhost:11435",
             "TARX_EMBEDDING_URL": "http://localhost:11437",
             "TARX_MESH_URL": "http://localhost:11436"
         }
+    },
+    "tarx-ops": {
+        "command": "node",
+        "args": [os.path.join(tarx_home, "servers/tarx-ops/dist/server.js")],
+        "env": {
+            "TARX_CREATOR_KEY": "tarx-creator-2025"
+        }
     }
 }
-if target == "vscode":
-    tarx_servers["tarx"]["type"] = "http"
-    tarx_servers["tarx-core"]["type"] = "stdio"
 
 # Merge — add or replace TARX servers, preserve everything else
 for name, server_config in tarx_servers.items():
-    config[root_key][name] = server_config
+    config['mcpServers'][name] = server_config
+
+# Strip any "type" fields from ALL servers (including non-TARX ones)
+for name, server in config['mcpServers'].items():
+    if isinstance(server, dict) and 'type' in server:
+        del server['type']
 
 # Write
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
     f.write('\n')
 
-# Validate the client-specific envelope and TARX entries.
+# Validate — re-read and check no "type" fields
 with open(config_path, 'r') as f:
     validated = json.load(f)
 
-valid_root = validated.get(root_key, {})
-valid = (
-    isinstance(valid_root, dict)
-    and all(isinstance(valid_root.get(name), dict) for name in tarx_servers)
-)
-if target == "vscode":
-    valid = valid and valid_root["tarx"].get("type") == "http"
-    valid = valid and valid_root["tarx-core"].get("type") == "stdio"
+has_type = False
+for name, server in validated.get('mcpServers', {}).items():
+    if isinstance(server, dict) and 'type' in server:
+        has_type = True
+        break
 
-if not valid:
+if has_type:
     # Restore backup
     bak = config_path + '.bak'
     if os.path.exists(bak):
         os.replace(bak, config_path)
-    print("  ERROR: Validation failed. Config restored from backup.", file=sys.stderr)
+    print("  ERROR: Validation failed — 'type' field detected. Config restored from backup.", file=sys.stderr)
     sys.exit(1)
 
 # Clean up backup on success
@@ -1247,9 +1144,11 @@ PYEOF
           vscode)      _cn="VS Code" ;;
         esac
         if [ -f "$_cf" ] && grep -q '"tarx"' "$_cf" 2>/dev/null; then
-          printf '  [OK] %-16s %s\n' "$_cn" "$_cf"
-        elif [ "$_c" = "vscode" ] && [ -f "$HOME/.vscode/mcp.json" ]; then
-          printf '  [!!] %-16s legacy config at %s (run: tarx mcp add vscode)\n' "$_cn" "$HOME/.vscode/mcp.json"
+          if grep -q '"type"' "$_cf" 2>/dev/null; then
+            printf '  [!!] %-16s %s (has stale "type" fields — run: tarx mcp add %s)\n' "$_cn" "$_cf" "$_c"
+          else
+            printf '  [OK] %-16s %s\n' "$_cn" "$_cf"
+          fi
         else
           printf '  [--] %-16s not configured\n' "$_cn"
         fi
@@ -1267,16 +1166,138 @@ PYEOF
 
 # ── help ─────────────────────────────────────────────────────────────
 
+# ── Always On · Presence (TARX_ALWAYS_ON_PRODUCT_LAW §5.1, §17) ───────
+# Presence is the on-switch and vital signs. Not a chat. This renderer only
+# reports truth from the Presence service. §16: no auto-speak, no second
+# personality, no filling an empty state.
+
+_presence_json() { "$HOME/.tarx/bin/tarx-presence.sh" get 2>/dev/null; }
+
+_presence_field() { # $1 = python expression on dict d
+  _presence_json | python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null
+}
+
+cmd_presence() {
+  _mode=$(_presence_field "d['mode']")
+  _runtime=$(_presence_field "d['runtime']")
+  _health=$(_presence_field "d['watchers']['runtime_health']")
+  _consol=$(_presence_field "d['watchers']['memory_consolidation']")
+  _last=$(_presence_field "d['last_reassessment']")
+  [ -z "${_mode:-}" ] && _mode="asleep"
+  [ -z "${_runtime:-}" ] && _runtime="unknown"
+
+  # Color tokens (spec §3); plain if NO_COLOR/non-tty.
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TARX_PLAIN:-}" != "1" ]; then
+    _dm='\033[2m'; _live='\033[32m'; _wait='\033[33m'; _down='\033[31m'; _rs='\033[0m'
+  else _dm=''; _live=''; _wait=''; _down=''; _rs=''; fi
+
+  # Presence line (spec §5): keyed on runtime, not mode mislabel.
+  case "$_runtime" in
+    up)       _pline="TARX is on." ; _rcol="$_live" ;;
+    starting) _pline="TARX is coming up." ; _rcol="$_wait" ;;
+    down|offline) _pline="TARX is here when you want it." ; _rcol="$_down" ;;
+    *)        _pline="TARX is here when you want it." ; _rcol="$_dm" ;;
+  esac
+
+  _wcol() { case "$1" in live) printf '%b' "$_live";; down) printf '%b' "$_down";; *) printf '%b' "$_dm";; esac; }
+
+  # stale suffix if last reassessment > 15 min old (spec §5)
+  _stale=""
+  if [ -n "${_last:-}" ]; then
+    _age=$(python3 -c "import time,calendar;import sys
+try:
+  t=calendar.timegm(time.strptime('$_last','%Y-%m-%dT%H:%M:%SZ'));print(int(time.time()-t))
+except Exception: print(-1)" 2>/dev/null)
+    [ "${_age:-0}" -gt 900 ] 2>/dev/null && _stale=" ${_dm}· stale${_rs}"
+  fi
+
+  printf '  %s\n' "$_pline"
+  printf '  %bRuntime:%b %b%s%b  ·  %bDoor:%b https://compute.tarx.com (gateway :%s)\n' \
+    "$_dm" "$_rs" "$_rcol" "$_runtime" "$_rs" "$_dm" "$_rs" "$SUPERCOMPUTER_GATEWAY_PORT"
+  printf '  %bWatchers:%b runtime-health %b%s%b · memory-consolidation %b%s%b\n' \
+    "$_dm" "$_rs" "$(_wcol "$_health")" "$_health" "$_rs" "$(_wcol "$_consol")" "$_consol" "$_rs"
+  [ -n "${_last:-}" ] && printf '  %bLast reassessment:%b %s%b\n' "$_dm" "$_rs" "$_last" "$_stale"
+
+  # Action line ONLY when runtime is not on (spec §5, §12.4).
+  case "$_runtime" in
+    up) : ;;  # omit when on
+    *)  printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs" ;;
+  esac
+}
+
+cmd_arm() {   # user intent only — explicit arming per §9
+  "$HOME/.tarx/bin/tarx-presence.sh" set-mode "$1" >/dev/null 2>&1 || true
+  cmd_presence
+}
+
+print_logo() {
+  # Spec v1.1 landing mark. Cyan mark only (not bold). Plain/non-tty/NO_COLOR
+  # drop to a single sigil line. Austin stays on the sigil.
+  _plain=0
+  [ -n "${NO_COLOR:-}" ] && _plain=1
+  [ "${TARX_PLAIN:-}" = "1" ] && _plain=1
+  [ -t 1 ] || _plain=1
+  case " $* " in *" --plain "*) _plain=1 ;; esac
+
+  if [ "$_plain" = "1" ]; then
+    printf 'TARX  ·  FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.\n\n'
+    return
+  fi
+
+  _cy='\033[36m'; _dm='\033[2m'; _rs='\033[0m'
+  printf '%b' "$_cy"
+  cat <<'ART'
+
+        *****      ******      *****
+       *******     ******     *******
+      ********    ********    ********
+      *********   ********    ********
+     **********  **********  **********
+     ***** ***** ********** ***** *****
+     ***** **********  ********** ******
+    *****  **********  **********  *****
+      **    *********  *********
+            ********    ********
+             ******      ******
+****          ****        ****          ****
+****                                    ****
+*****                                  *****
+ *****                                *****
+  ******                            ******
+    ******                        ******
+     *******                    *******
+       **********           *********
+          ************************
+              ****************
+ART
+  printf '%b' "$_rs"
+  printf '%b              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.%b\n\n' "$_dm" "$_rs"
+}
+
 cmd_help() {
+  print_logo
+
+  # Always On · Presence (the on-switch, not a chat). §5.1 / §17.
+  cmd_presence
+  printf '\n'
+
   cat <<'USAGE'
 TARX — Local AI Engine
 
 Usage: tarx <command> [options]
 
 Commands:
+  on                Turn TARX on (arm Always On presence)
+  off               Set TARX to Asleep (here when you want it)
+  dnd               Armed, Do Not Disturb
+  presence          Show Always On presence and vital signs
+  flywheel          Watch the live build-loop activity feed (tail|stats)
+  code              TARX Code — local-first coding agent
+  code "prompt"     One-shot coding task
   start             Start all services (inference, mesh, embeddings)
   stop              Graceful shutdown of all services
   status            Health check all services
+  chat              Talk to TARX (interactive · Supercomputer door)
   chat "prompt"     Quick inference via local model
   embed <file>      Chunk and embed file into RAG store
   search "query"    Semantic search across embedded files
@@ -1287,9 +1308,6 @@ Commands:
   mcp add cursor    Connect TARX to Cursor
   mcp add vscode    Connect TARX to VS Code
   mcp status        Check MCP config across all clients
-  route check local Verify the local OpenAI-compatible inference route
-  route check remote
-                    Verify an explicitly approved remote inference route
   spaces list       List project spaces
   spaces create     Create a new project space
   update            Update daemon, CLI, and MCP servers in-place
@@ -1302,10 +1320,15 @@ Commands:
   help              Show this help
 
 Ports:
-  11551  TARX-TRON inference (Nemotron 4B)
-  11436  Mesh network
-  11437  Embeddings (nomic-embed)
-  11438  Cognitive engine
+  Supercomputer door (public via https://compute.tarx.com):
+    11450  Supercomputer gateway (OpenAI-compatible door)
+    11445  Supercomputer base model (tarx-brain-qwen-27b)
+  Local-only (loopback, not the Supercomputer door):
+    11435  Mind (local inference)
+    11436  Mesh (local)
+    11437  Embeddings (local)
+    11438  Cognitive engine (local)
+    11440  Bridge (local)
 
 Docs: https://tarx.com/docs
 USAGE
@@ -1313,19 +1336,25 @@ USAGE
 
 # ── Main dispatch ────────────────────────────────────────────────────
 
-_cmd="${1:-help}"
+_cmd="${1:-__live__}"
 shift 2>/dev/null || true
 
 case "$_cmd" in
+  code)      exec "$HOME/.tarx/bin/tarx-code" "$@" ;;
+  on)        cmd_arm armed ;;
+  off)       cmd_arm asleep ;;
+  dnd)       cmd_arm dnd ;;
+  presence)  cmd_presence ;;
+  flywheel)  shift 2>/dev/null||true; "$HOME/.tarx/bin/tarx-flywheel.sh" "${1:-tail}" ;;
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   status)    cmd_status ;;
+  __live__)  print_logo; cmd_presence; printf '\n'; cmd_chat ;;
   chat)      cmd_chat "$@" ;;
   embed)     cmd_embed "$@" ;;
   search)    cmd_search "$@" ;;
   mesh)      cmd_mesh "$@" ;;
   mcp)       cmd_mcp "$@" ;;
-  route)     cmd_route "$@" ;;
   spaces)    cmd_spaces "$@" ;;
   update)    cmd_update "$@" ;;
   uninstall) cmd_uninstall ;;

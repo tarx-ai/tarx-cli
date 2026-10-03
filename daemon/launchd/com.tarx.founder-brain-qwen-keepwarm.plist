@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tarx.founder-brain-qwen-keepwarm</string>
+  <key>NSHumanReadableDescription</key>
+  <string>TARX keep-warm for base GGUF tarx-brain-qwen-27b (:11445). Every 5 min sends one 1-token completion to keep first-token latency hot. Does NOT own the server (that is com.tarx.founder-brain-qwen).</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/master/tarx-brain/scripts/keep-warm-qwen.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/master</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/master/.tarx/logs/qwen-keep-warm.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/master/.tarx/logs/qwen-keep-warm.launchd.err.log</string>
+</dict>
+</plist>
