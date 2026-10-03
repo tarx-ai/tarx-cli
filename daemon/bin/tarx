@@ -283,17 +283,30 @@ cmd_chat() {
   # One request to the door. $1 = JSON messages array. Prints assistant text.
   _chat_once() {
     _msgs="$1"; _key="$2"
-    _pl="{\"model\":\"tarx/t-supercomputer\",\"messages\":${_msgs},\"stream\":false,\"max_tokens\":1024}"
-    _resp=$(curl -sf -m 180 -X POST "${_gw}/v1/chat/completions" \
+    # Stream SSE live to the terminal (/dev/tty) as tokens arrive; return the full
+    # assembled text on stdout so the caller can store it in history.
+    _pl=$(MSGS="$_msgs" python3 -c "import os,json;print(json.dumps({'model':'tarx/t-supercomputer','messages':json.loads(os.environ['MSGS']),'stream':True,'max_tokens':1024}))" 2>/dev/null)
+    curl -sf -N -m 240 -X POST "${_gw}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${_key}" \
-      -d "$_pl" 2>/dev/null) || { echo ""; return 1; }
-    printf '%s' "$_resp" | python3 -c "
+      -d "$_pl" 2>/dev/null | python3 -c "
 import sys,json
-try:
-    r=json.load(sys.stdin); m=r.get('choices',[{}])[0].get('message',{})
-    print(m.get('content') or m.get('reasoning_content') or '')
-except Exception: print('')
+full=[]
+try: tty=open('/dev/tty','w')
+except Exception: tty=None
+for line in sys.stdin:
+    line=line.strip()
+    if not line.startswith('data:'): continue
+    p=line[5:].strip()
+    if p=='[DONE]': break
+    try:
+        d=json.loads(p); delta=d.get('choices',[{}])[0].get('delta',{}).get('content')
+        if delta:
+            if tty: tty.write(delta); tty.flush()
+            full.append(delta)
+    except Exception: pass
+if tty: tty.write('\n\n'); tty.flush()
+sys.stdout.write(''.join(full))   # returned to caller for history
 " 2>/dev/null
   }
 
@@ -345,7 +358,6 @@ print(json.dumps(h))
       printf 'tarx › '
       _ans=$(_chat_once "$_hist" "$_key")
       if [ -z "$_ans" ]; then printf '(no response — door may be cold; try again)\n\n'; continue; fi
-      printf '%s\n\n' "$_ans"
       _ajson=$(_esc "$_ans")
       _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'assistant','content':$_ajson});print(json.dumps(h))" 2>/dev/null)
       # Persist conversation (user/assistant only) so the next launch resumes.
