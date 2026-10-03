@@ -283,15 +283,29 @@ cmd_chat() {
   # One request to the door. $1 = JSON messages array. Prints assistant text.
   _chat_once() {
     _msgs="$1"; _key="$2"
-    # Stream SSE live to the terminal (/dev/tty) as tokens arrive; return the full
-    # assembled text on stdout so the caller can store it in history.
+    # Stream SSE live. Show a "thinking" indicator immediately (first token can be
+    # 30–60s on the cold/slow 27B) and clear it the moment real tokens arrive, so a
+    # slow first token never looks like a hang. Returns full text for history.
     _pl=$(MSGS="$_msgs" python3 -c "import os,json;print(json.dumps({'model':'tarx/t-supercomputer','messages':json.loads(os.environ['MSGS']),'stream':True,'max_tokens':1024}))" 2>/dev/null)
-    curl -sf -N -m 240 -X POST "${_gw}/v1/chat/completions" \
+
+    # background spinner on the tty until a signal file appears
+    _spin="/tmp/.tarx_spin_$$"; : > "$_spin"
+    (
+      i=0
+      while [ -f "$_spin" ]; do
+        case $((i % 4)) in 0) c='·  ';; 1) c='·· ';; 2) c='···';; 3) c=' ··';; esac
+        printf '\r\033[2m(thinking %s t=%ss)\033[0m' "$c" "$i" > /dev/tty 2>/dev/null
+        i=$((i+1)); sleep 1
+      done
+    ) &
+    _spinpid=$!
+
+    curl -sf -N -m 300 -X POST "${_gw}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${_key}" \
-      -d "$_pl" 2>/dev/null | python3 -c "
-import sys,json
-full=[]
+      -d "$_pl" 2>/dev/null | SPIN="$_spin" python3 -c "
+import sys,json,os
+full=[]; first=True
 try: tty=open('/dev/tty','w')
 except Exception: tty=None
 for line in sys.stdin:
@@ -302,12 +316,19 @@ for line in sys.stdin:
     try:
         d=json.loads(p); delta=d.get('choices',[{}])[0].get('delta',{}).get('content')
         if delta:
+            if first:
+                # stop spinner + clear its line before first token
+                try: os.remove(os.environ['SPIN'])
+                except Exception: pass
+                if tty: tty.write('\r\033[K'); tty.flush()
+                first=False
             if tty: tty.write(delta); tty.flush()
             full.append(delta)
     except Exception: pass
 if tty: tty.write('\n\n'); tty.flush()
-sys.stdout.write(''.join(full))   # returned to caller for history
+sys.stdout.write(''.join(full))
 " 2>/dev/null
+    rm -f "$_spin" 2>/dev/null; kill "$_spinpid" 2>/dev/null; wait "$_spinpid" 2>/dev/null
   }
 
   _esc() { printf '%s' "$1" | python3 -c "import sys,json;print(json.dumps(sys.stdin.read()))" 2>/dev/null; }
