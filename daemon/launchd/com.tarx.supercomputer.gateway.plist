@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tarx.supercomputer.gateway</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/env</string>
+		<string>node</string>
+		<string>--experimental-strip-types</string>
+		<string>/Users/master/Desktop/TARX/Worktrees/supercomputer-n1-s0/scripts/tarx-openai-gateway.ts</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>TARX_GATEWAY_HOST</key>
+		<string>127.0.0.1</string>
+		<key>TARX_GATEWAY_PORT</key>
+		<string>11450</string>
+		<key>TARX_GATEWAY_UPSTREAM</key>
+		<string>http://127.0.0.1:11445</string>
+		<key>TARX_GATEWAY_API_KEY</key>
+		<string>__SET_TARX_GATEWAY_API_KEY_HERE__</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/master/Desktop/TARX/Worktrees/supercomputer-n1-s0</string>
+	<key>StandardOutPath</key>
+	<string>/Users/master/.tarx/logs/tarx-supercomputer-gateway.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/master/.tarx/logs/tarx-supercomputer-gateway.launchd.err.log</string>
+</dict>
+</plist>

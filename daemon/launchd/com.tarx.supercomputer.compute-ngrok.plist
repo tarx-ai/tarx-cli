@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tarx.supercomputer.compute-ngrok</string>
+  <key>NSHumanReadableDescription</key>
+  <string>TARX compute.tarx.com ngrok ingress — tunnels the OpenAI gateway (:11450) to the reserved ngrok domain. OpenRouter-facing inference ingress.</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/ngrok</string>
+    <string>http</string>
+    <string>11450</string>
+    <string>--url=https://compute.tarx.com</string>
+    <string>--log=stdout</string>
+    <string>--log-format=term</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/master</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/master/.tarx/logs/compute-ngrok.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/master/.tarx/logs/compute-ngrok.launchd.err.log</string>
+</dict>
+</plist>
