@@ -307,12 +307,35 @@ except Exception: print('')
     _key=$(_chat_key)
     [ -z "$_key" ] && err "Supercomputer door needs its key (TARX_GATEWAY_API_KEY) to engage."
     printf 'TARX · Supercomputer. Type to talk. "exit" or Ctrl-C to leave.\n\n'
-    # Seed the moment: situational system prompt (editable, part of the prompt cycle).
     _spf="$HOME/.tarx/always-on/session-prompt.md"
-    if [ -r "$_spf" ]; then
-      _hist=$(python3 -c "import json,sys;print(json.dumps([{'role':'system','content':open('$_spf').read()}]))" 2>/dev/null)
-    fi
+    _histfile="$HOME/.tarx/always-on/session-history.json"
+    _livectx=$("$HOME/.tarx/bin/tarx-live-context.sh" 2>/dev/null)
+
+    # Build system message = static moment + LIVE state (current reality).
+    _sysmsg=$(SPF="$_spf" LCTX="$_livectx" python3 -c "
+import json,os
+base=''
+try: base=open(os.environ['SPF']).read()
+except Exception: base='You are TARX.'
+print(json.dumps(base + '\n\n' + os.environ.get('LCTX','')))
+" 2>/dev/null)
+
+    # Resume recent conversation across launches (last ~12 turns), else fresh.
+    _hist=$(SYS="$_sysmsg" HF="$_histfile" python3 -c "
+import json,os
+sys_content=json.loads(os.environ['SYS'])
+h=[{'role':'system','content':sys_content}]
+hf=os.environ['HF']
+try:
+    prior=json.load(open(hf))
+    prior=[m for m in prior if m.get('role') in ('user','assistant')][-12:]
+    h+=prior
+except Exception: pass
+print(json.dumps(h))
+" 2>/dev/null)
     [ -z "${_hist:-}" ] && _hist="[]"
+    [ -n "$_livectx" ] && printf '%s\n\n' "— grounded in live state —"
+
     while :; do
       printf 'you › '
       if ! IFS= read -r _line; then printf '\n'; break; fi
@@ -325,6 +348,13 @@ except Exception: print('')
       printf '%s\n\n' "$_ans"
       _ajson=$(_esc "$_ans")
       _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'assistant','content':$_ajson});print(json.dumps(h))" 2>/dev/null)
+      # Persist conversation (user/assistant only) so the next launch resumes.
+      printf '%s' "$_hist" | python3 -c "
+import sys,json
+h=json.load(sys.stdin)
+keep=[m for m in h if m.get('role') in ('user','assistant')][-40:]
+json.dump(keep, open('$_histfile','w'))
+" 2>/dev/null
     done
     return 0
   fi
