@@ -34,6 +34,15 @@ open(sys.argv[1],"a").write(json.dumps(rec)+"\n")
 mark = "✓" if rec["status"]=="ok" else "✗"
 print(f'  {mark} {rec["ts"]}  {rec["stage"]:<10} {rec["latency_ms"]:>6}ms  {json.dumps(rec["detail"])[:80]}')
 PY
+  # Ship to Datadog (us5), non-blocking, key from file — never printed.
+  _ddkf="$HOME/.tarx/.dd_api_key"; _ddsite="${DD_SITE:-us5.datadoghq.com}"
+  if [ -r "$_ddkf" ]; then
+    _k=$(cat "$_ddkf"); _now=$(date +%s)
+    _tags="[\"stage:$stage\",\"status:$status\",\"env:prod\",\"service:tarx-flywheel\"]"
+    ( curl -s -o /dev/null -m 5 -X POST "https://api.$_ddsite/api/v1/series" \
+        -H "DD-API-KEY: $_k" -H "content-type: application/json" \
+        -d "{\"series\":[{\"metric\":\"tarx.flywheel.latency_ms\",\"points\":[[$_now,$latency]],\"type\":\"gauge\",\"tags\":$_tags},{\"metric\":\"tarx.flywheel.event\",\"points\":[[$_now,1]],\"type\":\"count\",\"tags\":$_tags}]}" 2>/dev/null & ) 
+  fi
 }
 
 cmd_tail() {
