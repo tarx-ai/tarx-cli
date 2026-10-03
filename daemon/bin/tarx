@@ -1184,25 +1184,45 @@ cmd_presence() {
   _consol=$(_presence_field "d['watchers']['memory_consolidation']")
   _last=$(_presence_field "d['last_reassessment']")
   [ -z "${_mode:-}" ] && _mode="asleep"
+  [ -z "${_runtime:-}" ] && _runtime="unknown"
 
-  # §17 canonical copy, keyed on mode.
-  case "$_mode" in
-    armed) _line="TARX is on." ;;
-    dnd)   _line="TARX is on · Do Not Disturb." ;;
-    *)     _line="TARX is here when you want it." ;;   # asleep
+  # Color tokens (spec §3); plain if NO_COLOR/non-tty.
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TARX_PLAIN:-}" != "1" ]; then
+    _dm='\033[2m'; _live='\033[32m'; _wait='\033[33m'; _down='\033[31m'; _rs='\033[0m'
+  else _dm=''; _live=''; _wait=''; _down=''; _rs=''; fi
+
+  # Presence line (spec §5): keyed on runtime, not mode mislabel.
+  case "$_runtime" in
+    up)       _pline="TARX is on." ; _rcol="$_live" ;;
+    starting) _pline="TARX is coming up." ; _rcol="$_wait" ;;
+    down|offline) _pline="TARX is here when you want it." ; _rcol="$_down" ;;
+    *)        _pline="TARX is here when you want it." ; _rcol="$_dm" ;;
   esac
 
-  printf '  %s\n' "$_line"
-  printf '  Runtime: %s   ·   Door: https://compute.tarx.com (gateway :%s)\n' "$_runtime" "$SUPERCOMPUTER_GATEWAY_PORT"
-  printf '  Watchers: runtime-health %s · memory-consolidation %s\n' "$_health" "$_consol"
-  [ -n "${_last:-}" ] && printf '  Last reassessment: %s\n' "$_last"
+  _wcol() { case "$1" in live) printf '%b' "$_live";; down) printf '%b' "$_down";; *) printf '%b' "$_dm";; esac; }
 
-  # §17 empty-presence line is the product working — only when armed and quiet.
-  if [ "$_mode" = "armed" ] || [ "$_mode" = "dnd" ]; then
-    printf '  Nothing needs you. TARX is watching what you asked it to watch.\n'
-  else
-    printf '  Turn TARX on:  tarx on\n'
+  # stale suffix if last reassessment > 15 min old (spec §5)
+  _stale=""
+  if [ -n "${_last:-}" ]; then
+    _age=$(python3 -c "import time,calendar;import sys
+try:
+  t=calendar.timegm(time.strptime('$_last','%Y-%m-%dT%H:%M:%SZ'));print(int(time.time()-t))
+except Exception: print(-1)" 2>/dev/null)
+    [ "${_age:-0}" -gt 900 ] 2>/dev/null && _stale=" ${_dm}· stale${_rs}"
   fi
+
+  printf '  %s\n' "$_pline"
+  printf '  %bRuntime:%b %b%s%b  ·  %bDoor:%b https://compute.tarx.com (gateway :%s)\n' \
+    "$_dm" "$_rs" "$_rcol" "$_runtime" "$_rs" "$_dm" "$_rs" "$SUPERCOMPUTER_GATEWAY_PORT"
+  printf '  %bWatchers:%b runtime-health %b%s%b · memory-consolidation %b%s%b\n' \
+    "$_dm" "$_rs" "$(_wcol "$_health")" "$_health" "$_rs" "$(_wcol "$_consol")" "$_consol" "$_rs"
+  [ -n "${_last:-}" ] && printf '  %bLast reassessment:%b %s%b\n' "$_dm" "$_rs" "$_last" "$_stale"
+
+  # Action line ONLY when runtime is not on (spec §5, §12.4).
+  case "$_runtime" in
+    up) : ;;  # omit when on
+    *)  printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs" ;;
+  esac
 }
 
 cmd_arm() {   # user intent only — explicit arming per §9
@@ -1211,9 +1231,21 @@ cmd_arm() {   # user intent only — explicit arming per §9
 }
 
 print_logo() {
-  # Cyan brand mark + dim tagline. Degrades to plain if no color terminal.
-  if [ -t 1 ]; then _c='\033[38;5;45m'; _d='\033[2m'; _r='\033[0m'; else _c=''; _d=''; _r=''; fi
-  printf '%b' "$_c"
+  # Spec v1.1 landing mark. Cyan mark only (not bold). Plain/non-tty/NO_COLOR
+  # drop to a single sigil line. Austin stays on the sigil.
+  _plain=0
+  [ -n "${NO_COLOR:-}" ] && _plain=1
+  [ "${TARX_PLAIN:-}" = "1" ] && _plain=1
+  [ -t 1 ] || _plain=1
+  case " $* " in *" --plain "*) _plain=1 ;; esac
+
+  if [ "$_plain" = "1" ]; then
+    printf 'TARX  ·  FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.\n\n'
+    return
+  fi
+
+  _cy='\033[36m'; _dm='\033[2m'; _rs='\033[0m'
+  printf '%b' "$_cy"
   cat <<'ART'
 
         *****      ******      *****
@@ -1238,8 +1270,8 @@ print_logo() {
           ************************
               ****************
 ART
-  printf '%b' "$_r"
-  printf '%b              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.%b\n\n' "$_d" "$_r"
+  printf '%b' "$_rs"
+  printf '%b              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.%b\n\n' "$_dm" "$_rs"
 }
 
 cmd_help() {
