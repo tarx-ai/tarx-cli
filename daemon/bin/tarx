@@ -1259,6 +1259,7 @@ Commands:
   off               Set TARX to Asleep (here when you want it)
   dnd               Armed, Do Not Disturb
   presence          Show Always On presence and vital signs
+  flywheel          Watch the live build-loop activity feed (tail|stats)
   code              TARX Code — local-first coding agent
   code "prompt"     One-shot coding task
   start             Start all services (inference, mesh, embeddings)
@@ -1312,6 +1313,7 @@ case "$_cmd" in
   off)       cmd_arm asleep ;;
   dnd)       cmd_arm dnd ;;
   presence)  cmd_presence ;;
+  flywheel)  shift 2>/dev/null||true; "$HOME/.tarx/bin/tarx-flywheel.sh" "${1:-tail}" ;;
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   status)    cmd_status ;;
