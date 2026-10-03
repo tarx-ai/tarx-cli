@@ -340,7 +340,9 @@ sys.stdout.write(''.join(full))
     fi
     _key=$(_chat_key)
     [ -z "$_key" ] && err "Supercomputer door needs its key (TARX_GATEWAY_API_KEY) to engage."
-    printf 'TARX · Supercomputer. Type to talk. "exit" or Ctrl-C to leave.\n\n'
+    if [ -t 1 ]; then _dim='\033[2m'; _rst='\033[0m'; else _dim=''; _rst=''; fi
+    printf '%b────────────────────────────────────────────────────────%b\n' "$_dim" "$_rst"
+    printf '%bTARX · Supercomputer · talk below · "exit" to leave%b\n\n' "$_dim" "$_rst"
     _spf="$HOME/.tarx/always-on/session-prompt.md"
     _histfile="$HOME/.tarx/always-on/session-history.json"
     _livectx=$("$HOME/.tarx/bin/tarx-live-context.sh" 2>/dev/null)
@@ -368,7 +370,6 @@ except Exception: pass
 print(json.dumps(h))
 " 2>/dev/null)
     [ -z "${_hist:-}" ] && _hist="[]"
-    [ -n "$_livectx" ] && printf '%s\n\n' "— grounded in live state —"
 
     while :; do
       printf 'you › '
@@ -1209,7 +1210,10 @@ cmd_arm() {   # user intent only — explicit arming per §9
   cmd_presence
 }
 
-cmd_help() {
+print_logo() {
+  # Cyan brand mark + dim tagline. Degrades to plain if no color terminal.
+  if [ -t 1 ]; then _c='\033[38;5;45m'; _d='\033[2m'; _r='\033[0m'; else _c=''; _d=''; _r=''; fi
+  printf '%b' "$_c"
   cat <<'ART'
 
         *****      ******      *****
@@ -1233,10 +1237,13 @@ cmd_help() {
        **********           *********
           ************************
               ****************
-
-              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.
-
 ART
+  printf '%b' "$_r"
+  printf '%b              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.%b\n\n' "$_d" "$_r"
+}
+
+cmd_help() {
+  print_logo
 
   # Always On · Presence (the on-switch, not a chat). §5.1 / §17.
   cmd_presence
@@ -1308,7 +1315,7 @@ case "$_cmd" in
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   status)    cmd_status ;;
-  __live__)  cmd_presence; printf '\n'; cmd_chat ;;
+  __live__)  print_logo; cmd_presence; printf '\n'; cmd_chat ;;
   chat)      cmd_chat "$@" ;;
   embed)     cmd_embed "$@" ;;
   search)    cmd_search "$@" ;;

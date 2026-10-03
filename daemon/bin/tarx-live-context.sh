@@ -32,6 +32,8 @@ printf -- '- Public door compute.tarx.com: %s\n' "$_pub"
 
 # What is already DONE (so TARX does not re-propose shipped work)
 printf -- '- Already shipped (do NOT re-propose as new): compute.tarx.com door live+durable (launchd KeepAlive + ngrok); self-heal watchdog LIVE (60s, watches gateway+public door); keep-warm LIVE (5-min, cold-start cliff closed); gateway auth-forward committed (4844bb0); build door fix committed (2d49807); daemon CLI pushed to tarx-cli PR #6.\n'
+printf -- '- Also shipped: TWO-TIER FAST PLANNING (a328a97) — plan drafts route to the RESIDENT fast model tarx-computer (:11435) via TARX_PLAN_FAST_BASE; measured 74s->29s. No new model required.\n'
+printf -- '- HARD CONSTRAINT: disk is 99%% full (~7.5GB free). Do NOT propose downloading new models (no 7B/14B, no Qwen2.5-Coder, no HuggingFace pulls). Latency is now dominated by prompt size -> the fix is the context packer (8k window), NOT a new model.\n'
 
 # Known open gaps (real, from packets)
 printf -- '- Open gaps (candidates for next work): build/ask context packer exceeds 8k window on big repos; plan latency ~74s on cold 27B (needs warmed/smaller planning route); Operating State object + Dispatch loop + Quiet Log surface not built yet; web /agent skin of Presence not built; Supercomputer commits still local (await founder identity to push).\n'
