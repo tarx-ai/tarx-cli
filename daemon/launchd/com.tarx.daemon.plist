@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+	</dict>
+	<key>Label</key>
+	<string>com.tarx.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/master/.tarx/bin/tarxd-launchd-wrapper.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/master/.tarx/logs/daemon-error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/master/.tarx/logs/daemon.log</string>
+</dict>
+</plist>
