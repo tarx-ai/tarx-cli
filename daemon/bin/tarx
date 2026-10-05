@@ -781,18 +781,53 @@ cmd_doctor() {
     fi
   done
 
-  # Check disk space
+  # ── Disk space gate (P0-CLI-DISK-GATE-001) ──
+  # HARD FAIL below DISK_MIN_GB free. The old <6 GB warning was a false green:
+  # multi-agent + Bridge WAL growth froze the machine at ~7 GB free. Memory plane
+  # health = product health, so we enforce a 40 GB operating floor.
   log ""
   log "Disk:"
+  DISK_MIN_GB="${TARX_DISK_MIN_GB:-40}"
   _avail=$(df -h "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
-  log "  Available: ${_avail}"
-  # Rough check: need ~6 GB for models
-  _avail_bytes=$(df "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
-  if [ -n "$_avail_bytes" ] && [ "$_avail_bytes" -lt 6000000 ] 2>/dev/null; then
-    log "  [!!] Less than 6 GB free — models need ~4.5 GB"
+  # df -k = 1 KiB blocks (portable, unambiguous). Column 4 = available.
+  _avail_kb=$(df -k "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
+  _avail_gb=0
+  if [ -n "$_avail_kb" ]; then _avail_gb=$(( _avail_kb / 1048576 )); fi
+  log "  Available: ${_avail} (${_avail_gb} GB)"
+  _min_kb=$(( DISK_MIN_GB * 1048576 ))
+  if [ -n "$_avail_kb" ] && [ "$_avail_kb" -lt "$_min_kb" ] 2>/dev/null; then
+    log "  [FAIL] Less than ${DISK_MIN_GB} GB free — refuse heavy work (crash risk)."
     _issues=$((_issues + 1))
   else
-    log "  [OK] Sufficient space"
+    log "  [OK] Sufficient space (floor ${DISK_MIN_GB} GB)"
+  fi
+
+  # ── Bridge WAL gate (P0-CLI-DISK-GATE-001) ──
+  # ~/.tarx/tarx.db-wal ballooned 56->61 GB on 2026-10-04 (checkpointed frames
+  # never truncated) and froze the machine. FAIL above WAL_MAX_GB; always report
+  # WAL bytes when the file exists so operators can watch it before it melts.
+  log ""
+  log "Bridge WAL:"
+  WAL_MAX_GB="${TARX_WAL_MAX_GB:-1}"
+  _wal_file="${TARX_HOME}/tarx.db-wal"
+  _wal_failed=0
+  if [ -f "$_wal_file" ]; then
+    _wal_bytes=$(wc -c < "$_wal_file" 2>/dev/null | tr -d ' ')
+    [ -n "$_wal_bytes" ] || _wal_bytes=0
+    _wal_mb=$(( _wal_bytes / 1048576 ))
+    _wal_max_bytes=$(( WAL_MAX_GB * 1073741824 ))
+    log "  File: ${_wal_file}"
+    log "  Size: ${_wal_bytes} bytes (${_wal_mb} MB)"
+    if [ "$_wal_bytes" -gt "$_wal_max_bytes" ] 2>/dev/null; then
+      log "  [FAIL] WAL exceeds ${WAL_MAX_GB} GB — checkpoint/TRUNCATE before more work."
+      log "         Writers must not leave wal_autocheckpoint=0; see Bridge follow-up below."
+      _issues=$((_issues + 1))
+      _wal_failed=1
+    else
+      log "  [OK] WAL under ${WAL_MAX_GB} GB"
+    fi
+  else
+    log "  [--] No WAL file at ${_wal_file} (Bridge idle or checkpointed)"
   fi
 
   # Check models
@@ -865,6 +900,30 @@ cmd_doctor() {
   else
     log "${_issues} issue(s) found."
   fi
+
+  # ── Dual-CLI note (P0-CLI-DISK-GATE-001) ──
+  # Operators routinely try `tarx build` on this PATH binary and hit
+  # "Unknown command: build". Point them at the Node flywheel CLI.
+  log ""
+  log "Note — two TARX CLIs (do not confuse):"
+  log "  • PATH shell CLI (this one), ~/.tarx/bin/tarx v${TARX_VERSION}:"
+  log "      presence / status / doctor / start / stop / mcp. NO 'build'."
+  log "  • Node flywheel CLI, tarx-cli/bin/tarx.mjs:"
+  log "      planning + apply. Plan a task with:"
+  log "      node bin/tarx.mjs build --plan-only --task \"...\""
+
+  if [ "$_wal_failed" -ne 0 ]; then
+    log ""
+    log "Bridge follow-up: a red WAL gate means prod writers left"
+    log "wal_autocheckpoint unhealthy (e.g. 0). Fix belongs in the Bridge DB"
+    log "layer (single-writer + periodic PRAGMA wal_checkpoint(TRUNCATE)),"
+    log "not this CLI — see MEMORY_SUPERINTELLIGENCE_ROADMAP_2026-10-04.md P0 #3."
+  fi
+
+  if [ $_issues -ne 0 ]; then
+    return 1
+  fi
+  return 0
 }
 
 # ── version ──────────────────────────────────────────────────────────
@@ -1360,7 +1419,7 @@ case "$_cmd" in
   uninstall) cmd_uninstall ;;
   version)   cmd_version ;;
   tray)      cmd_tray ;;
-  doctor)    cmd_doctor ;;
+  doctor)    cmd_doctor; exit $? ;;
   help|--help|-h) cmd_help ;;
   *)
     printf 'Unknown command: %s\n\n' "$_cmd" >&2

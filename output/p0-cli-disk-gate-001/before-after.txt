@@ -1,0 +1,199 @@
+=== BEFORE: original disk check block (git show HEAD:daemon/bin/tarx) ===
+  # Check disk space
+  log ""
+  log "Disk:"
+  _avail=$(df -h "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
+  log "  Available: ${_avail}"
+  # Rough check: need ~6 GB for models
+  _avail_bytes=$(df "${HOME}" 2>/dev/null | awk 'NR==2{print $4}')
+  if [ -n "$_avail_bytes" ] && [ "$_avail_bytes" -lt 6000000 ] 2>/dev/null; then
+    log "  [!!] Less than 6 GB free — models need ~4.5 GB"
+    _issues=$((_issues + 1))
+  else
+    log "  [OK] Sufficient space"
+
+=== AFTER: doctor healthy run (exit 0) ===
+TARX Doctor
+═══════════
+
+Services:
+  [OK] Inference(local) port 11435
+  [--] Mesh(local)    port 11436 not running
+  [OK] Embeddings(local) port 11437
+  [OK] Cognitive(local) port 11438
+  [OK] Bridge(local)  port 11440
+  [OK] Supercomputer  port 11450
+  [OK] SC-model       port 11445
+
+Disk:
+  Available: 68Gi (67 GB)
+  [OK] Sufficient space (floor 40 GB)
+
+Bridge WAL:
+  File: /Users/master/.tarx/tarx.db-wal
+  Size: 129297992 bytes (123 MB)
+  [OK] WAL under 1 GB
+
+Models:
+  [OK] Inference: NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf (2705 MB)
+  [OK] Embedding: nomic-embed-text-v1.5.Q4_K_M.gguf (261 MB)
+
+System:
+  [OK] RAM: 32 GB
+  [OK] GPU: Apple M4 (Metal)
+  [OK] llama-server: /opt/homebrew/bin/llama-server
+
+All checks passed.
+
+Note — two TARX CLIs (do not confuse):
+  • PATH shell CLI (this one), ~/.tarx/bin/tarx v1.1.0:
+      presence / status / doctor / start / stop / mcp. NO 'build'.
+  • Node flywheel CLI, tarx-cli/bin/tarx.mjs:
+      planning + apply. Plan a task with:
+      node bin/tarx.mjs build --plan-only --task "..."
+AFTER_HEALTHY_EXIT=0
+
+=== AFTER: simulated DISK FAIL (TARX_DISK_MIN_GB=999999) ===
+TARX Doctor
+═══════════
+
+Services:
+  [OK] Inference(local) port 11435
+  [--] Mesh(local)    port 11436 not running
+  [OK] Embeddings(local) port 11437
+  [OK] Cognitive(local) port 11438
+  [OK] Bridge(local)  port 11440
+  [OK] Supercomputer  port 11450
+  [OK] SC-model       port 11445
+
+Disk:
+  Available: 68Gi (67 GB)
+  [FAIL] Less than 999999 GB free — refuse heavy work (crash risk).
+
+Bridge WAL:
+  File: /Users/master/.tarx/tarx.db-wal
+  Size: 129297992 bytes (123 MB)
+  [OK] WAL under 1 GB
+
+Models:
+  [OK] Inference: NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf (2705 MB)
+  [OK] Embedding: nomic-embed-text-v1.5.Q4_K_M.gguf (261 MB)
+
+System:
+  [OK] RAM: 32 GB
+  [OK] GPU: Apple M4 (Metal)
+  [OK] llama-server: /opt/homebrew/bin/llama-server
+
+1 issue(s) found.
+
+Note — two TARX CLIs (do not confuse):
+  • PATH shell CLI (this one), ~/.tarx/bin/tarx v1.1.0:
+      presence / status / doctor / start / stop / mcp. NO 'build'.
+  • Node flywheel CLI, tarx-cli/bin/tarx.mjs:
+      planning + apply. Plan a task with:
+      node bin/tarx.mjs build --plan-only --task "..."
+
+Bridge follow-up: a red WAL gate means prod writers left
+wal_autocheckpoint unhealthy (e.g. 0). Fix belongs in the Bridge DB
+layer (single-writer + periodic PRAGMA wal_checkpoint(TRUNCATE)),
+not this CLI — see MEMORY_SUPERINTELLIGENCE_ROADMAP_2026-10-04.md P0 #3.
+DISK_FAIL_EXIT=1
+
+=== AFTER: simulated WAL FAIL (TARX_WAL_MAX_GB=0) ===
+TARX Doctor
+═══════════
+
+Services:
+  [OK] Inference(local) port 11435
+  [--] Mesh(local)    port 11436 not running
+  [OK] Embeddings(local) port 11437
+  [OK] Cognitive(local) port 11438
+  [OK] Bridge(local)  port 11440
+  [OK] Supercomputer  port 11450
+  [OK] SC-model       port 11445
+
+Disk:
+  Available: 68Gi (67 GB)
+  [OK] Sufficient space (floor 40 GB)
+
+Bridge WAL:
+  File: /Users/master/.tarx/tarx.db-wal
+  Size: 129297992 bytes (123 MB)
+  [FAIL] WAL exceeds 0 GB — checkpoint/TRUNCATE before more work.
+         Writers must not leave wal_autocheckpoint=0; see Bridge follow-up below.
+
+Models:
+  [OK] Inference: NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf (2705 MB)
+  [OK] Embedding: nomic-embed-text-v1.5.Q4_K_M.gguf (261 MB)
+
+System:
+  [OK] RAM: 32 GB
+  [OK] GPU: Apple M4 (Metal)
+  [OK] llama-server: /opt/homebrew/bin/llama-server
+
+1 issue(s) found.
+
+Note — two TARX CLIs (do not confuse):
+  • PATH shell CLI (this one), ~/.tarx/bin/tarx v1.1.0:
+      presence / status / doctor / start / stop / mcp. NO 'build'.
+  • Node flywheel CLI, tarx-cli/bin/tarx.mjs:
+      planning + apply. Plan a task with:
+      node bin/tarx.mjs build --plan-only --task "..."
+
+Bridge follow-up: a red WAL gate means prod writers left
+wal_autocheckpoint unhealthy (e.g. 0). Fix belongs in the Bridge DB
+layer (single-writer + periodic PRAGMA wal_checkpoint(TRUNCATE)),
+not this CLI — see MEMORY_SUPERINTELLIGENCE_ROADMAP_2026-10-04.md P0 #3.
+WAL_FAIL_EXIT=1
+
+=== node bin/tarx.mjs build --help ===
+
+        *****      ******      *****        
+       *******     ******     *******       
+      ********    ********    ********      
+      *********   ********    ********      
+     **********  **********  **********     
+     ***** ***** ********** ***** *****     
+     ***** **********  ********** ******    
+    *****  **********  **********  *****    
+      **    *********  *********            
+            ********    ********            
+             ******      ******             
+****          ****        ****          ****
+****                                    ****
+*****                                  *****
+ *****                                ***** 
+  ******                            ******  
+    ******                        ******    
+     *******                    *******     
+       **********           *********       
+          ************************          
+              ****************              
+
+              FREE TO THINK  ·  v1.0.0  ·  Designed in Austin TX.
+
+                             Sovereign AI — v1.0.0
+
+──────────────────────────────────────────────────────────────────────────────
+
+  Commands:
+    tarx build --task "..."         Plan → diff → apply a coding task
+    tarx build --plan-only --task   Plan only, no diff
+    tarx ask "question"             Read-only repo Q&A
+    tarx review                     Review current git diff
+    tarx status                     Check all service health
+
+  Options:
+    --repo PATH       Target git repo (default: cwd)
+    --task TEXT       Task description
+    --plan-only       Plan only, skip diff/apply
+    --max-files N     Max files in plan, 1-8 (default: 4)
+    --yes             Auto-approve all prompts
+
+  Two TARX CLIs (do not confuse):
+    • This Node flywheel CLI (tarx.mjs): build / ask / review / status.
+    • PATH shell CLI (~/.tarx/bin/tarx v1.1.0): presence/status/doctor/mcp
+      — it has NO "build". For planning always run this Node entrypoint:
+      node bin/tarx.mjs build --plan-only --task "..."
+
+BUILD_HELP_EXIT=0

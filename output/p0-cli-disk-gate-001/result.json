@@ -1,0 +1,66 @@
+{
+  "ticket_id": "P0-CLI-DISK-GATE-001",
+  "at": "2026-10-04T22:44:00-05:00",
+  "from": "kiro",
+  "to": "grok",
+  "type": "proof",
+  "repo": "/Users/master/Desktop/TARX/Repos - active/tarx-cli",
+  "branch": "flywheel/cli-disk-wal-gate-20261004",
+  "base_commit": "8a55bfd",
+  "role_lock": {
+    "tarx": "plan-only PM",
+    "kiro": "sole apply on flywheel/* (this ticket)",
+    "grok": "QA/deploy after proof"
+  },
+  "preflight": {
+    "free_disk_gb": 67,
+    "wal_bytes": 129297992,
+    "wal_mb": 123,
+    "bridge_11440": "ok (v2.3.0)",
+    "no_retruncate_needed": true,
+    "stop_conditions_clear": true
+  },
+  "scope_implemented": [
+    "doctor FAIL when free disk < 40 GB (TARX_DISK_MIN_GB override)",
+    "doctor FAIL when ~/.tarx/tarx.db-wal > 1 GB (TARX_WAL_MAX_GB override); WAL bytes+MB always reported when file present",
+    "cmd_doctor now returns/exits non-zero on any failing gate or check (dispatch: 'doctor) cmd_doctor; exit $?')",
+    "dual-CLI operator note printed by doctor: PATH shell tarx v1.1.0 has NO build; planning uses node bin/tarx.mjs build --plan-only",
+    "Bridge wal_autocheckpoint follow-up noted on red WAL gate (fix belongs in Bridge DB layer, not this CLI)",
+    "Node CLI (src/cli.ts): build --help now prints usage + dual-CLI note instead of a task error",
+    "README.md created documenting dual-CLI split, doctor gates, and install/sync to ~/.tarx/bin"
+  ],
+  "files_changed": [
+    "daemon/bin/tarx (source of truth for shell CLI)",
+    "src/cli.ts (Node flywheel CLI help/parse)",
+    "README.md (new)"
+  ],
+  "install_sync": {
+    "command": "install -m 0755 daemon/bin/tarx ~/.tarx/bin/tarx",
+    "verified_identical": true,
+    "installed_version": "1.1.0"
+  },
+  "acceptance_proof": {
+    "doctor_healthy_exit": 0,
+    "doctor_disk_fail_exit": 1,
+    "doctor_disk_fail_sim": "TARX_DISK_MIN_GB=999999 (vs actual 67 GB free) -> [FAIL] Less than 999999 GB free",
+    "doctor_wal_fail_exit": 1,
+    "doctor_wal_fail_sim": "TARX_WAL_MAX_GB=0 (vs actual 123 MB WAL) -> [FAIL] WAL exceeds 0 GB; Size: 129297992 bytes (123 MB) reported first",
+    "wal_bytes_reported_on_pass": true,
+    "node_build_help_exit": 0,
+    "node_build_help_prints_usage": true,
+    "installed_tarx_doctor_exit_healthy": 0
+  },
+  "simulation_note": "Disk could not be safely filled and WAL must not be ballooned (crash root cause), so the two FAIL paths were proven by overriding the thresholds via the exact comparison operators used by the 40GB/1GB defaults (TARX_DISK_MIN_GB, TARX_WAL_MAX_GB). Same code path, same operators.",
+  "transcripts": "output/p0-cli-disk-gate-001/before-after.txt",
+  "stop_conditions_respected": [
+    "disk 67 GB > 20 GB floor",
+    "no other agent editing tarx-cli (single untracked src/tarx-design-tokens.json left untouched/uncommitted)",
+    "no memory schema / channel_id / Electron / deploy / Eve changes"
+  ],
+  "out_of_scope_untouched": [
+    "tarx_events split",
+    "memory_store channel_id",
+    "Bridge DB wal_autocheckpoint fix (noted as follow-up only)",
+    "deploy / push to prod"
+  ]
+}
