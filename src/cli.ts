@@ -81,6 +81,7 @@ function parseArgs(argv: string[]) {
   for (let i = 0; i < rest.length; i++) {
     const v = rest[i]
     if (v === '--plan-only') { opts.planOnly = true; continue }
+    if (v === '--help' || v === '-h') { opts.help = true; continue }
     if (v === '--yes' || v === '-y') { opts.yes = true; continue }
     if (v === '--task' || v === '--repo' || v === '--max-files') {
       opts[v.replace('--', '').replace('-', '_')] = rest[++i] ?? ''
@@ -122,6 +123,7 @@ async function statusCommand() {
 // ── Build command ─────────────────────────────────────────────────────────────
 
 async function buildCommand(opts: Record<string, string | boolean>) {
+  if (opts.help) { printHelp(); return }
   const task = String(opts.task || '').trim()
   const repo = String(opts.repo || process.cwd())
   const planOnly = Boolean(opts.planOnly)
@@ -264,6 +266,12 @@ function printHelp() {
     '    --plan-only       Plan only, skip diff/apply\n',
     '    --max-files N     Max files in plan, 1-8 (default: 4)\n',
     '    --yes             Auto-approve all prompts\n',
+    '\n',
+    '  Two TARX CLIs (do not confuse):\n',
+    '    • This Node flywheel CLI (tarx.mjs): build / ask / review / status.\n',
+    '    • PATH shell CLI (~/.tarx/bin/tarx v1.1.0): presence/status/doctor/mcp\n',
+    '      — it has NO "build". For planning always run this Node entrypoint:\n',
+    '      node bin/tarx.mjs build --plan-only --task "..."\n',
     '\n',
   ].join(''))
 }
