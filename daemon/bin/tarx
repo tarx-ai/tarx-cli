@@ -810,6 +810,7 @@ cmd_doctor() {
   log "Bridge WAL:"
   WAL_MAX_GB="${TARX_WAL_MAX_GB:-1}"
   _wal_file="${TARX_HOME}/tarx.db-wal"
+  _wal_failed=0
   if [ -f "$_wal_file" ]; then
     _wal_bytes=$(wc -c < "$_wal_file" 2>/dev/null | tr -d ' ')
     [ -n "$_wal_bytes" ] || _wal_bytes=0
@@ -821,6 +822,7 @@ cmd_doctor() {
       log "  [FAIL] WAL exceeds ${WAL_MAX_GB} GB — checkpoint/TRUNCATE before more work."
       log "         Writers must not leave wal_autocheckpoint=0; see Bridge follow-up below."
       _issues=$((_issues + 1))
+      _wal_failed=1
     else
       log "  [OK] WAL under ${WAL_MAX_GB} GB"
     fi
@@ -910,12 +912,15 @@ cmd_doctor() {
   log "      planning + apply. Plan a task with:"
   log "      node bin/tarx.mjs build --plan-only --task \"...\""
 
-  if [ $_issues -ne 0 ]; then
+  if [ "$_wal_failed" -ne 0 ]; then
     log ""
     log "Bridge follow-up: a red WAL gate means prod writers left"
     log "wal_autocheckpoint unhealthy (e.g. 0). Fix belongs in the Bridge DB"
     log "layer (single-writer + periodic PRAGMA wal_checkpoint(TRUNCATE)),"
     log "not this CLI — see MEMORY_SUPERINTELLIGENCE_ROADMAP_2026-10-04.md P0 #3."
+  fi
+
+  if [ $_issues -ne 0 ]; then
     return 1
   fi
   return 0
