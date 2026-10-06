@@ -27,7 +27,7 @@ COGNITIVE_PORT=11438
 # Supercomputer door (display/health only — set by their own launchd jobs,
 # NOT bound by this CLI). Gateway is the public door via https://compute.tarx.com.
 SUPERCOMPUTER_GATEWAY_PORT=11450
-SUPERCOMPUTER_MODEL_PORT=11445
+SUPERCOMPUTER_MODEL_PORT=11448
 BRIDGE_PORT=11440
 
 INFERENCE_MODEL="gemma-4-26B-A4B-it-Q4_K_M.gguf"
@@ -1381,7 +1381,7 @@ Commands:
 Ports:
   Supercomputer door (public via https://compute.tarx.com):
     11450  Supercomputer gateway (OpenAI-compatible door)
-    11445  Supercomputer base model (tarx-brain-qwen-27b)
+    11448  Supercomputer model (Qwen3-8B, tarx/t-supercomputer)
   Local-only (loopback, not the Supercomputer door):
     11435  Mind (local inference)
     11436  Mesh (local)

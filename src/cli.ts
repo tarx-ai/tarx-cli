@@ -116,6 +116,8 @@ async function statusCommand() {
   printInfo('Bridge   http://localhost:11440/health')
   printInfo('Mind     http://localhost:11435/health')
   printInfo('Cognitive http://localhost:11438/health')
+  printInfo('Gateway  http://127.0.0.1:11450  (public door, compute.tarx.com)')
+  printInfo('Model    http://127.0.0.1:11448  (Qwen3-8B, tarx/t-supercomputer)')
   printInfo('Broker   https://howdy-a3f.workers.dev/health')
   stdout.write('\n')
 }
