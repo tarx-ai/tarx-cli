@@ -1279,21 +1279,17 @@ except Exception: print(-1)" 2>/dev/null)
     "$_dm" "$_rs" "$(_wcol "$_health")" "$_health" "$_rs" "$(_wcol "$_consol")" "$_consol" "$_rs"
   [ -n "${_last:-}" ] && printf '  %bLast reassessment:%b %s%b\n' "$_dm" "$_rs" "$_last" "$_stale"
 
-  # Action line ONLY when runtime is not on (spec §5, §12.4).
-  # When armed with standing stress, show the red gates instead of "Turn TARX on".
-  case "$_runtime" in
-    up) : ;;  # omit when on
-    *)
-      if [ "$_mode" = "armed" ] && [ -n "${_stress:-}" ]; then
-        printf '  %bStanding stress:%b\n' "$_down" "$_rs"
-        printf '%s\n' "$_stress" | while IFS= read -r _g; do
-          [ -n "$_g" ] && printf '    %b✗ %s%b\n' "$_down" "$_g" "$_rs"
-        done
-      else
-        printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs"
-      fi
-      ;;
-  esac
+  # Standing stress is a truth about the system regardless of the on/off light:
+  # when armed with non-empty stress, always show the red gates (even if runtime
+  # is up). "Turn TARX on" shows only when stress is empty and runtime is not up.
+  if [ "$_mode" = "armed" ] && [ -n "${_stress:-}" ]; then
+    printf '  %bStanding stress:%b\n' "$_down" "$_rs"
+    printf '%s\n' "$_stress" | while IFS= read -r _g; do
+      [ -n "$_g" ] && printf '    %b✗ %s%b\n' "$_down" "$_g" "$_rs"
+    done
+  elif [ "$_runtime" != "up" ]; then
+    printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs"
+  fi
 }
 
 cmd_arm() {   # user intent only — explicit arming per §9
