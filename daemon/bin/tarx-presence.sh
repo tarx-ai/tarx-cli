@@ -24,14 +24,23 @@ SCHEMA="tarx.always_on.presence.v1"
 
 # Door + local ports (display/health only; set by their own launchd jobs).
 GATEWAY_PORT=11450
-MODEL_PORT=11445
+MODEL_PORT=11448                    # resident model (Qwen3-8B). NOT 11445 (old base GGUF).
+LEGACY_MODEL_PORT=11445            # must NOT be listening; its presence is a stress gate.
 BRIDGE_PORT=11440
 MIND_PORT=11435
 COGNITIVE_PORT=11438
+EVE_PORT=3000                      # Eve connectors; health at /eve/v1/health
 
 mkdir -p "$AO_DIR"
 
 _probe() { curl -sf --max-time 2 "http://127.0.0.1:$1/health" >/dev/null 2>&1; }
+
+# Eve exposes health at a non-standard path.
+_probe_eve() { curl -sf --max-time 2 "http://127.0.0.1:$EVE_PORT/eve/v1/health" >/dev/null 2>&1; }
+
+# True when something is LISTENING on the port (not a health check).
+# Used for the 11445 stress gate: the old base GGUF must NOT be up.
+_listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 _read_mode() {
   if [ -r "$MODE_FILE" ]; then
@@ -78,6 +87,16 @@ cmd_get() {
   work="[]"
   [ "$keepwarm" = live ] && work='["keep-warm model"]'
 
+  # Standing stress (§5.1 honest reds). Each gate is a current, re-sensed fact —
+  # never a hardcoded eternal red. Order: model, gateway, legacy port, Eve.
+  _stress_items=""
+  _add_stress() { _stress_items="${_stress_items:+$_stress_items,}\"$1\""; }
+  [ "$md" = up ] || _add_stress "model:11448 health failing"
+  [ "$gw" = up ] || _add_stress "gateway:11450 health failing"
+  _listening "$LEGACY_MODEL_PORT" && _add_stress "legacy model:11445 is listening"
+  _probe_eve || _add_stress "eve:3000 /eve/v1/health down"
+  stress="[$_stress_items]"
+
   cat > "$SNAP" <<JSON
 {
   "schema": "$SCHEMA",
@@ -86,6 +105,7 @@ cmd_get() {
   "services": { "gateway": "$gw", "model": "$md", "bridge": "$br", "mind": "$mn", "cognitive": "$cg" },
   "watchers": { "runtime_health": "$w_health", "memory_consolidation": "$w_consolidation" },
   "active_local_work": $work,
+  "stress": $stress,
   "last_reassessment": "$now"
 }
 JSON

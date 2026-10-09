@@ -1242,6 +1242,8 @@ cmd_presence() {
   _health=$(_presence_field "d['watchers']['runtime_health']")
   _consol=$(_presence_field "d['watchers']['memory_consolidation']")
   _last=$(_presence_field "d['last_reassessment']")
+  # Standing stress: newline-joined list of current red gates (empty if none).
+  _stress=$(_presence_field "chr(10).join(d.get('stress',[]))")
   [ -z "${_mode:-}" ] && _mode="asleep"
   [ -z "${_runtime:-}" ] && _runtime="unknown"
 
@@ -1278,9 +1280,19 @@ except Exception: print(-1)" 2>/dev/null)
   [ -n "${_last:-}" ] && printf '  %bLast reassessment:%b %s%b\n' "$_dm" "$_rs" "$_last" "$_stale"
 
   # Action line ONLY when runtime is not on (spec §5, §12.4).
+  # When armed with standing stress, show the red gates instead of "Turn TARX on".
   case "$_runtime" in
     up) : ;;  # omit when on
-    *)  printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs" ;;
+    *)
+      if [ "$_mode" = "armed" ] && [ -n "${_stress:-}" ]; then
+        printf '  %bStanding stress:%b\n' "$_down" "$_rs"
+        printf '%s\n' "$_stress" | while IFS= read -r _g; do
+          [ -n "$_g" ] && printf '    %b✗ %s%b\n' "$_down" "$_g" "$_rs"
+        done
+      else
+        printf '  %bTurn TARX on:%b tarx on\n' "$_dm" "$_rs"
+      fi
+      ;;
   esac
 }
 
