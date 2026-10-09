@@ -297,13 +297,17 @@ cmd_chat() {
         printf '\r\033[2m(thinking %s t=%ss)\033[0m' "$c" "$i" > /dev/tty 2>/dev/null
         i=$((i+1)); sleep 1
       done
-    ) &
+    ) </dev/null &
     _spinpid=$!
 
+    # NOTE: </dev/null on curl is load-bearing. Without it, the streaming
+    # request inherits the interactive loop's stdin (the tty) and drains it,
+    # so the next `read -r _line` hits EOF and the chat loop exits after one
+    # turn. Detaching stdin keeps the terminal for the prompt.
     curl -sf -N -m 300 -X POST "${_gw}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${_key}" \
-      -d "$_pl" 2>/dev/null | SPIN="$_spin" python3 -c "
+      -d "$_pl" </dev/null 2>/dev/null | SPIN="$_spin" python3 -c "
 import sys,json,os
 full=[]; first=True
 try: tty=open('/dev/tty','w')
