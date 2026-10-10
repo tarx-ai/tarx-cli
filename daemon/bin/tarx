@@ -357,71 +357,17 @@ sys.stdout.write(''.join(full))
     fi
     _key=$(_chat_key)
     [ -z "$_key" ] && err "Supercomputer door needs its key (TARX_GATEWAY_API_KEY) to engage."
-    if [ -t 1 ]; then _dim='\033[2m'; _rst='\033[0m'; else _dim=''; _rst=''; fi
-    printf '%bTARX%b  Supercomputer   exit to leave   paste is one turn\n' "$_dim" "$_rst"
     _spf="$HOME/.tarx/always-on/session-prompt.md"
     _histfile="$HOME/.tarx/always-on/session-history.json"
-    _livectx=$("$HOME/.tarx/bin/tarx-live-context.sh" 2>/dev/null)
-
-    # Build system message = static moment + LIVE state (current reality).
-    _sysmsg=$(SPF="$_spf" LCTX="$_livectx" python3 -c "
-import json,os
-base=''
-try: base=open(os.environ['SPF']).read()
-except Exception: base='You are TARX.'
-print(json.dumps(base + '\n\n' + os.environ.get('LCTX','')))
-" 2>/dev/null)
-
-    # Resume recent conversation across launches (last ~12 turns), else fresh.
-    _hist=$(SYS="$_sysmsg" HF="$_histfile" python3 -c "
-import json,os
-sys_content=json.loads(os.environ['SYS'])
-h=[{'role':'system','content':sys_content}]
-hf=os.environ['HF']
-try:
-    prior=json.load(open(hf))
-    prior=[m for m in prior if m.get('role') in ('user','assistant')][-12:]
-    h+=prior
-except Exception: pass
-print(json.dumps(h))
-" 2>/dev/null)
-    [ -z "${_hist:-}" ] && _hist="[]"
-
-    exec 3</dev/tty 2>/dev/null || exec 3<&0
-    # Bracketed paste: Cmd+V, Ctrl+V, and Ctrl+Shift+V arrive as one block.
-    printf '\033[?2004h' >/dev/tty 2>/dev/null || true
-    while :; do
-      printf '\033[2m┌─ you\033[0m\n\033[38;5;75m│\033[0m '
-      if ! IFS= read -r -u 3 _line; then printf '\n'; break; fi
-      case "$_line" in
-        *$'\033[200~'*)
-          _line=${_line#*$'\033[200~'}
-          while :; do
-            case "$_line" in *$'\033[201~'*) _line=${_line%%$'\033[201~'*}; break ;; esac
-            IFS= read -r -u 3 _more || break
-            _line="${_line}
-${_more}"
-          done
-          ;;
-      esac
-      case "$_line" in exit|quit|:q) break ;; "") continue ;; esac
-      _ujson=$(_esc "$_line")
-      _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'user','content':$_ujson});print(json.dumps(h))" 2>/dev/null)
-      printf '\033[38;5;75m┌─ tarx\033[0m\n'
-      _ans=$(_chat_once "$_hist" "$_key" 3<&-)
-      if [ -z "$_ans" ]; then printf '(no response — door may be cold; try again)\n\n'; continue; fi
-      _ajson=$(_esc "$_ans")
-      _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'assistant','content':$_ajson});print(json.dumps(h))" 2>/dev/null)
-      # Persist conversation (user/assistant only) so the next launch resumes.
-      printf '%s' "$_hist" | python3 -c "
-import sys,json
-h=json.load(sys.stdin)
-keep=[m for m in h if m.get('role') in ('user','assistant')][-40:]
-json.dump(keep, open('$_histfile','w'))
-" 2>/dev/null
-    done
-    printf '\033[?2004l' >/dev/tty 2>/dev/null || true
-    return 0
+    # Pinned composer. Cmd+V / ctrl-v of a photo attaches from the Mac clipboard.
+    _ui="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/tarx-chat-ui.py"
+    [ -f "$_ui" ] || _ui="$HOME/.tarx/bin/tarx-chat-ui.py"
+    TARX_CHAT_URL="$_gw" \
+    TARX_CHAT_KEY="$_key" \
+    TARX_CHAT_PROMPT="$_spf" \
+    TARX_CHAT_HIST="$_histfile" \
+      python3 "$_ui"
+    return $?
   fi
 
   # ── One-shot (with args): fast local Mind ──
