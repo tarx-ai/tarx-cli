@@ -252,17 +252,27 @@ class UI:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
 
     def put(self, out, row, text):
-        # Row is 1-based. Erase the whole row, then write from column 1.
+        # Never emit a newline. Raw mode would walk the cursor down the screen.
+        text = text.replace("\r", " ").replace("\n", " ")
         out.append(f"\033[{row};1H\033[2K{text}")
+
+    def draft_cursor(self):
+        pre = self.buf[:self.cur]
+        line = pre.count("\n")
+        col = len(pre) - (pre.rfind("\n") + 1)
+        return line, col
 
     def draw(self):
         w, h = cols_rows()
         w = max(20, w)
         h = max(8, h)
+        draft = self.buf.split("\n") or [""]
+        crow, ccol = self.draft_cursor()
+        crow = min(crow, len(draft) - 1)
+        show = min(8, max(1, len(draft)), h - 6)
         chip_row = 1 if self.images else 0
-        # header, blank, transcript, rule, chip?, input, hint
         body_top = 2
-        body_bot = h - (3 + chip_row)
+        body_bot = h - (2 + chip_row + show)
         lines = []
         gutter = 6
         for who, text in self.turns:
@@ -286,17 +296,31 @@ class UI:
             chip = "  ".join("▣ photo" for _ in self.images[:4])
             self.put(out, input_at, f"{BLUE}│{RST} {clip(chip, w - 4)}")
             input_at += 1
-        caret = self.cur
+        # Keep the cursor line inside the composer pane.
+        win = 0
+        if crow >= show:
+            win = crow - show + 1
         field = max(4, w - 4)
-        start = 0
-        if caret >= field:
-            start = caret - field + 1
-        vis = self.buf[start:start + field]
-        self.put(out, input_at, f"{BLUE}│{RST} {vis}")
-        foot = self.status or "paste a photo · ctrl-v attaches the clipboard · enter sends · exit leaves"
-        self.put(out, input_at + 1, f"{DIM}{clip(foot, w - 2)}{RST}")
-        cx = 3 + (caret - start)
-        out.append(f"\033[{input_at};{cx}H\033[?25h")
+        caret_x = 3
+        for i in range(show):
+            src = win + i
+            rowtxt = draft[src] if src < len(draft) else ""
+            start = 0
+            if src == crow and ccol >= field:
+                start = ccol - field + 1
+            vis = rowtxt[start:start + field]
+            self.put(out, input_at + i, f"{BLUE}│{RST} {vis}")
+            if src == crow:
+                caret_x = 3 + (ccol - start)
+        foot_at = input_at + show
+        extra = len(draft) - show
+        note = f"  ·  {extra} more lines" if extra > 0 else ""
+        foot = (self.status or "paste a photo · ctrl-v attaches the clipboard · enter sends · exit leaves") + note
+        self.put(out, foot_at, f"{DIM}{clip(foot, w - 2)}{RST}")
+        # Clear any rows a previous taller composer left behind.
+        for r in range(foot_at + 1, h + 1):
+            self.put(out, r, "")
+        out.append(f"\033[{input_at + (crow - win)};{caret_x}H\033[?25h")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
