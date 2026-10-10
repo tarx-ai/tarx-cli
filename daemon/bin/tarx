@@ -297,13 +297,13 @@ cmd_chat() {
         printf '\r\033[2m(thinking %s t=%ss)\033[0m' "$c" "$i" > /dev/tty 2>/dev/null
         i=$((i+1)); sleep 1
       done
-    ) &
+    ) </dev/null &
     _spinpid=$!
 
     curl -sf -N -m 300 -X POST "${_gw}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${_key}" \
-      -d "$_pl" 2>/dev/null | SPIN="$_spin" python3 -c "
+      -d "$_pl" </dev/null 2>/dev/null | SPIN="$_spin" python3 -c "
 import sys,json,os
 full=[]; first=True
 try: tty=open('/dev/tty','w')
@@ -328,7 +328,9 @@ for line in sys.stdin:
 if tty: tty.write('\n\n'); tty.flush()
 sys.stdout.write(''.join(full))
 " 2>/dev/null
-    rm -f "$_spin" 2>/dev/null; kill "$_spinpid" 2>/dev/null; wait "$_spinpid" 2>/dev/null
+    rm -f "$_spin" 2>/dev/null
+    kill "$_spinpid" 2>/dev/null || true
+    wait "$_spinpid" 2>/dev/null || true
   }
 
   _esc() { printf '%s' "$1" | python3 -c "import sys,json;print(json.dumps(sys.stdin.read()))" 2>/dev/null; }
@@ -371,14 +373,15 @@ print(json.dumps(h))
 " 2>/dev/null)
     [ -z "${_hist:-}" ] && _hist="[]"
 
+    exec 3</dev/tty 2>/dev/null || exec 3<&0
     while :; do
       printf 'you › '
-      if ! IFS= read -r _line; then printf '\n'; break; fi
+      if ! IFS= read -r -u 3 _line; then printf '\n'; break; fi
       case "$_line" in exit|quit|:q) break ;; "") continue ;; esac
       _ujson=$(_esc "$_line")
       _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'user','content':$_ujson});print(json.dumps(h))" 2>/dev/null)
       printf 'tarx › '
-      _ans=$(_chat_once "$_hist" "$_key")
+      _ans=$(_chat_once "$_hist" "$_key" 3<&-)
       if [ -z "$_ans" ]; then printf '(no response — door may be cold; try again)\n\n'; continue; fi
       _ajson=$(_esc "$_ans")
       _hist=$(printf '%s' "$_hist" | python3 -c "import sys,json;h=json.load(sys.stdin);h.append({'role':'assistant','content':$_ajson});print(json.dumps(h))" 2>/dev/null)
