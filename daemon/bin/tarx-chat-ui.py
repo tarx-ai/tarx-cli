@@ -241,7 +241,8 @@ class UI:
     def enter(self):
         self.old = termios.tcgetattr(self.fd)
         tty.setraw(self.fd)
-        sys.stdout.write("\033[?1049h\033[?2004h\033[?25l")
+        # Raw mode does not turn \n into \r\n. Drawing uses absolute rows instead.
+        sys.stdout.write("\033[?1049h\033[?2004h\033[2J\033[H\033[?25l")
         sys.stdout.flush()
 
     def leave(self):
@@ -250,50 +251,53 @@ class UI:
         if self.old:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
 
+    def put(self, out, row, text):
+        # Row is 1-based. Erase the whole row, then write from column 1.
+        out.append(f"\033[{row};1H\033[2K{text}")
+
     def draw(self):
         w, h = cols_rows()
-        composer_h = 4 if self.images else 3
-        top = max(1, h - composer_h)
+        w = max(20, w)
+        h = max(8, h)
+        chip_row = 1 if self.images else 0
+        # header, blank, transcript, rule, chip?, input, hint
+        body_top = 2
+        body_bot = h - (3 + chip_row)
         lines = []
+        gutter = 6
         for who, text in self.turns:
             mark = "you" if who == "you" else "tarx"
-            color = "" if who == "you" else BLUE
-            for i, row in enumerate(wrap(text, w - 4)):
-                prefix = mark if i == 0 else " " * len(mark)
-                lines.append(f"{color}{prefix}{RST}  {row}" if who == "tarx" else f"{DIM}{prefix}{RST}  {row}")
-        view = lines[-(top - 2):] if top > 2 else lines
-        out = ["\033[H"]
-        title = clip(" TARX", 20)
-        hint = clip("Supercomputer", max(0, w - 24))
-        out.append(f"\033[K{BOLD}{title}{RST}  {DIM}{hint}{RST}\n")
-        body_rows = top - 1
-        pad = body_rows - len(view)
-        for row in view:
-            out.append("\033[K" + clip(row, w) + "\n")
-        for _ in range(max(0, pad)):
-            out.append("\033[K\n")
-        # composer, pinned
-        out.append(f"\033[K{BLUE}{'─' * max(1, w)}{RST}\n")
+            paint = BLUE if who == "tarx" else DIM
+            for i, row in enumerate(wrap(text, w - gutter - 1)):
+                prefix = mark if i == 0 else "    "
+                lines.append(f"{paint}{prefix}{RST} {row}")
+            lines.append("")
+        room = max(1, body_bot - body_top + 1)
+        view = lines[-room:]
+        out = []
+        self.put(out, 1, f"{BOLD}TARX{RST}  {DIM}{clip('Supercomputer', w - 16)}{RST}")
+        for i in range(room):
+            text = view[i] if i < len(view) else ""
+            self.put(out, body_top + i, text)
+        rule_at = body_bot + 1
+        self.put(out, rule_at, f"{BLUE}{'─' * w}{RST}")
+        input_at = rule_at + 1
         if self.images:
             chip = "  ".join("▣ photo" for _ in self.images[:4])
-            out.append(f"\033[K{BLUE}│{RST} {chip}\n")
-        shown = self.buf
+            self.put(out, input_at, f"{BLUE}│{RST} {clip(chip, w - 4)}")
+            input_at += 1
         caret = self.cur
-        # show tail if the line is wider than the screen
-        room = max(4, w - 4)
+        field = max(4, w - 4)
         start = 0
-        if caret >= room:
-            start = caret - room + 1
-        vis = shown[start:start + room]
-        gap = room - len(vis)
-        out.append(f"\033[K{BLUE}│{RST} {vis}{' ' * gap}\n")
+        if caret >= field:
+            start = caret - field + 1
+        vis = self.buf[start:start + field]
+        self.put(out, input_at, f"{BLUE}│{RST} {vis}")
         foot = self.status or "paste a photo · ctrl-v attaches the clipboard · enter sends · exit leaves"
-        out.append(f"\033[K{DIM}{clip('  ' + foot, w)}{RST}")
-        sys.stdout.write("".join(out))
-        # place cursor in the composer
-        cy = h - (2 if self.images else 1)
+        self.put(out, input_at + 1, f"{DIM}{clip(foot, w - 2)}{RST}")
         cx = 3 + (caret - start)
-        sys.stdout.write(f"\033[{cy};{cx}H\033[?25h")
+        out.append(f"\033[{input_at};{cx}H\033[?25h")
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
 
     def attach(self, path):
