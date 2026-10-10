@@ -1351,6 +1351,7 @@ Commands:
   dnd               Armed, Do Not Disturb
   presence          Show Always On presence and vital signs
   flywheel          Watch the live build-loop activity feed (tail|stats)
+  glyph             Show the local Glyph flywheel (does not stop it)
   code              TARX Code — local-first coding agent
   code "prompt"     One-shot coding task
   start             Start all services (inference, mesh, embeddings)
@@ -1405,6 +1406,7 @@ case "$_cmd" in
   dnd)       cmd_arm dnd ;;
   presence)  cmd_presence ;;
   flywheel)  shift 2>/dev/null||true; "$HOME/.tarx/bin/tarx-flywheel.sh" "${1:-tail}" ;;
+  glyph)     "$HOME/.tarx/bin/tarx-glyph.sh" ;;
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   status)    cmd_status ;;
