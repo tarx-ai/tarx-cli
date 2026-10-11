@@ -469,7 +469,7 @@ class TarxChat(App):
     def mount_mark(self, log=None) -> None:
         log = log or self.query_one("#log", VerticalScroll)
         log.mount(Static(escape(LOGO), classes="mark"))
-        log.mount(Static(SAY, classes="markline"))
+        log.mount(Turn("tarx", SAY))
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         if getattr(event.widget, "id", None) == "composer":
