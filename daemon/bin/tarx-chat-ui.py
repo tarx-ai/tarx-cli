@@ -41,28 +41,17 @@ COMMANDS = (
 )
 CHANNELS = ("capabilities", "howdy", "hardware")
 LOGO = """
-        *****      ******      *****
-       *******     ******     *******
-      ********    ********    ********
-      *********   ********    ********
-     **********  **********  **********
-     ***** ***** ********** ***** *****
-     ***** **********  ********** ******
-    *****  **********  **********  *****
-      **    *********  *********
-            ********    ********
-             ******      ******
-****          ****        ****          ****
-****                                    ****
-*****                                  *****
- *****                                *****
-  ******                            ******
-    ******                        ******
-     *******                    *******
-       **********           *********
-          ************************
-              ****************
+     ****   *****   ****
+    ******  *****  ******
+   ***** ******* *****
+     **  ******  ****
+          ****    ****
+ ***       **      **       ***
+  *****                  *****
+     ********      ********
+         **************
 """.strip("\n")
+SAY = "TARX IS FREE TO THINK. DESIGNED IN AUSTIN TX"
 
 
 def agent_history(kind, slug):
@@ -316,7 +305,7 @@ class Turn(Static):
         if self.who == "user":
             lab, body = "[#8aa0b4 bold]HUMAN[/]", f"[#8aa0b4]{escape(self.body)}[/]"
         elif self.who == "tarx":
-            lab, body = "[#38adfa bold]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
+            lab, body = "[#38adfa]***[/] [#38adfa bold]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
         else:
             lab, body = "[#ffb000 bold]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
         caret = " [#38adfa]▌[/]" if self.cursor else ""
@@ -364,8 +353,8 @@ class TarxChat(App):
         border-bottom: solid #1d4e72;
     }
     #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; scrollbar-color: #38adfa; }
-    .mark, #empty { color: #38adfa; padding: 1 2 0 2; }
-    .markline, #tagline { color: #8aa0b4; padding: 0 2 1 2; }
+    #mark, .mark, #empty { color: #38adfa; height: auto; padding: 1 2 0 2; }
+    #say, .markline, #tagline { color: #8aa0b4; height: 1; padding: 0 2 1 2; }
     Turn { margin: 0 0 1 0; }
     #box {
         height: auto;
@@ -426,6 +415,8 @@ class TarxChat(App):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
+        yield Static(LOGO, id="mark", classes="mark")
+        yield Static(SAY, id="say", classes="markline")
         yield VerticalScroll(id="log")
         with Vertical(id="box"):
             yield Static("", id="dock")
@@ -468,7 +459,7 @@ class TarxChat(App):
     def mount_mark(self, log=None) -> None:
         log = log or self.query_one("#log", VerticalScroll)
         log.mount(Static(escape(LOGO), classes="mark"))
-        log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", classes="markline"))
+        log.mount(Static(SAY, classes="markline"))
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         if getattr(event.widget, "id", None) == "composer":
@@ -521,7 +512,7 @@ class TarxChat(App):
             info = clipboard_info()
             self.clip_hint = any(k in info for k in ("PNGf", "TIFF", "JPEG", "GIFf"))
         if time.monotonic() < self.copied_until:
-            self.query_one("#activity", Static).update("[#38adfa]Copied[/]")
+            self.query_one("#activity", Static).update("[#38adfa]Copied to the clipboard[/]")
             return
         elapsed = max(0.0, time.monotonic() - self.t0) if self.t0 else 0.0
         bits = []
@@ -611,7 +602,7 @@ class TarxChat(App):
         self.copy_to_clipboard(text)
         self.copied_until = time.monotonic() + 2.5
         try:
-            self.query_one("#activity", Static).update("[#38adfa]Copied[/]")
+            self.query_one("#activity", Static).update("[#38adfa]Copied to the clipboard[/]")
         except Exception:
             pass
 
