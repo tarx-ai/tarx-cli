@@ -288,9 +288,12 @@ class Composer(TextArea):
         await super()._on_key(event)
 
     def on_mouse_up(self, event) -> None:
-        text = self.selected_text
-        if text and text.strip():
-            self.app.announce_copy(text)
+        def grab() -> None:
+            start, end = self.selection
+            if start == end:
+                return
+            self.app.announce_copy(self.selected_text)
+        self.app.set_timer(0.05, grab)
 
 
 class Turn(Static):
@@ -579,6 +582,29 @@ class TarxChat(App):
         self.palette_i = (self.palette_i + step) % len(self.palette_rows)
         self.paint_palette()
 
+    def _selection_text(self) -> str:
+        parts = []
+        try:
+            screen_text = self.screen.get_selected_text() or ""
+        except Exception:
+            screen_text = ""
+        if screen_text.strip():
+            parts.append(screen_text)
+        try:
+            typed = self.query_one("#composer", Composer).selected_text
+        except Exception:
+            typed = ""
+        if typed and typed.strip():
+            parts.append(typed)
+        text = parts[-1] if parts else ""
+        return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+
+    def copy_highlight(self) -> None:
+        self.announce_copy(self._selection_text())
+
+    def on_mouse_up(self, event) -> None:
+        self.set_timer(0.05, self.copy_highlight)
+
     def announce_copy(self, text: str) -> None:
         if not text or not text.strip():
             return
@@ -590,14 +616,17 @@ class TarxChat(App):
             pass
 
     def on_text_selected(self, event) -> None:
-        self.announce_copy(self.screen.get_selected_text() or "")
+        self.set_timer(0.05, self.copy_highlight)
 
     def copy_to_clipboard(self, text: str) -> None:
-        super().copy_to_clipboard(text)
+        # macOS Terminal ignores OSC 52 and can wipe the pasteboard after it.
+        # pbcopy is the clipboard the rest of the Mac uses.
         try:
-            subprocess.run(["pbcopy"], input=text.encode(), timeout=2, check=False)
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=2, check=False)
         except Exception:
-            pass
+            super().copy_to_clipboard(text)
+        else:
+            self._clipboard = text
 
     def action_cycle_mode(self) -> None:
         self.mode_i = (self.mode_i + 1) % len(MODES)
