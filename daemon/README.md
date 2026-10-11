@@ -42,7 +42,9 @@ Door identity is `tarx/t-supercomputer`; the raw base model stays hidden (G7).
 
 Decision: separate. The Computer registry stays local. It does not override production, and production does not sync it.
 
-`~/.tarx/agents/registry.json` is the Computer registry on this Mac. The CLI, the local web preview, and Eve (Slack and Gmail first-token `/agents` and `/agent <slug>`) read that file. Always On is the default agent there, not a channel.
+`~/.tarx/agents/registry.json` is the Computer registry on this Mac. The CLI, the local web preview, and Eve read that file. Always On is the default agent there, not a channel.
+
+Slack and Gmail use the same first token as the CLI. `/agents` lists the registry. `/agent <slug>` switches that turn and leaves Always On as the default. Discord is out. Neither command sends a message. The connector note sits in the Eve README next to Email and Slack.
 
 `https://tarx.com/agents` and `https://tarx.com/channels` stay 404 until a production catalog exists. The production app shell on app.tarx.com and cli.tarx.com does not list Computer agents. No production catalog of those agents was found, so nothing was wired to copy the Mac file.
 
