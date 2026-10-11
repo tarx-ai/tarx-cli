@@ -361,8 +361,8 @@ class TarxChat(App):
         border-bottom: solid #1d4e72;
     }
     #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; scrollbar-color: #38adfa; }
-    #empty { color: #38adfa; padding: 1 2 0 2; }
-    #tagline { color: #8aa0b4; padding: 0 2 1 2; }
+    .mark, #empty { color: #38adfa; padding: 1 2 0 2; }
+    .markline, #tagline { color: #8aa0b4; padding: 0 2 1 2; }
     Turn { margin: 0 0 1 0; }
     #box {
         height: auto;
@@ -464,8 +464,8 @@ class TarxChat(App):
 
     def mount_mark(self, log=None) -> None:
         log = log or self.query_one("#log", VerticalScroll)
-        log.mount(Static(escape(LOGO), id="empty"))
-        log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", id="tagline"))
+        log.mount(Static(escape(LOGO), classes="mark"))
+        log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", classes="markline"))
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         if getattr(event.widget, "id", None) == "composer":
@@ -633,11 +633,8 @@ class TarxChat(App):
 
     def clear_empty(self) -> None:
         log = self.query_one("#log", VerticalScroll)
-        for ident in ("#empty", "#tagline"):
-            try:
-                log.query_one(ident).remove()
-            except Exception:
-                pass
+        for widget in list(log.query(".mark, .markline, #empty, #tagline")):
+            widget.remove()
 
     def run_command(self, name: str) -> None:
         self.query_one("#composer", Composer).clear()
@@ -646,9 +643,9 @@ class TarxChat(App):
         if name == "/exit":
             self.exit()
         elif name == "/clear":
-            log = self.query_one("#log", VerticalScroll)
-            log.remove_children()
-            self.mount_mark(log)
+            self.messages = [m for m in self.messages if m.get("role") == "system"]
+            save_history(self.hist_path, self.messages)
+            self._show_surface()
         elif name == "/mode":
             self.action_cycle_mode()
             self.note(f"Mode is {self.mode}.")
@@ -684,7 +681,7 @@ class TarxChat(App):
             self.note("Channels: " + ", ".join(CHANNELS) + ". Always On is the agent, not a channel.")
             return
         if cmd == "/agent" and slug in ("", "always-on", "tarx"):
-            self.switch("agent", "always-on")
+            self.open_surface("agent", "always-on")
             return
         if cmd == "/channel" and slug == "always-on":
             self.note("Always On is the agent. Use /agent always-on.")
@@ -692,14 +689,19 @@ class TarxChat(App):
         if not slug:
             self.note("Name the agent. /agent always-on returns to TARX.")
             return
-        self.switch("channel" if cmd == "/channel" else "agent", slug)
+        self.open_surface("channel" if cmd == "/channel" else "agent", slug)
 
-    def switch(self, kind: str, slug: str) -> None:
+    def open_surface(self, kind: str, slug: str) -> None:
         self.surface = (kind, slug)
         self.hist_path = agent_history(kind, slug)
         self.messages = load_history(self.hist_path, self.surface)
+        self._show_surface()
+
+    @work(exclusive=True)
+    async def _show_surface(self) -> None:
+        kind, slug = self.surface
         log = self.query_one("#log", VerticalScroll)
-        log.remove_children()
+        await log.remove_children()
         prior = [m for m in self.messages if m.get("role") in ("user", "assistant")]
         if prior:
             for m in prior:
