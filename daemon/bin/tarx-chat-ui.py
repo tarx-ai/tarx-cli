@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import time
 import urllib.request
 from datetime import datetime
 
@@ -271,13 +272,42 @@ class Turn(Static):
     def redraw(self) -> None:
         label = {"user": "you", "tarx": "tarx", "sys": "sys"}.get(self.who, self.who)
         if self.who == "user":
-            lab, body = "[#8aa0b4]you[/]", f"[#8aa0b4]{escape(self.body)}[/]"
+            lab, body = "[#8aa0b4 bold]you[/]", f"[#8aa0b4]{escape(self.body)}[/]"
         elif self.who == "tarx":
-            lab, body = "[#38adfa]tarx[/]", f"[#d5dde6]{escape(self.body)}[/]"
+            lab, body = "[#38adfa bold]tarx[/]", f"[#f2f6fa]{escape(self.body)}[/]"
         else:
-            lab, body = "[#ffb000]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
+            lab, body = "[#ffb000 bold]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
         caret = " [#38adfa]▌[/]" if self.cursor else ""
         self.update(f"{lab}  {body}{caret}")
+
+
+class Think(Static):
+    """Vertical bars while the door is working, then a single Thought line."""
+
+    def __init__(self):
+        super().__init__()
+        self.t0 = time.monotonic()
+        self.phase = 0
+        self.closed = None
+
+    def on_mount(self) -> None:
+        self.frame()
+
+    def frame(self) -> None:
+        if self.closed is not None:
+            self.update(f"[#38adfa]Thought for {self.closed:.1f}s[/]")
+            return
+        self.phase = (self.phase + 1) % 4
+        rows = []
+        for i in range(self.phase + 1):
+            rows.append("[#38adfa]" + ("▌" * (i + 1)) + "[/]")
+        self.update("\n".join(rows))
+
+    def finish(self) -> None:
+        if self.closed is None:
+            self.closed = max(0.1, time.monotonic() - self.t0)
+        self.frame()
+        return self.closed
 
 
 class TarxChat(App):
@@ -321,7 +351,8 @@ class TarxChat(App):
     Composer .text-area--cursor { background: #38adfa; color: #0c0c10; }
     Composer .text-area--selection { background: #1d4e72; color: #d5dde6; }
     Composer .text-area--cursor-line { background: #0c0c10; }
-    #chrome { height: 1; background: #0c0c10; color: #8aa0b4; padding: 0 0 1 0; }
+    #chrome { height: 1; background: #0c0c10; color: #8aa0b4; padding: 0; }
+    #activity { height: 1; background: #0c0c10; color: #8aa0b4; padding: 0 0 1 0; }
     """
     BINDINGS = [
         Binding("shift+tab", "cycle_mode", "Mode", priority=True),
@@ -342,6 +373,11 @@ class TarxChat(App):
         self.palette_i = 0
         self.pulse = False
         self.reply = None
+        self.think = None
+        self.turn_label = ""
+        self.t0 = 0.0
+        self.clip_hint = False
+        self.clip_n = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
@@ -351,6 +387,7 @@ class TarxChat(App):
             yield Static("", id="chips")
             yield Composer("", id="composer", soft_wrap=True, show_line_numbers=False)
             yield Static("", id="chrome")
+            yield Static("", id="activity")
 
     def on_mount(self) -> None:
         log = self.query_one("#log", VerticalScroll)
@@ -428,6 +465,19 @@ class TarxChat(App):
             f"   {stress_bit}   [#8aa0b4]{clock}[/]"
         )
         self.query_one("#status", Static).update(line1 + "\n" + line2)
+        if self.think is not None and self.busy:
+            self.think.frame()
+        self.clip_n += 1
+        if self.clip_n % 3 == 0 and not self.images:
+            info = clipboard_info()
+            self.clip_hint = any(k in info for k in ("PNGf", "TIFF", "JPEG", "GIFf"))
+        elapsed = max(0.0, time.monotonic() - self.t0) if self.t0 else 0.0
+        bits = []
+        if self.busy:
+            bits.append(f"[#38adfa]thinking… {elapsed:.1f}s[/]")
+        if self.clip_hint and not self.images:
+            bits.append("[#8aa0b4]ctrl+v to attach photo[/]")
+        self.query_one("#activity", Static).update("  ".join(bits))
 
     def paint_chrome(self) -> None:
         photo = f"  ·  ▣ {len(self.images)}" if self.images else ""
@@ -591,11 +641,13 @@ class TarxChat(App):
         label = text.strip()
         if images:
             label = (label + "\n" if label else "") + f"▣ {len(images)} photo" + ("s" if len(images) != 1 else "")
+        self.turn_label = label or "[photo]"
         log = self.query_one("#log", VerticalScroll)
-        log.mount(Turn("user", label or "▣ photo"))
-        self.reply = Turn("tarx", "door · tarx/t-supercomputer")
-        self.reply.cursor = True
-        log.mount(self.reply)
+        log.mount(Turn("user", self.turn_label))
+        self.think = Think()
+        self.reply = None
+        self.t0 = time.monotonic()
+        log.mount(self.think)
         log.scroll_end(animate=False)
         self.messages.append({"role": "user", "content": user_content(text, images, mode)})
         self.busy = True
@@ -604,20 +656,31 @@ class TarxChat(App):
 
     @work(thread=True, exclusive=False)
     def _stream(self) -> None:
-        reply = self.reply
+        label = self.turn_label
+
+        def show(text: str, cursor: bool) -> None:
+            if self.think is not None:
+                self.think.finish()
+            if self.reply is None:
+                self.reply = Turn("tarx", text)
+                self.reply.cursor = cursor
+                self.query_one("#log", VerticalScroll).mount(self.reply)
+            else:
+                self.reply.set_body(text, cursor)
+            self.query_one("#log", VerticalScroll).scroll_end(animate=False)
 
         def on_delta(text: str) -> None:
-            self.call_from_thread(reply.set_body, text, True)
+            self.call_from_thread(show, text, True)
 
         ans, err = stream_reply(self.messages, on_delta)
 
         def done() -> None:
             if err and not ans:
-                reply.set_body("The door did not take that turn. " + err, False)
+                show("The door did not take that turn. " + err, False)
             elif not ans:
-                reply.set_body("No response. The door may be cold. Try again.", False)
+                show("No response. The door may be cold. Try again.", False)
             else:
-                reply.set_body(ans, False)
+                show(ans, False)
                 self.messages.append({"role": "assistant", "content": ans})
             for i in range(len(self.messages) - 1, -1, -1):
                 if self.messages[i].get("role") == "user":
@@ -625,8 +688,9 @@ class TarxChat(App):
                     break
             save_history(self.messages)
             self.busy = False
+            self.think = None
             self.reply = None
-            self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+            self.query_one("#activity", Static).update("")
             nxt = self.queue.pop(0) if self.queue else None
             self.paint_chrome()
             if nxt:
