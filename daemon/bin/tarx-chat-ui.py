@@ -252,6 +252,11 @@ class Composer(TextArea):
             return
         await super()._on_key(event)
 
+    def on_mouse_up(self, event) -> None:
+        text = self.selected_text
+        if text and text.strip():
+            self.app.announce_copy(text)
+
 
 class Turn(Static):
     def __init__(self, who: str, text: str = "", **kwargs):
@@ -378,6 +383,7 @@ class TarxChat(App):
         self.t0 = 0.0
         self.clip_hint = False
         self.clip_n = 0
+        self.copied_until = 0.0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
@@ -471,6 +477,9 @@ class TarxChat(App):
         if self.clip_n % 3 == 0 and not self.images:
             info = clipboard_info()
             self.clip_hint = any(k in info for k in ("PNGf", "TIFF", "JPEG", "GIFf"))
+        if time.monotonic() < self.copied_until:
+            self.query_one("#activity", Static).update("[#38adfa]Copied[/]")
+            return
         elapsed = max(0.0, time.monotonic() - self.t0) if self.t0 else 0.0
         bits = []
         if self.busy:
@@ -529,6 +538,26 @@ class TarxChat(App):
             return
         self.palette_i = (self.palette_i + step) % len(self.palette_rows)
         self.paint_palette()
+
+    def announce_copy(self, text: str) -> None:
+        if not text or not text.strip():
+            return
+        self.copy_to_clipboard(text)
+        self.copied_until = time.monotonic() + 2.5
+        try:
+            self.query_one("#activity", Static).update("[#38adfa]Copied[/]")
+        except Exception:
+            pass
+
+    def on_text_selected(self, event) -> None:
+        self.announce_copy(self.screen.get_selected_text() or "")
+
+    def copy_to_clipboard(self, text: str) -> None:
+        super().copy_to_clipboard(text)
+        try:
+            subprocess.run(["pbcopy"], input=text.encode(), timeout=2, check=False)
+        except Exception:
+            pass
 
     def action_cycle_mode(self) -> None:
         self.mode_i = (self.mode_i + 1) % len(MODES)
