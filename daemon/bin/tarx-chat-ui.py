@@ -3,13 +3,13 @@
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import urllib.request
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -24,14 +24,70 @@ HIST = os.environ.get("TARX_CHAT_HIST", "")
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".tif", ".tiff"}
 
 STYLE = Style.from_dict({
-    "header": "bold",
+    "mark": "#5fd7ff",
     "dim": "#8b93a7",
-    "you": "#d7dbe7",
-    "tarx": "#6cb6ff",
+    "you-label": "#8b93a7",
+    "you": "",
+    "tarx-label": "#6cb6ff bold",
+    "tarx": "",
     "rule": "#6cb6ff",
     "hint": "#8b93a7",
     "chip": "#6cb6ff",
 })
+
+LOGO = """
+        *****      ******      *****
+       *******     ******     *******
+      ********    ********    ********
+      *********   ********    ********
+     **********  **********  **********
+     ***** ***** ********** ***** *****
+     ***** **********  ********** ******
+    *****  **********  **********  *****
+      **    *********  *********
+            ********    ********
+             ******      ******
+****          ****        ****          ****
+****                                    ****
+*****                                  *****
+ *****                                *****
+  ******                            ******
+    ******                        ******
+     *******                    *******
+       **********           *********
+          ************************
+              ****************
+""".strip("\n").split("\n")
+
+
+def term_size():
+    size = shutil.get_terminal_size((80, 24))
+    return size.columns, size.lines
+
+
+def show_mark():
+    _, rows = term_size()
+    return rows >= 42
+
+
+def wrap_words(text, width):
+    width = max(16, width)
+    out = []
+    for para in (text or "").split("\n"):
+        if para == "":
+            out.append("")
+            continue
+        line = ""
+        for word in para.split(" "):
+            if not line:
+                line = word
+            elif len(line) + 1 + len(word) <= width:
+                line += " " + word
+            else:
+                out.append(line)
+                line = word
+        out.append(line)
+    return out or [""]
 
 
 def system_text():
@@ -225,17 +281,20 @@ def main():
     body_window = {"w": None}
 
     def fragments():
+        cols, _ = term_size()
+        width = max(20, cols - 8)
         out = []
         if not turns:
-            out.append(("class:dim", "\n  Message TARX. Paste stays one turn.\n"))
+            out.append(("class:dim", "  Message TARX. A paste is one turn.\n"))
             return out
         for role, text in turns:
-            if role == "user":
-                out.append(("class:dim", "you  "))
-                out.append(("class:you", (text or "") + "\n\n"))
-            else:
-                out.append(("class:tarx", "tarx "))
-                out.append(("class:tarx", (text or "") + "\n\n"))
+            label, lstyle, bstyle = ("you ", "class:you-label", "class:you") if role == "user" else ("tarx", "class:tarx-label", "class:tarx")
+            rows = wrap_words(text, width)
+            for i, row in enumerate(rows):
+                prefix = label if i == 0 else " " * len(label)
+                out.append((lstyle, prefix + "  "))
+                out.append((bstyle, row + "\n"))
+            out.append(("", "\n"))
         return out
 
     def follow():
@@ -246,7 +305,7 @@ def main():
 
     log = Window(
         content=FormattedTextControl(fragments),
-        wrap_lines=True,
+        wrap_lines=False,
         always_hide_cursor=True,
     )
     body_window["w"] = log
@@ -276,8 +335,20 @@ def main():
         base = status["text"] or "paste a photo · ctrl-v attaches the clipboard · enter sends · exit leaves"
         return [("class:hint", "  " + base)]
 
+    def header_text():
+        if not show_mark():
+            return [("class:mark", " TARX"), ("class:dim", "   FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.")]
+        out = []
+        for line in LOGO:
+            out.append(("class:mark", line + "\n"))
+        out.append(("class:dim", "              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.\n"))
+        return out
+
+    def header_height():
+        return len(LOGO) + 1 if show_mark() else 1
+
     root = HSplit([
-        Window(FormattedTextControl(lambda: HTML("<header>TARX</header> <dim>Supercomputer</dim>")), height=1),
+        Window(FormattedTextControl(header_text), height=header_height, dont_extend_height=True),
         log,
         Window(char="─", style="class:rule", height=1),
         ConditionalContainer(Window(FormattedTextControl(chip_text), height=1), filter=Condition(lambda: bool(images))),
