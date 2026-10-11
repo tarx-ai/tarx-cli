@@ -36,7 +36,10 @@ COMMANDS = (
     ("/glyph", "Read the local Glyph loop"),
     ("/mode", "Cycle compose mode"),
     ("/help", "Show the shortcut chrome"),
+    ("/channel", "Enter a user channel"),
+    ("/agent", "Enter an agent, or return to TARX"),
 )
+CHANNELS = ("capabilities", "howdy", "hardware")
 LOGO = """
         *****      ******      *****
        *******     ******     *******
@@ -62,12 +65,44 @@ LOGO = """
 """.strip("\n")
 
 
-def system_text():
+def agent_history(kind, slug):
+    d = os.path.expanduser(f"~/.tarx/agents/{kind}/{slug}")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "history.json")
+    legacy = HIST if kind == "agent" and slug == "always-on" else ""
+    if legacy and os.path.isfile(legacy) and not os.path.isfile(path):
+        try:
+            open(path, "w", encoding="utf-8").write(open(legacy, encoding="utf-8").read())
+        except Exception:
+            pass
+    return path
+
+
+def system_text(surface=("agent", "always-on")):
     base = "You are TARX."
     try:
         base = open(PROMPT, encoding="utf-8").read()
     except Exception:
         pass
+    kind, slug = surface
+    if kind == "agent" and slug == "always-on":
+        where = (
+            "You are the agent TARX – Always On. The other participant is HUMAN until a name is known. "
+            "Spell TARX in all capitals. Stay quiet when nothing is asked. "
+            "Unrelated work belongs on a user channel or another agent, not in this presence. "
+            "Personality, mandate, and standing rules live on this agent, not on the window."
+        )
+    elif kind == "channel":
+        where = (
+            f"You are TARX inside the user channel {slug}. This channel is not Always On. "
+            "The other participant is HUMAN until a name is known. Spell TARX in all capitals."
+        )
+    else:
+        where = (
+            f"You are the agent {slug}. TARX – Always On is the default presence, and this agent is separate. "
+            "The other participant is HUMAN until a name is known. Spell TARX in all capitals."
+        )
+    base = where + "\n\n" + base
     live = ""
     sh = os.path.expanduser("~/.tarx/bin/tarx-live-context.sh")
     if os.path.isfile(sh):
@@ -78,10 +113,10 @@ def system_text():
     return base + "\n\n" + live
 
 
-def load_history():
-    h = [{"role": "system", "content": system_text()}]
+def load_history(path, surface):
+    h = [{"role": "system", "content": system_text(surface)}]
     try:
-        prior = json.load(open(HIST, encoding="utf-8"))
+        prior = json.load(open(path, encoding="utf-8"))
         prior = [m for m in prior if m.get("role") in ("user", "assistant")][-12:]
         h.extend(prior)
     except Exception:
@@ -89,8 +124,8 @@ def load_history():
     return h
 
 
-def save_history(h):
-    if not HIST:
+def save_history(path, h):
+    if not path:
         return
     keep = []
     for m in h:
@@ -101,8 +136,8 @@ def save_history(h):
             c = "[photo]"
         keep.append({"role": m["role"], "content": c})
     try:
-        os.makedirs(os.path.dirname(HIST), exist_ok=True)
-        json.dump(keep[-40:], open(HIST, "w", encoding="utf-8"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json.dump(keep[-40:], open(path, "w", encoding="utf-8"))
     except Exception:
         pass
 
@@ -275,11 +310,10 @@ class Turn(Static):
         self.redraw()
 
     def redraw(self) -> None:
-        label = {"user": "you", "tarx": "tarx", "sys": "sys"}.get(self.who, self.who)
         if self.who == "user":
-            lab, body = "[#8aa0b4 bold]you[/]", f"[#8aa0b4]{escape(self.body)}[/]"
+            lab, body = "[#8aa0b4 bold]HUMAN[/]", f"[#8aa0b4]{escape(self.body)}[/]"
         elif self.who == "tarx":
-            lab, body = "[#38adfa bold]tarx[/]", f"[#f2f6fa]{escape(self.body)}[/]"
+            lab, body = "[#38adfa bold]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
         else:
             lab, body = "[#ffb000 bold]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
         caret = " [#38adfa]▌[/]" if self.cursor else ""
@@ -368,7 +402,9 @@ class TarxChat(App):
 
     def __init__(self):
         super().__init__()
-        self.messages = load_history()
+        self.surface = ("agent", "always-on")
+        self.hist_path = agent_history(*self.surface)
+        self.messages = load_history(self.hist_path, self.surface)
         self.mode_i = 0
         self.images = []
         self.busy = False
@@ -465,9 +501,13 @@ class TarxChat(App):
         stress_bit = "[#ffb000]stress[/]" if stress else "[#38adfa]clear[/]"
         clock = datetime.now().strftime("%H:%M")
         line1 = "[#38adfa]TARX[/]  [#8aa0b4]FREE TO THINK · v1.1.0 · Designed in Austin TX[/]"
+        kind, slug = self.surface
+        place = "TARX – Always On" if (kind, slug) == ("agent", "always-on") else f"{kind} {slug}"
+        mcp = services.get("mcp")
+        mcp_bit = "[#38adfa]MCP up[/]" if mcp == "up" else "[#8aa0b4]MCP —[/]"
         line2 = (
-            f"[#38adfa]{path}[/]  [#8aa0b4]·  {presence}  ·  session live[/]"
-            f"          [#8aa0b4]inference[/] {dot('model')}  [#8aa0b4]mesh[/] {dot('gateway')}  [#8aa0b4]cognitive[/] {dot('cognitive')}"
+            f"[#38adfa]{place}[/]  [#8aa0b4]·[/] [#38adfa]{path}[/]"
+            f"  [#8aa0b4]inference[/] {dot('model')}  [#8aa0b4]mesh[/] {dot('gateway')}  {mcp_bit}"
             f"   {stress_bit}   [#8aa0b4]{clock}[/]"
         )
         self.query_one("#status", Static).update(line1 + "\n" + line2)
@@ -615,7 +655,7 @@ class TarxChat(App):
         elif name == "/help":
             self.help_on = True
             self.paint_chrome()
-            self.note("shift+tab cycles mode. ctrl+v attaches a photo. /presence and /glyph read the live runtime.")
+            self.note("Launch is TARX – Always On. /channel capabilities|howdy|hardware. /agent <name> or /agent always-on.")
         elif name == "/presence":
             p = read_presence()
             stress = p.get("stress") or ["none"]
@@ -633,10 +673,51 @@ class TarxChat(App):
                 out = str(exc)
             self.note(out.strip()[:1200] or "glyph returned nothing")
 
+    def enter_surface(self, line: str) -> None:
+        self.query_one("#composer", Composer).clear()
+        self.palette_rows = []
+        self.paint_palette()
+        parts = line.strip().split()
+        cmd, slug = parts[0], (parts[1].lower() if len(parts) > 1 else "")
+        slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-")[:40]
+        if cmd == "/channel" and not slug:
+            self.note("Channels: " + ", ".join(CHANNELS) + ". Always On is the agent, not a channel.")
+            return
+        if cmd == "/agent" and slug in ("", "always-on", "tarx"):
+            self.switch("agent", "always-on")
+            return
+        if cmd == "/channel" and slug == "always-on":
+            self.note("Always On is the agent. Use /agent always-on.")
+            return
+        if not slug:
+            self.note("Name the agent. /agent always-on returns to TARX.")
+            return
+        self.switch("channel" if cmd == "/channel" else "agent", slug)
+
+    def switch(self, kind: str, slug: str) -> None:
+        self.surface = (kind, slug)
+        self.hist_path = agent_history(kind, slug)
+        self.messages = load_history(self.hist_path, self.surface)
+        log = self.query_one("#log", VerticalScroll)
+        log.remove_children()
+        prior = [m for m in self.messages if m.get("role") in ("user", "assistant")]
+        if prior:
+            for m in prior:
+                who = "user" if m["role"] == "user" else "tarx"
+                log.mount(Turn(who, m.get("content") or ""))
+        else:
+            self.mount_mark(log)
+        title = "TARX – Always On" if self.surface == ("agent", "always-on") else f"{kind} {slug}"
+        self.note(f"Now {title}.")
+        self.paint_chrome()
+
     def submit_from_keys(self) -> None:
         box = self.query_one("#composer", Composer)
         text = box.text
         first = text.strip().splitlines()[0] if text.strip() else ""
+        if first.startswith("/channel") or first.startswith("/agent"):
+            self.enter_surface(first)
+            return
         if self.palette_rows and first.startswith("/"):
             name = self.palette_rows[self.palette_i][0]
             if first == name or first == self.palette_rows[0][0]:
@@ -715,7 +796,7 @@ class TarxChat(App):
                 if self.messages[i].get("role") == "user":
                     self.messages[i] = {"role": "user", "content": label or "[photo]"}
                     break
-            save_history(self.messages)
+            save_history(self.hist_path, self.messages)
             self.busy = False
             self.think = None
             self.reply = None
