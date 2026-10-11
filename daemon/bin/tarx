@@ -362,11 +362,13 @@ sys.stdout.write(''.join(full))
     # Pinned composer. Cmd+V / ctrl-v of a photo attaches from the Mac clipboard.
     _ui="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/tarx-chat-ui.py"
     [ -f "$_ui" ] || _ui="$HOME/.tarx/bin/tarx-chat-ui.py"
+    _py="$HOME/.tarx/venv-tui/bin/python"
+    [ -x "$_py" ] || _py=python3
     TARX_CHAT_URL="$_gw" \
     TARX_CHAT_KEY="$_key" \
     TARX_CHAT_PROMPT="$_spf" \
     TARX_CHAT_HIST="$_histfile" \
-      python3 "$_ui"
+      "$_py" "$_ui"
     return $?
   fi
 
