@@ -10,8 +10,9 @@ from datetime import datetime
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.events import Key
+from textual.containers import Vertical, VerticalScroll
+from textual.theme import Theme
+from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.markup import escape
 from textual.widgets import Static, TextArea
 
@@ -269,45 +270,58 @@ class Turn(Static):
 
     def redraw(self) -> None:
         label = {"user": "you", "tarx": "tarx", "sys": "sys"}.get(self.who, self.who)
-        caret = " [cyan]▌[/]" if self.cursor else ""
-        self.update(f"[b]{label}[/]  {escape(self.body)}{caret}")
+        if self.who == "user":
+            lab, body = "[#8aa0b4]you[/]", f"[#8aa0b4]{escape(self.body)}[/]"
+        elif self.who == "tarx":
+            lab, body = "[#38adfa]tarx[/]", f"[#d5dde6]{escape(self.body)}[/]"
+        else:
+            lab, body = "[#ffb000]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
+        caret = " [#38adfa]▌[/]" if self.cursor else ""
+        self.update(f"{lab}  {body}{caret}")
 
 
 class TarxChat(App):
     TITLE = "TARX"
     CSS = """
-    Screen { background: #0c0c10; color: #d7dbe6; }
+    Screen, App { background: #0c0c10; color: #d5dde6; }
     #status {
         height: 2;
-        background: #101014;
-        color: #d7dbe6;
+        background: #0c0c10;
+        color: #d5dde6;
         padding: 0 1;
-        border-bottom: solid #1c2430;
+        border-bottom: solid #1d4e72;
     }
-    #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; }
-    #empty { color: #00e5ff; padding: 1 2; }
-    #tagline { color: #8b93a7; padding: 0 2 1 2; }
+    #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; scrollbar-color: #38adfa; }
+    #empty { color: #38adfa; padding: 1 2 0 2; }
+    #tagline { color: #8aa0b4; padding: 0 2 1 2; }
     Turn { margin: 0 0 1 0; }
-    Turn.user { color: #d7dbe6; }
-    Turn.tarx { color: #d7dbe6; }
-    Turn.sys { color: #ffb000; }
-    Turn.user Static, Turn.user { color: #d7dbe6; }
-    #dock { height: auto; max-height: 7; background: #14141c; padding: 0 1; display: none; }
-    #dock.open { display: block; border-top: solid #ff2d6a; }
-    #chips { height: 1; color: #00e5ff; padding: 0 1; display: none; }
+    #box {
+        height: auto;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        background: #0c0c10;
+        border: solid #1d4e72;
+    }
+    #box.hot { border: solid #38adfa; }
+    #box.alt { border: solid #ff2d6a; }
+    #box.alt.hot { border: solid #ff6b96; }
+    #dock { height: auto; max-height: 7; background: #0c0c10; padding: 0; display: none; }
+    #dock.open { display: block; }
+    #chips { height: 1; color: #38adfa; display: none; }
     #chips.on { display: block; }
-    Composer, TextArea {
+    Composer {
         height: auto;
         max-height: 8;
-        min-height: 1;
+        min-height: 3;
         background: #0c0c10;
         border: none;
-        padding: 0 1;
+        padding: 0;
     }
-    Composer:focus, TextArea:focus { border: none; }
-    #rule { height: 1; color: #00e5ff; }
-    #chrome { height: 1; background: #101014; color: #8b93a7; padding: 0 1; }
-    .help-on { color: #00e5ff; }
+    Composer:focus { border: none; }
+    Composer .text-area--cursor { background: #38adfa; color: #0c0c10; }
+    Composer .text-area--selection { background: #1d4e72; color: #d5dde6; }
+    Composer .text-area--cursor-line { background: #0c0c10; }
+    #chrome { height: 1; background: #0c0c10; color: #8aa0b4; padding: 0 0 1 0; }
     """
     BINDINGS = [
         Binding("shift+tab", "cycle_mode", "Mode", priority=True),
@@ -332,11 +346,11 @@ class TarxChat(App):
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
         yield VerticalScroll(id="log")
-        yield Static("", id="dock")
-        yield Static("", id="chips")
-        yield Static("─", id="rule")
-        yield Composer("", id="composer", soft_wrap=True, show_line_numbers=False)
-        yield Static("", id="chrome")
+        with Vertical(id="box"):
+            yield Static("", id="dock")
+            yield Static("", id="chips")
+            yield Composer("", id="composer", soft_wrap=True, show_line_numbers=False)
+            yield Static("", id="chrome")
 
     def on_mount(self) -> None:
         log = self.query_one("#log", VerticalScroll)
@@ -346,13 +360,41 @@ class TarxChat(App):
                 who = "user" if m["role"] == "user" else "tarx"
                 log.mount(Turn(who, m.get("content") or ""))
         else:
-            mark = LOGO if self.size.height >= 40 else "TARX"
-            log.mount(Static(escape(mark), id="empty"))
-            log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", id="tagline"))
+            self.mount_mark(log)
+        self.register_theme(Theme(
+            name="tarx",
+            primary="#38ADFA",
+            secondary="#38ADFA",
+            accent="#38ADFA",
+            warning="#ffb000",
+            error="#ffb000",
+            success="#38ADFA",
+            foreground="#d5dde6",
+            background="#0c0c10",
+            surface="#0c0c10",
+            panel="#101014",
+            boost="#12161c",
+            dark=True,
+        ))
+        self.theme = "tarx"
         self.set_interval(1.0, self.tick)
         self.tick()
         self.paint_chrome()
         self.query_one("#composer", Composer).focus()
+        self.query_one("#box").add_class("hot")
+
+    def mount_mark(self, log=None) -> None:
+        log = log or self.query_one("#log", VerticalScroll)
+        log.mount(Static(escape(LOGO), id="empty"))
+        log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", id="tagline"))
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        if getattr(event.widget, "id", None) == "composer":
+            self.query_one("#box").add_class("hot")
+
+    def on_descendant_blur(self, event: DescendantBlur) -> None:
+        if getattr(event.widget, "id", None) == "composer":
+            self.query_one("#box").remove_class("hot")
 
     @property
     def mode(self) -> str:
@@ -374,20 +416,18 @@ class TarxChat(App):
 
         def dot(name):
             up = services.get(name) == "up"
-            color = "#00e5ff" if up and self.pulse else ("#1a6f86" if up else "#ffb000")
+            color = "#38adfa" if up and self.pulse else ("#1d4e72" if up else "#ffb000")
             return f"[{color}]●[/]"
 
-        stress_bit = "[#ffb000]stress[/]" if stress else "[#00e5ff]clear[/]"
+        stress_bit = "[#ffb000]stress[/]" if stress else "[#38adfa]clear[/]"
         clock = datetime.now().strftime("%H:%M")
-        line1 = "[cyan]TARX[/]  [dim]FREE TO THINK · v1.1.0 · Designed in Austin TX[/]"
+        line1 = "[#38adfa]TARX[/]  [#8aa0b4]FREE TO THINK · v1.1.0 · Designed in Austin TX[/]"
         line2 = (
-            f"[cyan]{path}[/]  ·  {presence}  ·  session live"
-            f"          inference {dot('model')}  mesh {dot('gateway')}  cognitive {dot('cognitive')}"
-            f"   {stress_bit}   {clock}"
+            f"[#38adfa]{path}[/]  [#8aa0b4]·  {presence}  ·  session live[/]"
+            f"          [#8aa0b4]inference[/] {dot('model')}  [#8aa0b4]mesh[/] {dot('gateway')}  [#8aa0b4]cognitive[/] {dot('cognitive')}"
+            f"   {stress_bit}   [#8aa0b4]{clock}[/]"
         )
         self.query_one("#status", Static).update(line1 + "\n" + line2)
-        rule = self.query_one("#rule", Static)
-        rule.update("─" * max(20, self.size.width))
 
     def paint_chrome(self) -> None:
         photo = f"  ·  ▣ {len(self.images)}" if self.images else ""
@@ -396,9 +436,12 @@ class TarxChat(App):
         keys = "shift+tab mode · ctrl+x shortcuts · / commands · ctrl+v photo · enter sends"
         if self.help_on:
             keys = "shift+enter newline · esc clears · /exit /presence /glyph /clear /mode"
+        mode_color = "#38adfa" if self.mode == "normal" else "#ff2d6a"
         self.query_one("#chrome", Static).update(
-            f"[cyan]TARX 1.1 · local · {self.mode}[/]{photo}{think}{queued}    [dim]{keys}[/]"
+            f"[{mode_color}]TARX 1.1 · local · {self.mode}[/][#8aa0b4]{photo}{think}{queued}    {keys}[/]"
         )
+        box = self.query_one("#box")
+        box.set_class(self.mode != "normal", "alt")
         chips = self.query_one("#chips", Static)
         if self.images:
             chips.update("  " + "  ".join("▣ photo" for _ in self.images[:4]))
@@ -416,9 +459,9 @@ class TarxChat(App):
         lines = []
         for i, (name, help_text) in enumerate(self.palette_rows):
             if i == self.palette_i:
-                lines.append(f"[black on cyan] {name:<12} {help_text} [/]")
+                lines.append(f"[#0c0c10 on #38adfa] {name:<12} {help_text} [/]")
             else:
-                lines.append(f"[cyan]{name:<12}[/] [dim]{help_text}[/]")
+                lines.append(f"[#38adfa]{name:<12}[/] [#8aa0b4]{help_text}[/]")
         dock.update("\n".join(lines))
         dock.add_class("open")
 
@@ -484,10 +527,9 @@ class TarxChat(App):
         if name == "/exit":
             self.exit()
         elif name == "/clear":
-            self.query_one("#log", VerticalScroll).remove_children()
-            self.query_one("#log", VerticalScroll).mount(
-                Static("FREE TO THINK  ·  screen cleared. Memory is still on disk.", id="tagline")
-            )
+            log = self.query_one("#log", VerticalScroll)
+            log.remove_children()
+            self.mount_mark(log)
         elif name == "/mode":
             self.action_cycle_mode()
             self.note(f"Mode is {self.mode}.")
@@ -503,6 +545,8 @@ class TarxChat(App):
                 + "\n".join(stress)
             )
         elif name == "/glyph":
+            self.clear_empty()
+            self.mount_mark()
             script = os.path.expanduser("~/.tarx/bin/tarx-glyph.sh")
             try:
                 out = subprocess.check_output([script], stderr=subprocess.STDOUT, timeout=8).decode()
