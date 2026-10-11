@@ -460,9 +460,9 @@ class Turn(Static):
 
     def redraw(self) -> None:
         if self.who == "user":
-            lab, body = "[underline #ffffff]HUMAN[/]", f"[#ffffff]{escape(self.body)}[/]"
+            lab, body = "[bold underline #ffffff]HUMAN[/]", f"[#ffffff]{escape(self.body)}[/]"
         elif self.who == "tarx":
-            lab, body = "[underline #38adfa]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
+            lab, body = "[bold underline #38adfa]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
         else:
             lab, body = "[#ffb000 bold]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
         caret = " [#38adfa]▌[/]" if self.cursor else ""
@@ -486,9 +486,10 @@ class Think(Static):
             self.update(f"[#38adfa]Thought for {self.closed:.1f}s[/]")
             return
         self.phase = (self.phase + 1) % 4
+        colors = ("#1d4e72", "#38adfa", "#d7f3ff", "#7ec8f8")
         rows = []
         for i in range(self.phase + 1):
-            rows.append("[#38adfa]" + ("▌" * (i + 1)) + "[/]")
+            rows.append("[" + colors[(self.phase + i) % 4] + "]" + ("▌" * (i + 1)) + "[/]")
         self.update("\n".join(rows))
 
     def finish(self) -> None:
@@ -509,7 +510,15 @@ class TarxChat(App):
         padding: 0 1;
         border-bottom: solid #1d4e72;
     }
-    #log { height: 1fr; padding: 1 2 0 2; background: #0c0c10; scrollbar-color: #38adfa; }
+    #log {
+        height: 1fr;
+        padding: 1 0 0 2;
+        background: #0c0c10;
+        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: #38adfa;
+        scrollbar-background: #0c0c10;
+    }
     #mark, .mark, #empty { color: #38adfa; height: auto; padding: 1 2 0 2; }
     #say, .markline, #tagline { color: #8aa0b4; height: 1; padding: 0 2 1 2; }
     Turn { margin: 0 0 1 0; padding: 0 1; }
@@ -521,6 +530,7 @@ class TarxChat(App):
         border: solid #1d4e72;
     }
     #box.hot { border: solid #38adfa; }
+    #box.hot.shimmer { border: solid #d7f3ff; }
     #box.alt { border: solid #d7c4a3; }
     #box.alt.hot { border: solid #d7c4a3; }
     #dock { height: auto; max-height: 7; background: #0c0c10; padding: 0; display: none; }
@@ -660,6 +670,8 @@ class TarxChat(App):
             f"   {stress_bit}   [#8aa0b4]{clock}[/]"
         )
         self.query_one("#status", Static).update(line1 + "\n" + line2)
+        box = self.query_one("#box")
+        box.set_class(self.pulse and box.has_class("hot"), "shimmer")
         if self.think is not None and self.busy:
             self.think.frame()
         self.clip_n += 1
