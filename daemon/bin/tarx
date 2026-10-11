@@ -369,7 +369,9 @@ sys.stdout.write(''.join(full))
     TARX_CHAT_PROMPT="$_spf" \
     TARX_CHAT_HIST="$_histfile" \
       "$_py" "$_ui"
-    return $?
+    _rc=$?
+    printf 'TARX left the session.\n'
+    return $_rc
   fi
 
   # ── One-shot (with args): fast local Mind ──
@@ -1250,7 +1252,7 @@ except Exception: print(-1)" 2>/dev/null)
   fi
 
   printf '  %s\n' "$_pline"
-  printf '  %bRuntime:%b %b%s%b  ·  %bDoor:%b https://compute.tarx.com (gateway :%s)\n' \
+  printf '  %bRuntime:%b %b%s%b  ·  %bDoor:%b 127.0.0.1:%s\n' \
     "$_dm" "$_rs" "$_rcol" "$_runtime" "$_rs" "$_dm" "$_rs" "$SUPERCOMPUTER_GATEWAY_PORT"
   printf '  %bWatchers:%b runtime-health %b%s%b · memory-consolidation %b%s%b\n' \
     "$_dm" "$_rs" "$(_wcol "$_health")" "$_health" "$_rs" "$(_wcol "$_consol")" "$_consol" "$_rs"
@@ -1389,7 +1391,7 @@ case "$_cmd" in
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   status)    cmd_status ;;
-  __live__)  print_logo; cmd_presence; printf '\n'; cmd_chat ;;
+  __live__)  cmd_chat ;;
   chat)      cmd_chat "$@" ;;
   embed)     cmd_embed "$@" ;;
   search)    cmd_search "$@" ;;
