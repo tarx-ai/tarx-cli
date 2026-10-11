@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
-"""TARX chat, drawn by prompt_toolkit so resize, wrap, and paste stay intact."""
+"""TARX local control surface. Textual TUI, not a plain terminal chat."""
 
 import json
 import os
-import shutil
 import subprocess
-import threading
 import urllib.request
+from datetime import datetime
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.layout import Layout
-from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import TextArea
+from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import VerticalScroll
+from textual.events import Key
+from textual.markup import escape
+from textual.widgets import Static, TextArea
 
 URL = os.environ.get("TARX_CHAT_URL", "http://127.0.0.1:11450")
 KEY = os.environ.get("TARX_CHAT_KEY", "")
 PROMPT = os.environ.get("TARX_CHAT_PROMPT", "")
 HIST = os.environ.get("TARX_CHAT_HIST", "")
 IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".tif", ".tiff"}
-
-STYLE = Style.from_dict({
-    "mark": "#5fd7ff",
-    "dim": "#8b93a7",
-    "you-label": "#8b93a7",
-    "you": "",
-    "tarx-label": "#6cb6ff bold",
-    "tarx": "",
-    "rule": "#6cb6ff",
-    "hint": "#8b93a7",
-    "chip": "#6cb6ff",
-})
-
+MODES = ("normal", "plan", "ask", "always-approve")
+MODE_NOTE = {
+    "normal": "",
+    "plan": "Reply with a short plan only. Do not claim you executed anything.\n\n",
+    "ask": "If one fact is missing, ask one question. Do not claim you executed anything.\n\n",
+    "always-approve": "The operator is in always-approve. This chat has no tools. Do not claim you ran any.\n\n",
+}
+COMMANDS = (
+    ("/exit", "Leave TARX"),
+    ("/clear", "Clear the screen, keep memory"),
+    ("/presence", "Read Always On presence"),
+    ("/glyph", "Read the local Glyph loop"),
+    ("/mode", "Cycle compose mode"),
+    ("/help", "Show the shortcut chrome"),
+)
 LOGO = """
         *****      ******      *****
        *******     ******     *******
@@ -57,37 +57,7 @@ LOGO = """
        **********           *********
           ************************
               ****************
-""".strip("\n").split("\n")
-
-
-def term_size():
-    size = shutil.get_terminal_size((80, 24))
-    return size.columns, size.lines
-
-
-def show_mark():
-    _, rows = term_size()
-    return rows >= 42
-
-
-def wrap_words(text, width):
-    width = max(16, width)
-    out = []
-    for para in (text or "").split("\n"):
-        if para == "":
-            out.append("")
-            continue
-        line = ""
-        for word in para.split(" "):
-            if not line:
-                line = word
-            elif len(line) + 1 + len(word) <= width:
-                line += " " + word
-            else:
-                out.append(line)
-                line = word
-        out.append(line)
-    return out or [""]
+""".strip("\n")
 
 
 def system_text():
@@ -125,13 +95,8 @@ def save_history(h):
         if m.get("role") not in ("user", "assistant"):
             continue
         c = m.get("content")
-        if isinstance(c, list):
-            texts = [p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"]
-            n = sum(1 for p in c if isinstance(p, dict) and p.get("type") == "image_url")
-            text = "\n".join(t for t in texts if t).strip()
-            if n:
-                text = (text + "\n" if text else "") + f"[photo x{n}]"
-            c = text or "[photo]"
+        if not isinstance(c, str):
+            c = "[photo]"
         keep.append({"role": m["role"], "content": c})
     try:
         os.makedirs(os.path.dirname(HIST), exist_ok=True)
@@ -189,31 +154,13 @@ return "ok"
     return dest if os.path.isfile(dest) else None
 
 
-def file_image(path):
-    path = path.strip().strip("'\"")
-    path = path.replace("\\ ", " ")
-    if not path or "\n" in path or not os.path.isfile(path):
-        return None
-    if os.path.splitext(path)[1].lower() not in IMG_EXT:
-        return None
-    dest = f"/tmp/tarx-file-{os.getpid()}.png"
-    try:
-        subprocess.check_call(
-            ["sips", "-s", "format", "png", "-Z", "1280", path, "--out", dest],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        return None
-    return dest
-
-
 def b64_png(path):
     import base64
     return base64.b64encode(open(path, "rb").read()).decode()
 
 
-def user_content(text, images):
-    text = text or ""
+def user_content(text, images, mode):
+    text = (MODE_NOTE.get(mode) or "") + (text or "")
     if not images:
         return text
     parts = [{"type": "text", "text": text.strip() or "Look at the attached photo."}]
@@ -250,11 +197,11 @@ def stream_reply(messages, on_delta):
         line = raw.decode(errors="replace").strip()
         if not line.startswith("data:"):
             continue
-        p = line[5:].strip()
-        if p == "[DONE]":
+        payload = line[5:].strip()
+        if payload == "[DONE]":
             break
         try:
-            delta = json.loads(p).get("choices", [{}])[0].get("delta", {}).get("content") or ""
+            delta = json.loads(payload).get("choices", [{}])[0].get("delta", {}).get("content") or ""
         except Exception:
             continue
         if delta:
@@ -263,237 +210,391 @@ def stream_reply(messages, on_delta):
     return "".join(full), ""
 
 
+def read_presence():
+    try:
+        return json.load(open(os.path.expanduser("~/.tarx/always-on/presence.json")))
+    except Exception:
+        return {}
+
+
+def fuzzy(query):
+    q = query.strip().lower()
+    if not q.startswith("/"):
+        return []
+    needle = q[1:]
+    hits = []
+    for name, help_text in COMMANDS:
+        body = name[1:]
+        if needle in body or all(ch in body for ch in needle):
+            hits.append((name, help_text))
+    return hits[:6]
+
+
+class Composer(TextArea):
+    async def _on_key(self, event: Key) -> None:
+        app = self.app
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            app.submit_from_keys()
+            return
+        if event.key == "shift+enter":
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        if event.key in ("up", "down") and app.palette_open:
+            event.stop()
+            event.prevent_default()
+            app.move_palette(-1 if event.key == "up" else 1)
+            return
+        await super()._on_key(event)
+
+
+class Turn(Static):
+    def __init__(self, who: str, text: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.who = who
+        self.body = text
+        self.cursor = False
+        self.add_class(who)
+
+    def on_mount(self) -> None:
+        self.redraw()
+
+    def set_body(self, text: str, cursor: bool = False) -> None:
+        self.body = text
+        self.cursor = cursor
+        self.redraw()
+
+    def redraw(self) -> None:
+        label = {"user": "you", "tarx": "tarx", "sys": "sys"}.get(self.who, self.who)
+        caret = " [cyan]▌[/]" if self.cursor else ""
+        self.update(f"[b]{label}[/]  {escape(self.body)}{caret}")
+
+
+class TarxChat(App):
+    TITLE = "TARX"
+    CSS = """
+    Screen { background: #0c0c10; color: #d7dbe6; }
+    #status {
+        height: 2;
+        background: #101014;
+        color: #d7dbe6;
+        padding: 0 1;
+        border-bottom: solid #1c2430;
+    }
+    #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; }
+    #empty { color: #00e5ff; padding: 1 2; }
+    #tagline { color: #8b93a7; padding: 0 2 1 2; }
+    Turn { margin: 0 0 1 0; }
+    Turn.user { color: #d7dbe6; }
+    Turn.tarx { color: #d7dbe6; }
+    Turn.sys { color: #ffb000; }
+    Turn.user Static, Turn.user { color: #d7dbe6; }
+    #dock { height: auto; max-height: 7; background: #14141c; padding: 0 1; display: none; }
+    #dock.open { display: block; border-top: solid #ff2d6a; }
+    #chips { height: 1; color: #00e5ff; padding: 0 1; display: none; }
+    #chips.on { display: block; }
+    Composer, TextArea {
+        height: auto;
+        max-height: 8;
+        min-height: 1;
+        background: #0c0c10;
+        border: none;
+        padding: 0 1;
+    }
+    Composer:focus, TextArea:focus { border: none; }
+    #rule { height: 1; color: #00e5ff; }
+    #chrome { height: 1; background: #101014; color: #8b93a7; padding: 0 1; }
+    .help-on { color: #00e5ff; }
+    """
+    BINDINGS = [
+        Binding("shift+tab", "cycle_mode", "Mode", priority=True),
+        Binding("ctrl+x", "toggle_help", "Shortcuts", priority=True),
+        Binding("ctrl+v", "attach", "Photo", priority=True),
+        Binding("escape", "clear_or_close", "Clear", priority=True, show=False),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.messages = load_history()
+        self.mode_i = 0
+        self.images = []
+        self.busy = False
+        self.queue = []
+        self.help_on = False
+        self.palette_rows = []
+        self.palette_i = 0
+        self.pulse = False
+        self.reply = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="status")
+        yield VerticalScroll(id="log")
+        yield Static("", id="dock")
+        yield Static("", id="chips")
+        yield Static("─", id="rule")
+        yield Composer("", id="composer", soft_wrap=True, show_line_numbers=False)
+        yield Static("", id="chrome")
+
+    def on_mount(self) -> None:
+        log = self.query_one("#log", VerticalScroll)
+        prior = [m for m in self.messages if m.get("role") in ("user", "assistant")]
+        if prior:
+            for m in prior:
+                who = "user" if m["role"] == "user" else "tarx"
+                log.mount(Turn(who, m.get("content") or ""))
+        else:
+            mark = LOGO if self.size.height >= 40 else "TARX"
+            log.mount(Static(escape(mark), id="empty"))
+            log.mount(Static("FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.", id="tagline"))
+        self.set_interval(1.0, self.tick)
+        self.tick()
+        self.paint_chrome()
+        self.query_one("#composer", Composer).focus()
+
+    @property
+    def mode(self) -> str:
+        return MODES[self.mode_i]
+
+    @property
+    def palette_open(self) -> bool:
+        return bool(self.palette_rows)
+
+    def tick(self) -> None:
+        self.pulse = not self.pulse
+        p = read_presence()
+        services = p.get("services") or {}
+        stress = p.get("stress") or []
+        runtime = p.get("runtime") or "unknown"
+        armed = p.get("mode") or "unknown"
+        presence = "Always On" if armed == "armed" else armed
+        path = "Supercomputer" if runtime == "up" else runtime
+
+        def dot(name):
+            up = services.get(name) == "up"
+            color = "#00e5ff" if up and self.pulse else ("#1a6f86" if up else "#ffb000")
+            return f"[{color}]●[/]"
+
+        stress_bit = "[#ffb000]stress[/]" if stress else "[#00e5ff]clear[/]"
+        clock = datetime.now().strftime("%H:%M")
+        line1 = "[cyan]TARX[/]  [dim]FREE TO THINK · v1.1.0 · Designed in Austin TX[/]"
+        line2 = (
+            f"[cyan]{path}[/]  ·  {presence}  ·  session live"
+            f"          inference {dot('model')}  mesh {dot('gateway')}  cognitive {dot('cognitive')}"
+            f"   {stress_bit}   {clock}"
+        )
+        self.query_one("#status", Static).update(line1 + "\n" + line2)
+        rule = self.query_one("#rule", Static)
+        rule.update("─" * max(20, self.size.width))
+
+    def paint_chrome(self) -> None:
+        photo = f"  ·  ▣ {len(self.images)}" if self.images else ""
+        think = "  ·  thinking" if self.busy else ""
+        queued = f"  ·  {len(self.queue)} queued" if self.queue else ""
+        keys = "shift+tab mode · ctrl+x shortcuts · / commands · ctrl+v photo · enter sends"
+        if self.help_on:
+            keys = "shift+enter newline · esc clears · /exit /presence /glyph /clear /mode"
+        self.query_one("#chrome", Static).update(
+            f"[cyan]TARX 1.1 · local · {self.mode}[/]{photo}{think}{queued}    [dim]{keys}[/]"
+        )
+        chips = self.query_one("#chips", Static)
+        if self.images:
+            chips.update("  " + "  ".join("▣ photo" for _ in self.images[:4]))
+            chips.add_class("on")
+        else:
+            chips.remove_class("on")
+            chips.update("")
+
+    def paint_palette(self) -> None:
+        dock = self.query_one("#dock", Static)
+        if not self.palette_rows:
+            dock.remove_class("open")
+            dock.update("")
+            return
+        lines = []
+        for i, (name, help_text) in enumerate(self.palette_rows):
+            if i == self.palette_i:
+                lines.append(f"[black on cyan] {name:<12} {help_text} [/]")
+            else:
+                lines.append(f"[cyan]{name:<12}[/] [dim]{help_text}[/]")
+        dock.update("\n".join(lines))
+        dock.add_class("open")
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        text = event.text_area.text
+        if text.startswith("/"):
+            self.palette_rows = fuzzy(text.splitlines()[0] if text else "")
+            self.palette_i = min(self.palette_i, max(0, len(self.palette_rows) - 1))
+        else:
+            self.palette_rows = []
+        self.paint_palette()
+
+    def move_palette(self, step: int) -> None:
+        if not self.palette_rows:
+            return
+        self.palette_i = (self.palette_i + step) % len(self.palette_rows)
+        self.paint_palette()
+
+    def action_cycle_mode(self) -> None:
+        self.mode_i = (self.mode_i + 1) % len(MODES)
+        self.paint_chrome()
+
+    def action_toggle_help(self) -> None:
+        self.help_on = not self.help_on
+        self.paint_chrome()
+
+    def action_attach(self) -> None:
+        path = clipboard_image()
+        if not path:
+            self.note("No photo on the clipboard.")
+            return
+        if len(self.images) >= 4:
+            self.note("Four photos is the limit for one turn.")
+            return
+        self.images.append(path)
+        self.paint_chrome()
+
+    def action_clear_or_close(self) -> None:
+        if self.palette_rows:
+            self.palette_rows = []
+            self.paint_palette()
+            return
+        box = self.query_one("#composer", Composer)
+        if box.text:
+            box.clear()
+
+    def note(self, text: str) -> None:
+        self.query_one("#log", VerticalScroll).mount(Turn("sys", text))
+        self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+
+    def clear_empty(self) -> None:
+        log = self.query_one("#log", VerticalScroll)
+        for ident in ("#empty", "#tagline"):
+            try:
+                log.query_one(ident).remove()
+            except Exception:
+                pass
+
+    def run_command(self, name: str) -> None:
+        self.query_one("#composer", Composer).clear()
+        self.palette_rows = []
+        self.paint_palette()
+        if name == "/exit":
+            self.exit()
+        elif name == "/clear":
+            self.query_one("#log", VerticalScroll).remove_children()
+            self.query_one("#log", VerticalScroll).mount(
+                Static("FREE TO THINK  ·  screen cleared. Memory is still on disk.", id="tagline")
+            )
+        elif name == "/mode":
+            self.action_cycle_mode()
+            self.note(f"Mode is {self.mode}.")
+        elif name == "/help":
+            self.help_on = True
+            self.paint_chrome()
+            self.note("shift+tab cycles mode. ctrl+v attaches a photo. /presence and /glyph read the live runtime.")
+        elif name == "/presence":
+            p = read_presence()
+            stress = p.get("stress") or ["none"]
+            self.note(
+                f"runtime {p.get('runtime', 'unknown')} · mode {p.get('mode', 'unknown')}\n"
+                + "\n".join(stress)
+            )
+        elif name == "/glyph":
+            script = os.path.expanduser("~/.tarx/bin/tarx-glyph.sh")
+            try:
+                out = subprocess.check_output([script], stderr=subprocess.STDOUT, timeout=8).decode()
+            except Exception as exc:
+                out = str(exc)
+            self.note(out.strip()[:1200] or "glyph returned nothing")
+
+    def submit_from_keys(self) -> None:
+        box = self.query_one("#composer", Composer)
+        text = box.text
+        first = text.strip().splitlines()[0] if text.strip() else ""
+        if self.palette_rows and first.startswith("/"):
+            name = self.palette_rows[self.palette_i][0]
+            if first == name or first == self.palette_rows[0][0]:
+                self.run_command(name if first == name or len(self.palette_rows) == 1 else self.palette_rows[self.palette_i][0])
+                return
+            if len(self.palette_rows) == 1:
+                self.run_command(self.palette_rows[0][0])
+                return
+        if text.strip() in ("exit", "quit", ":q") and not self.images:
+            self.exit()
+            return
+        if not text.strip() and not self.images:
+            return
+        payload = (text, list(self.images), self.mode)
+        box.clear()
+        self.images.clear()
+        self.palette_rows = []
+        self.paint_palette()
+        self.paint_chrome()
+        if self.busy:
+            self.queue.append(payload)
+            self.paint_chrome()
+            return
+        self.begin(*payload)
+
+    def begin(self, text: str, images: list, mode: str) -> None:
+        if not KEY:
+            self.note("Supercomputer door needs its key.")
+            return
+        self.clear_empty()
+        label = text.strip()
+        if images:
+            label = (label + "\n" if label else "") + f"▣ {len(images)} photo" + ("s" if len(images) != 1 else "")
+        log = self.query_one("#log", VerticalScroll)
+        log.mount(Turn("user", label or "▣ photo"))
+        self.reply = Turn("tarx", "door · tarx/t-supercomputer")
+        self.reply.cursor = True
+        log.mount(self.reply)
+        log.scroll_end(animate=False)
+        self.messages.append({"role": "user", "content": user_content(text, images, mode)})
+        self.busy = True
+        self.paint_chrome()
+        self._stream()
+
+    @work(thread=True, exclusive=False)
+    def _stream(self) -> None:
+        reply = self.reply
+
+        def on_delta(text: str) -> None:
+            self.call_from_thread(reply.set_body, text, True)
+
+        ans, err = stream_reply(self.messages, on_delta)
+
+        def done() -> None:
+            if err and not ans:
+                reply.set_body("The door did not take that turn. " + err, False)
+            elif not ans:
+                reply.set_body("No response. The door may be cold. Try again.", False)
+            else:
+                reply.set_body(ans, False)
+                self.messages.append({"role": "assistant", "content": ans})
+            for i in range(len(self.messages) - 1, -1, -1):
+                if self.messages[i].get("role") == "user":
+                    self.messages[i] = {"role": "user", "content": label or "[photo]"}
+                    break
+            save_history(self.messages)
+            self.busy = False
+            self.reply = None
+            self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+            nxt = self.queue.pop(0) if self.queue else None
+            self.paint_chrome()
+            if nxt:
+                self.begin(*nxt)
+
+        self.call_from_thread(done)
+
+
 def main():
     if not KEY:
         raise SystemExit("Supercomputer door needs its key.")
-
-    messages = load_history()
-    turns = []
-    for m in messages:
-        if m.get("role") not in ("user", "assistant"):
-            continue
-        c = m.get("content")
-        turns.append((m["role"], c if isinstance(c, str) else "[photo]"))
-
-    images = []
-    status = {"text": ""}
-    busy = {"on": False}
-    body_window = {"w": None}
-
-    def fragments():
-        cols, _ = term_size()
-        width = max(20, cols - 8)
-        out = []
-        if not turns:
-            out.append(("class:dim", "  Message TARX. A paste is one turn.\n"))
-            return out
-        for role, text in turns:
-            label, lstyle, bstyle = ("you ", "class:you-label", "class:you") if role == "user" else ("tarx", "class:tarx-label", "class:tarx")
-            rows = wrap_words(text, width)
-            for i, row in enumerate(rows):
-                prefix = label if i == 0 else " " * len(label)
-                out.append((lstyle, prefix + "  "))
-                out.append((bstyle, row + "\n"))
-            out.append(("", "\n"))
-        return out
-
-    def follow():
-        w = body_window["w"]
-        info = getattr(w, "render_info", None) if w else None
-        if info and info.content_height > info.window_height:
-            w.vertical_scroll = info.content_height - info.window_height
-
-    log = Window(
-        content=FormattedTextControl(fragments),
-        wrap_lines=False,
-        always_hide_cursor=True,
-    )
-    body_window["w"] = log
-
-    def composer_height():
-        n = composer.buffer.text.count("\n") + 1
-        return min(8, max(1, n))
-
-    def line_prefix(lineno, wrap_count):
-        return [("class:rule", "│ ")]
-
-    composer = TextArea(
-        multiline=True,
-        wrap_lines=True,
-        height=composer_height,
-        prompt="",
-        get_line_prefix=line_prefix,
-        style="",
-        focusable=True,
-        complete_while_typing=False,
-    )
-
-    def chip_text():
-        return [("class:chip", "  " + "  ".join("▣ photo" for _ in images[:4]))]
-
-    def hint_text():
-        base = status["text"] or "paste a photo · ctrl-v attaches the clipboard · enter sends · exit leaves"
-        return [("class:hint", "  " + base)]
-
-    def header_text():
-        if not show_mark():
-            return [("class:mark", " TARX"), ("class:dim", "   FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.")]
-        out = []
-        for line in LOGO:
-            out.append(("class:mark", line + "\n"))
-        out.append(("class:dim", "              FREE TO THINK  ·  v1.1.0  ·  Designed in Austin TX.\n"))
-        return out
-
-    def header_height():
-        return len(LOGO) + 1 if show_mark() else 1
-
-    root = HSplit([
-        Window(FormattedTextControl(header_text), height=header_height, dont_extend_height=True),
-        log,
-        Window(char="─", style="class:rule", height=1),
-        ConditionalContainer(Window(FormattedTextControl(chip_text), height=1), filter=Condition(lambda: bool(images))),
-        composer,
-        Window(FormattedTextControl(hint_text), height=1, dont_extend_height=True),
-    ])
-
-    app_box = {"app": None}
-
-    def paint():
-        app = app_box["app"]
-        if app is not None:
-            follow()
-            app.invalidate()
-
-    def attach(path, note):
-        if not path:
-            status["text"] = "No photo on the clipboard."
-            paint()
-            return
-        if len(images) >= 4:
-            status["text"] = "Four photos is the limit for one turn."
-            paint()
-            return
-        images.append(path)
-        status["text"] = note
-        paint()
-
-    def finish_turn(label, ans, err):
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                messages[i] = {"role": "user", "content": label or "[photo]"}
-                break
-        if err and not ans:
-            turns[-1] = ("assistant", "The door did not take that turn. " + err)
-        elif not ans:
-            turns[-1] = ("assistant", "No response. The door may be cold. Try again.")
-        else:
-            turns[-1] = ("assistant", ans)
-            messages.append({"role": "assistant", "content": ans})
-        save_history(messages)
-        busy["on"] = False
-        status["text"] = ""
-        paint()
-
-    def submit():
-        if busy["on"]:
-            return
-        text = composer.buffer.text
-        if text.strip() in ("exit", "quit", ":q") and not images:
-            app_box["app"].exit()
-            return
-        if not text.strip() and not images:
-            return
-        imgs = list(images)
-        label = text.strip()
-        if imgs:
-            label = (label + "\n" if label else "") + f"▣ {len(imgs)} photo" + ("s" if len(imgs) != 1 else "")
-        turns.append(("user", label or "▣ photo"))
-        turns.append(("assistant", ""))
-        messages.append({"role": "user", "content": user_content(text, imgs)})
-        composer.buffer.text = ""
-        images.clear()
-        busy["on"] = True
-        status["text"] = "thinking"
-        paint()
-
-        def work():
-            def on_delta(so_far):
-                turns[-1] = ("assistant", so_far)
-                status["text"] = ""
-
-                def ui():
-                    paint()
-                app = app_box["app"]
-                if app is not None:
-                    app.loop.call_soon_threadsafe(ui)
-
-            ans, err = stream_reply(messages, on_delta)
-            app = app_box["app"]
-            if app is not None:
-                app.loop.call_soon_threadsafe(lambda: finish_turn(label, ans, err))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    kb = KeyBindings()
-
-    @kb.add("enter", eager=True)
-    def _enter(event):
-        submit()
-
-    @kb.add("c-j", eager=True)
-    def _cj(event):
-        submit()
-
-    @kb.add("c-c", eager=True)
-    def _cc(event):
-        event.app.exit()
-
-    @kb.add("c-d", eager=True)
-    def _cd(event):
-        if not composer.buffer.text and not images:
-            event.app.exit()
-
-    @kb.add("c-v", eager=True)
-    def _cv(event):
-        img = clipboard_image()
-        if img:
-            attach(img, "Photo attached. Add a line, or press enter.")
-            return
-        try:
-            t = subprocess.check_output(["pbpaste"], timeout=2).decode()
-        except Exception:
-            t = ""
-        if t:
-            composer.buffer.insert_text(t)
-        else:
-            status["text"] = "Clipboard has no photo."
-        paint()
-
-    @kb.add("escape", "enter", eager=True)
-    def _break(event):
-        composer.buffer.newline()
-
-    app = Application(
-        layout=Layout(root, focused_element=composer),
-        key_bindings=kb,
-        full_screen=True,
-        style=STYLE,
-        mouse_support=True,
-    )
-    app_box["app"] = app
-
-    # A pasted image path becomes a chip instead of text.
-    original_insert = composer.buffer.insert_text
-
-    def insert_text(data, overwrite=False, move_cursor=True, fire_event=True):
-        img = file_image(data)
-        if img and data.strip() == data.strip().splitlines()[0]:
-            attach(img, "Photo attached. Add a line, or press enter.")
-            return
-        return original_insert(data, overwrite=overwrite, move_cursor=move_cursor, fire_event=fire_event)
-
-    composer.buffer.insert_text = insert_text
-    app.run()
+    TarxChat().run()
     return 0
 
 
