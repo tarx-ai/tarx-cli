@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -17,6 +18,17 @@ from textual.events import DescendantBlur, DescendantFocus, Key
 from textual.markup import escape
 from textual.widgets import Static, TextArea
 
+def live_version() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", "/Users/master/Desktop/TARX/Repos - active/tarx-cli", "describe", "--tags", "--always"],
+            text=True, timeout=3,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+CLI_VERSION = live_version()
 URL = os.environ.get("TARX_CHAT_URL", "http://127.0.0.1:11450")
 KEY = os.environ.get("TARX_CHAT_KEY", "")
 PROMPT = os.environ.get("TARX_CHAT_PROMPT", "")
@@ -77,6 +89,56 @@ def agent_history(kind, slug):
         except Exception:
             pass
     return path
+
+
+REGISTRY = os.path.expanduser("~/.tarx/agents/registry.json")
+
+
+def load_registry():
+    base = {
+        "schema": "tarx.agent_surface.v1",
+        "agents": [{"id": "always-on", "slug": "always-on", "name": "Always On", "system": True}],
+        "channels": [],
+    }
+    try:
+        found = json.loads(open(REGISTRY, encoding="utf-8").read())
+    except Exception:
+        found = {}
+    agents = found.get("agents") if isinstance(found.get("agents"), list) else []
+    channels = found.get("channels") if isinstance(found.get("channels"), list) else []
+    if not any(item.get("slug") == "always-on" for item in agents if isinstance(item, dict)):
+        agents.insert(0, base["agents"][0])
+    base["agents"] = agents
+    base["channels"] = [item for item in channels if isinstance(item, dict) and item.get("slug") != "always-on"]
+    return base
+
+
+def save_registry(data):
+    os.makedirs(os.path.dirname(REGISTRY), exist_ok=True)
+    open(REGISTRY, "w", encoding="utf-8").write(json.dumps(data, indent=2) + "\n")
+
+
+def slugify(name):
+    slug = "".join(ch if ch.isalnum() else "-" for ch in name.lower())
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")[:40]
+
+
+def create_record(kind, name):
+    slug = slugify(name)
+    if not slug:
+        return None, "Name the " + kind + "."
+    if kind == "channel" and slug == "always-on":
+        return None, "Always On is the agent. Use /agent always-on."
+    data = load_registry()
+    key = "agents" if kind == "agent" else "channels"
+    if any(item.get("slug") == slug for item in data[key]):
+        return slug, f"{kind} {slug} already exists."
+    data[key].append({"id": slug, "slug": slug, "name": name.strip()[:80], "system": slug == "always-on"})
+    save_registry(data)
+    agent_history(kind, slug)
+    return slug, f"Created {kind} {slug}."
 
 
 def system_text(surface=("agent", "always-on")):
@@ -207,6 +269,89 @@ def user_content(text, images, mode):
     return parts
 
 
+NEG_LOG = os.path.expanduser("~/.tarx/always-on/negative-examples.jsonl")
+CLI_REPO = "/Users/master/Desktop/TARX/Repos - active/tarx-cli"
+_HASH = re.compile(r"\b[0-9a-f]{7,64}\b", re.I)
+_FENCE = re.compile(r"```[^\n]*\n?([\s\S]*?)```")
+_NAME = re.compile(r"\b(?:qwen[\w.\-]*|nemotron[\w.\-]*|claude[\w.\-]*|tarx/t-[\w.\-]*|:808\d|:114\d\d)\b", re.I)
+_CLAIM = re.compile(
+    r"\b(done|proven|HEAD|tarx/t-|qwen|nemotron|claude|:114\d\d|:808\d|upstream_failures)\b",
+    re.I,
+)
+
+
+def _tool(cmd):
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+    except Exception as exc:
+        return "", f"{exc}"
+    text = proc.stdout if proc.returncode == 0 else (proc.stdout + proc.stderr)
+    return text, ""
+
+
+def _tools_for(user_text):
+    text = user_text or ""
+    cmds = []
+    if re.search(r"\bHEAD\b|\bgit\b", text, re.I):
+        cmds.append(["git", "-C", CLI_REPO, "rev-parse", "HEAD"])
+    if re.search(r"health|gateway", text, re.I):
+        cmds.append(["curl", "-sS", "--max-time", "5", "http://127.0.0.1:11450/health"])
+    if re.search(r"\blsof\b|listen", text, re.I):
+        cmds.append(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"])
+    if re.search(r"\bps\b|process", text, re.I):
+        cmds.append(["ps", "-ax", "-o", "pid=,command="])
+    return cmds
+
+
+def _log_negative(claim, why):
+    os.makedirs(os.path.dirname(NEG_LOG), exist_ok=True)
+    row = {
+        "at": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "kind": "fabricated_tool_output",
+        "claim": claim[:500],
+        "why": why[:500],
+    }
+    with open(NEG_LOG, "a") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def evidence_gate(user_text, model_text):
+    """Accept a reply only with real tool stdout. Drop model-written command blocks."""
+    chunks = []
+    for cmd in _tools_for(user_text):
+        out, err = _tool(cmd)
+        chunks.append(out if out else err)
+    stdout = "\n".join(chunks)
+    rejected = []
+    cleaned = model_text or ""
+    for match in _FENCE.finditer(cleaned):
+        body = match.group(1).strip()
+        if body and body not in stdout:
+            rejected.append(body[:240])
+            cleaned = cleaned.replace(match.group(0), "")
+    kept = []
+    for line in cleaned.splitlines():
+        hashes = _HASH.findall(line)
+        names = _NAME.findall(line)
+        bad_hash = any(item.lower() not in stdout.lower() for item in hashes)
+        bad_name = any(item.lower() not in stdout.lower() for item in names)
+        looks_like_tool = bool(re.match(r"\s*(\$ |HTTP/|commit |\{)", line)) or '"ts"' in line or '"status"' in line
+        if bad_hash or bad_name or (looks_like_tool and line.strip() not in stdout):
+            rejected.append(line.strip()[:240])
+            continue
+        kept.append(line)
+    prose = "\n".join(kept).strip()
+    claims = bool(_CLAIM.search(model_text or ""))
+    if claims and not stdout.strip():
+        rejected.append("claim without tool stdout")
+        prose = "Not proven. This turn has no tool stdout."
+    if rejected:
+        _log_negative(model_text or "", "rejected model command block: " + rejected[0])
+    if stdout.strip():
+        return (prose + "\n\n" + stdout).strip() if prose else stdout
+    return prose
+
+
 def stream_reply(messages, on_delta):
     body = json.dumps({
         "model": "tarx/t-supercomputer",
@@ -315,9 +460,9 @@ class Turn(Static):
 
     def redraw(self) -> None:
         if self.who == "user":
-            lab, body = "[#8aa0b4 bold]HUMAN[/]", f"[#8aa0b4]{escape(self.body)}[/]"
+            lab, body = "[underline #ffffff]HUMAN[/]", f"[#ffffff]{escape(self.body)}[/]"
         elif self.who == "tarx":
-            lab, body = "[#38adfa]***[/] [#38adfa bold]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
+            lab, body = "[underline #38adfa]TARX[/]", f"[#f2f6fa]{escape(self.body)}[/]"
         else:
             lab, body = "[#ffb000 bold]sys[/]", f"[#ffb000]{escape(self.body)}[/]"
         caret = " [#38adfa]▌[/]" if self.cursor else ""
@@ -364,10 +509,10 @@ class TarxChat(App):
         padding: 0 1;
         border-bottom: solid #1d4e72;
     }
-    #log { height: 1fr; padding: 1 1 0 1; background: #0c0c10; scrollbar-color: #38adfa; }
+    #log { height: 1fr; padding: 1 2 0 2; background: #0c0c10; scrollbar-color: #38adfa; }
     #mark, .mark, #empty { color: #38adfa; height: auto; padding: 1 2 0 2; }
     #say, .markline, #tagline { color: #8aa0b4; height: 1; padding: 0 2 1 2; }
-    Turn { margin: 0 0 1 0; }
+    Turn { margin: 0 0 1 0; padding: 0 1; }
     #box {
         height: auto;
         margin: 0 1 1 1;
@@ -376,8 +521,8 @@ class TarxChat(App):
         border: solid #1d4e72;
     }
     #box.hot { border: solid #38adfa; }
-    #box.alt { border: solid #ff2d6a; }
-    #box.alt.hot { border: solid #ff6b96; }
+    #box.alt { border: solid #d7c4a3; }
+    #box.alt.hot { border: solid #d7c4a3; }
     #dock { height: auto; max-height: 7; background: #0c0c10; padding: 0; display: none; }
     #dock.open { display: block; }
     #chips { height: 1; color: #38adfa; display: none; }
@@ -504,7 +649,7 @@ class TarxChat(App):
 
         stress_bit = "[#ffb000]stress[/]" if stress else "[#38adfa]clear[/]"
         clock = datetime.now().strftime("%H:%M")
-        line1 = "[#38adfa]TARX[/]  [#8aa0b4]FREE TO THINK · v1.1.0 · Designed in Austin TX[/]"
+        line1 = f"[#38adfa]TARX[/]  [#8aa0b4]FREE TO THINK · {CLI_VERSION} · Designed in Austin TX[/]"
         kind, slug = self.surface
         place = "TARX – Always On" if (kind, slug) == ("agent", "always-on") else f"{kind} {slug}"
         mcp = services.get("mcp")
@@ -539,9 +684,9 @@ class TarxChat(App):
         keys = "shift+tab mode · ctrl+x shortcuts · / commands · ctrl+v photo · enter sends"
         if self.help_on:
             keys = "shift+enter newline · esc clears · /exit /presence /glyph /clear /mode"
-        mode_color = "#38adfa" if self.mode == "normal" else "#ff2d6a"
+        mode_color = "#38adfa" if self.mode == "normal" else "#d7c4a3"
         self.query_one("#chrome", Static).update(
-            f"[{mode_color}]TARX 1.1 · local · {self.mode}[/][#8aa0b4]{photo}{think}{queued}    {keys}[/]"
+            f"[{mode_color}]TARX {CLI_VERSION} · local · {self.mode}[/][#8aa0b4]{photo}{think}{queued}    {keys}[/]"
         )
         box = self.query_one("#box")
         box.set_class(self.mode != "normal", "alt")
@@ -707,14 +852,30 @@ class TarxChat(App):
         parts = line.strip().split()
         cmd, slug = parts[0], (parts[1].lower() if len(parts) > 1 else "")
         slug = "".join(ch for ch in slug if ch.isalnum() or ch == "-")[:40]
+        if cmd == "/agents":
+            names = [item.get("slug") for item in load_registry()["agents"]]
+            self.note("Agents: " + ", ".join(names) + ". Always On is the default agent.")
+            return
+        if cmd == "/channels":
+            names = [item.get("slug") for item in load_registry()["channels"]] or list(CHANNELS)
+            self.note("Channels: " + ", ".join(names) + ". Always On is not a channel.")
+            return
         if cmd == "/channel" and not slug:
-            self.note("Channels: " + ", ".join(CHANNELS) + ". Always On is the agent, not a channel.")
+            names = [item.get("slug") for item in load_registry()["channels"]] or list(CHANNELS)
+            self.note("Channels: " + ", ".join(names) + ". Always On is the agent, not a channel.")
             return
         if cmd == "/agent" and slug in ("", "always-on", "tarx"):
             self.open_surface("agent", "always-on")
             return
         if cmd == "/channel" and slug == "always-on":
             self.note("Always On is the agent. Use /agent always-on.")
+            return
+        if len(parts) > 2 and parts[1].lower() == "new":
+            kind = "channel" if cmd == "/channel" else "agent"
+            made, msg = create_record(kind, " ".join(parts[2:]))
+            self.note(msg)
+            if made:
+                self.open_surface(kind, made)
             return
         if not slug:
             self.note("Name the agent. /agent always-on returns to TARX.")
@@ -814,7 +975,7 @@ class TarxChat(App):
         def on_delta(text: str) -> None:
             self.call_from_thread(show, text, True)
 
-        ans, err = stream_reply(self.messages, on_delta)
+        ans, err = stream_reply(self.messages, lambda _text: None)
 
         def done() -> None:
             if err and not ans:
