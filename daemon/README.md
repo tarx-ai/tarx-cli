@@ -48,6 +48,8 @@ The cross-surface command is the same on the CLI, Slack, and Gmail. Start on Alw
 
 `https://tarx.com/agents` and `https://tarx.com/channels` stay 404 until a production catalog exists. The production app shell on app.tarx.com and cli.tarx.com does not list Computer agents. No production catalog of those agents was found, so nothing was wired to copy the Mac file.
 
+Computer registry is local-only. Web Always On talks to the gateway. No second list.
+
 ## Install on a node (manual)
 
 1. Copy `daemon/bin/*` → `~/.tarx/bin/` and `chmod +x`.
