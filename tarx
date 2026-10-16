@@ -308,19 +308,65 @@ def introspect(key):
         return "no"
     return "unknown"
 
-def authorize(reconnect):
+def show_commands():
+    say("/agents     who can work")
+    say("/channels   rooms you can open")
+    say("/signin     connect this computer")
+
+def handle_command(text):
+    low = " ".join(text.strip().lower().split())
+    if low in {"/agents", "/agent"}:
+        say("Always On is the agent in this conversation.")
+        say("A specialist takes one task from Always On and brings the result back.")
+        say("Listing them does not start that work.")
+        return True
+    if low in {"/channels", "/channel"}:
+        say("Channels are rooms. Looking does not join the room.")
+        say("Howdy, Builders, Enterprise, and Government are open at https://tarx.com/agent.")
+        return True
+    if low in {"/help", "/?"}:
+        show_commands()
+        return True
+    if low in {"/signin", "/sign-in", "sign in", "signin"}:
+        return "signin"
+    return False
+
+def guest_command(text):
+    low = " ".join(text.strip().lower().split())
+    if low in {"agents", "channels", "help"}:
+        return handle_command("/" + low)
+    return handle_command(text)
+
+def lobby(reconnect):
     if reconnect:
-        say("Your session expired. Let's reconnect your account.")
+        say("Your session expired. You can keep looking, or connect this computer again.")
     else:
-        say("Welcome to TARX. Let's connect your account.")
-    say("Press return to sign in in your browser.")
-    line = sys.stdin.readline()
-    if line == "":
-        say("Sign-in needs a terminal. Run tarx again.")
-        return ""
-    if line.strip().lower() in {"cancel", "no", "quit", "exit"}:
-        say("Sign-in cancelled.")
-        return ""
+        say("Welcome to TARX.")
+        say("You can look around before connecting an account.")
+    show_commands()
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return ""
+        text = line.strip()
+        if not text:
+            continue
+        if text.lower() in {"exit", "quit"}:
+            return ""
+        found = guest_command(text)
+        if found == "signin":
+            key = begin_sign_in()
+            if key:
+                return key
+            say("You can keep looking.")
+            show_commands()
+            continue
+        if found:
+            continue
+        say("That stays on this visit until the computer is connected.")
+        show_commands()
+
+def begin_sign_in():
     status, body = http("POST", AUTH + "/api/auth/device", {}, timeout=20)
     device = body.get("device_code") if status == 200 else ""
     url = body.get("verification_uri") if isinstance(body.get("verification_uri"), str) else ""
@@ -418,7 +464,7 @@ def send_once(key, prompt):
     kind, text = reply_for(key, prompt)
     if kind == "expired":
         clear_key()
-        key = authorize(True)
+        key = lobby(True)
         if not key:
             return 1
         kind, text = reply_for(key, prompt)
@@ -443,13 +489,25 @@ def loop():
             if key:
                 http("POST", AUTH + "/api/auth/cli/revoke", {"token": key}, timeout=10)
             clear_key()
-            say("You're signed out.")
-            return 0
+            say("You're signed out. You can keep looking.")
+            show_commands()
+            continue
+        found = handle_command(text) if text.startswith("/") or text.lower() in {"sign in", "signin"} else False
+        if found == "signin":
+            if read_key():
+                say("This computer is already connected.")
+            else:
+                key = begin_sign_in()
+                if key:
+                    say("You're signed in. What would you like to do?")
+            continue
+        if found:
+            continue
         key = read_key()
         if not key:
-            key = authorize(False)
-            if not key:
-                return 1
+            say("That stays on this visit until the computer is connected.")
+            show_commands()
+            continue
         if send_once(key, text) != 0 and not read_key():
             return 1
 
@@ -463,10 +521,14 @@ def main():
         reconnect = True
     created = False
     if not key:
-        key = authorize(reconnect)
+        if once:
+            say("Sending that connects this computer.")
+            say("Run tarx, then /signin.")
+            return 1
+        key = lobby(reconnect)
         created = True
         if not key:
-            return 1
+            return 0
     if once:
         return send_once(key, once)
     if not created:
