@@ -241,7 +241,8 @@ _tarx_session() {
   if ! command -v python3 >/dev/null 2>&1; then
     err "TARX needs Python 3 on this computer before it can continue."
   fi
-  TARX_CHAT_TEXT="${1-}" python3 - << 'PY'
+  # The program is on fd 3 so the terminal stays attached to the conversation.
+  TARX_CHAT_TEXT="${1-}" python3 /dev/fd/3 3<< 'PY'
 import json, os, select, subprocess, sys, urllib.error, urllib.request
 from pathlib import Path
 
