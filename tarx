@@ -363,15 +363,43 @@ def lobby(reconnect):
             continue
         if found:
             continue
+        if asks_identity(text):
+            say("This visit is not connected, so there is no account name yet.")
+            say("Say /signin to connect this computer.")
+            continue
         say("That stays on this visit until the computer is connected.")
         show_commands()
 
+def refresh_label(key):
+    status, body = http("POST", AUTH + "/api/auth/cli/introspect", {"token": key}, timeout=10)
+    if status == 200 and body.get("ok") is True and isinstance(body.get("label"), str):
+        return body["label"].strip()
+    return ""
+
 def wake_always_on():
+    label = refresh_label(read_key())
     say("Always On is on.")
-    say("This computer is connected, and I'll stay in this conversation.")
+    if label:
+        say("You are " + label + ", and this computer is connected.")
+    else:
+        say("This computer is connected, and I'll stay in this conversation.")
     say("The queue is clear, so I'm listening.")
     say("A specialist starts when you give me one task.")
     show_commands()
+
+def asks_identity(text):
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text.lower())
+    cleaned = " ".join(cleaned.split())
+    return cleaned in {"who am i", "whoami", "if i am authed who am i", "if i am authenticated who am i"}
+
+def say_who(key):
+    label = refresh_label(key)
+    if label:
+        say("You are " + label + ".")
+        say("I am TARX, Always On.")
+        return
+    say("This computer is connected, but this sign-in did not keep your account name.")
+    say("Say /signin once more. I will keep the name from that approval.")
 
 def begin_sign_in():
     status, body = http("POST", AUTH + "/api/auth/device", {}, timeout=20)
@@ -447,9 +475,16 @@ def time_sleep(seconds):
     time.sleep(seconds)
 
 def reply_for(key, prompt):
+    label = refresh_label(key)
+    messages = [{"role": "user", "content": prompt}]
+    if label:
+        messages.insert(0, {
+            "role": "system",
+            "content": "You are TARX, Always On. The human signed in on this computer is " + label + ". If they ask who they are, answer with that name. Do not invent a different identity.",
+        })
     status, body = http("POST", DOOR, {
         "model": "tarx/t-supercomputer",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": False,
         "max_tokens": 160,
         "temperature": 0,
@@ -510,6 +545,13 @@ def loop():
         if found:
             continue
         key = read_key()
+        if asks_identity(text):
+            if not key:
+                say("This visit is not connected, so there is no account name yet.")
+                say("Say /signin to connect this computer.")
+            else:
+                say_who(key)
+            continue
         if not key:
             say("That stays on this visit until the computer is connected.")
             show_commands()
