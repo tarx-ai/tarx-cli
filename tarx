@@ -248,7 +248,7 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", ""))
 KEY_PATH = HOME / ".tarx" / "state" / "chat-key"
-AUTH = "https://tarx.com"
+AUTH = os.environ.get("TARX_AUTH_ORIGIN", "https://tarx.com").rstrip("/")
 DOOR = "https://compute.tarx.com/v1/chat/completions"
 
 def say(text):
@@ -325,13 +325,13 @@ def authorize(reconnect):
     device = body.get("device_code") if status == 200 else ""
     url = body.get("verification_uri") if isinstance(body.get("verification_uri"), str) else ""
     code = body.get("user_code") if isinstance(body.get("user_code"), str) else ""
-    if not device or not url.startswith("https://tarx.com/auth/device?"):
+    if not device or not (url.startswith(AUTH + "/auth/device?") or url.startswith(AUTH + "/agent?cli=")):
         say("Sign-in is unavailable. Try again in a moment.")
         return ""
     say("Finish signing in in your browser. I'll pick up here when you're done.")
     say("This terminal's code is " + code + ".")
     say(url)
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and os.environ.get("TARX_AUTH_NO_BROWSER") != "1":
         subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time_left(body.get("expires_in"))
     interval = body.get("interval") if isinstance(body.get("interval"), int) else 2
@@ -345,9 +345,7 @@ def authorize(reconnect):
                 if typed == "":
                     watch = False
                 elif typed.strip().lower() in {"cancel", "quit", "exit"}:
-                    http("POST", AUTH + "/api/auth/device/cancel", {"device_code": device}, timeout=10)
-                    say("Sign-in cancelled.")
-                    return ""
+                    return finish_cancel(device)
         else:
             time_sleep(interval)
         status, polled = http("POST", AUTH + "/api/auth/device/poll", {"device_code": device}, timeout=10)
@@ -362,8 +360,23 @@ def authorize(reconnect):
         if state == "expired" or status == 400:
             say("That sign-in expired. Run tarx to try again.")
             return ""
-    http("POST", AUTH + "/api/auth/device/cancel", {"device_code": device}, timeout=10)
-    say("That sign-in expired. Run tarx to try again.")
+    return finish_cancel(device, expired=True)
+
+def finish_cancel(device, expired=False):
+    status, body = http("POST", AUTH + "/api/auth/device/cancel", {"device_code": device}, timeout=10)
+    if status == 200 and body.get("ok") is True:
+        say("That sign-in expired. Run tarx to try again." if expired else "Sign-in cancelled.")
+        return ""
+    status, polled = http("POST", AUTH + "/api/auth/device/poll", {"device_code": device}, timeout=10)
+    state = polled.get("status")
+    if state == "complete" and isinstance(polled.get("credential"), str):
+        write_key(polled["credential"])
+        say("This terminal was already approved. You're signed in.")
+        return read_key()
+    if state == "canceled":
+        say("Sign-in cancelled.")
+        return ""
+    say("That sign-in expired. Run tarx to try again." if expired else "Sign-in could not be cancelled. Run tarx to try again.")
     return ""
 
 def time_left(value):
