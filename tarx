@@ -237,6 +237,53 @@ cmd_status() {
 
 # ── chat ─────────────────────────────────────────────────────────────
 
+_read_chat_key() {
+  _key="${TARX_CHAT_KEY:-}"
+  if [ -z "$_key" ] && [ -f "${HOME}/.tarx/state/chat-key" ]; then
+    _key=$(tr -d '[:space:]' < "${HOME}/.tarx/state/chat-key")
+  fi
+  printf '%s' "$_key"
+}
+
+cmd_front() {
+  _key=$(_read_chat_key)
+  if [ -n "$_key" ]; then
+    printf "You're signed in. What would you like to do?\n"
+    IFS= read -r _line || return 0
+    [ -n "$_line" ] || return 0
+    TARX_CHAT_KEY="$_key" cmd_chat "$_line"
+    return
+  fi
+  printf "Welcome to TARX. Let's connect your account.\n"
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "python3 is required"
+  fi
+  _start=$(curl -sf -m 20 -X POST https://tarx.com/api/auth/device -H 'content-type: application/json' -d '{}') || err "Sign-in is unavailable. Try again."
+  _device=$(printf '%s' "$_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device_code"])')
+  _url=$(printf '%s' "$_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verification_uri"])')
+  printf "Finish signing in in your browser. I'll pick up here when you're done.\n%s\n" "$_url"
+  if command -v open >/dev/null 2>&1; then open "$_url" >/dev/null 2>&1 || true; fi
+  _i=0
+  while [ "$_i" -lt 150 ]; do
+    _poll=$(curl -sf -m 10 "https://tarx.com/api/auth/device/poll?device_code=${_device}" || true)
+    _status=$(printf '%s' "$_poll" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+    if [ "$_status" = "complete" ]; then
+      _cred=$(printf '%s' "$_poll" | python3 -c 'import json,sys; print(json.load(sys.stdin)["credential"])')
+      mkdir -p "${HOME}/.tarx/state"
+      umask 077
+      _tmp="${HOME}/.tarx/state/chat-key.tmp.$$"
+      printf '%s\n' "$_cred" > "$_tmp"
+      mv "$_tmp" "${HOME}/.tarx/state/chat-key"
+      chmod 600 "${HOME}/.tarx/state/chat-key"
+      printf "You're signed in. What would you like to do?\n"
+      return 0
+    fi
+    _i=$((_i + 1))
+    sleep 2
+  done
+  err "Sign-in expired. Run tarx to try again."
+}
+
 cmd_chat() {
   # Inference is the supercomputer door. This command does not call a local port.
   if [ -z "$1" ]; then
@@ -1312,6 +1359,11 @@ USAGE
 }
 
 # ── Main dispatch ────────────────────────────────────────────────────
+
+if [ $# -eq 0 ]; then
+  cmd_front
+  exit $?
+fi
 
 _cmd="${1:-help}"
 shift 2>/dev/null || true
