@@ -17,6 +17,15 @@ head -n 1 "$tmp" | grep -q '^#!' || {
   printf 'ERROR: downloaded tarx is not a script\n' >&2
   exit 1
 }
+# The marker is at the end, so a partial download cannot install.
+grep -q 'TARX_FRONT_DOOR=1' "$tmp" || {
+  printf 'ERROR: downloaded tarx is incomplete\n' >&2
+  exit 1
+}
+test "$(wc -c < "$tmp" | tr -d ' ')" -gt 8000 || {
+  printf 'ERROR: downloaded tarx is incomplete\n' >&2
+  exit 1
+}
 install -m 755 "$tmp" "$DEST"
 printf 'installed %s\n' "$DEST"
 printf 'TARX inference: https://compute.tarx.com\n'

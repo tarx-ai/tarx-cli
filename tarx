@@ -237,92 +237,248 @@ cmd_status() {
 
 # ── chat ─────────────────────────────────────────────────────────────
 
-_read_chat_key() {
-  _key="${TARX_CHAT_KEY:-}"
-  if [ -z "$_key" ] && [ -f "${HOME}/.tarx/state/chat-key" ]; then
-    _key=$(tr -d '[:space:]' < "${HOME}/.tarx/state/chat-key")
+_tarx_session() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "TARX needs Python 3 on this computer before it can continue."
   fi
-  printf '%s' "$_key"
+  TARX_CHAT_TEXT="${1-}" python3 - << 'PY'
+import json, os, select, subprocess, sys, urllib.error, urllib.request
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", ""))
+KEY_PATH = HOME / ".tarx" / "state" / "chat-key"
+AUTH = "https://tarx.com"
+DOOR = "https://compute.tarx.com/v1/chat/completions"
+
+def say(text):
+    print(text, flush=True)
+
+def http(method, url, body=None, headers=None, timeout=20):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("content-type", "application/json")
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode()
+            return res.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        return error.code, parsed
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, {}
+
+def read_key():
+    env = os.environ.get("TARX_CHAT_KEY", "").strip()
+    if env:
+        return env
+    try:
+        return KEY_PATH.read_text().strip()
+    except OSError:
+        return ""
+
+def write_key(value):
+    KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = KEY_PATH.with_name("chat-key.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (value.strip() + "\n").encode())
+    finally:
+        os.close(fd)
+    os.replace(tmp, KEY_PATH)
+    os.chmod(KEY_PATH, 0o600)
+
+def clear_key():
+    try:
+        KEY_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+def introspect(key):
+    status, body = http("POST", AUTH + "/api/auth/cli/introspect", {"token": key}, timeout=10)
+    if status == 200 and body.get("ok") is True:
+        return "ok"
+    if status in (401, 403):
+        return "no"
+    return "unknown"
+
+def authorize(reconnect):
+    if reconnect:
+        say("Your session expired. Let's reconnect your account.")
+    else:
+        say("Welcome to TARX. Let's connect your account.")
+    say("Press return to sign in in your browser.")
+    line = sys.stdin.readline()
+    if line == "":
+        say("Sign-in needs a terminal. Run tarx again.")
+        return ""
+    if line.strip().lower() in {"cancel", "no", "quit", "exit"}:
+        say("Sign-in cancelled.")
+        return ""
+    status, body = http("POST", AUTH + "/api/auth/device", {}, timeout=20)
+    device = body.get("device_code") if status == 200 else ""
+    url = body.get("verification_uri") if isinstance(body.get("verification_uri"), str) else ""
+    code = body.get("user_code") if isinstance(body.get("user_code"), str) else ""
+    if not device or not url.startswith("https://tarx.com/auth/device?"):
+        say("Sign-in is unavailable. Try again in a moment.")
+        return ""
+    say("Finish signing in in your browser. I'll pick up here when you're done.")
+    say("This terminal's code is " + code + ".")
+    say(url)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time_left(body.get("expires_in"))
+    interval = body.get("interval") if isinstance(body.get("interval"), int) else 2
+    interval = 2 if interval < 2 else interval
+    watch = True
+    while time_left_remaining(deadline):
+        if watch:
+            ready, _, _ = select.select([sys.stdin], [], [], interval)
+            if ready:
+                typed = sys.stdin.readline()
+                if typed == "":
+                    watch = False
+                elif typed.strip().lower() in {"cancel", "quit", "exit"}:
+                    http("POST", AUTH + "/api/auth/device/cancel", {"device_code": device}, timeout=10)
+                    say("Sign-in cancelled.")
+                    return ""
+        else:
+            time_sleep(interval)
+        status, polled = http("POST", AUTH + "/api/auth/device/poll", {"device_code": device}, timeout=10)
+        state = polled.get("status")
+        if state == "complete" and isinstance(polled.get("credential"), str):
+            write_key(polled["credential"])
+            say("You're signed in. What would you like to do?")
+            return read_key()
+        if state == "denied":
+            say("That sign-in was declined.")
+            return ""
+        if state == "expired" or status == 400:
+            say("That sign-in expired. Run tarx to try again.")
+            return ""
+    http("POST", AUTH + "/api/auth/device/cancel", {"device_code": device}, timeout=10)
+    say("That sign-in expired. Run tarx to try again.")
+    return ""
+
+def time_left(value):
+    import time
+    seconds = value if isinstance(value, int) else 600
+    return time.time() + max(30, min(seconds, 600))
+
+def time_left_remaining(deadline):
+    import time
+    return time.time() < deadline
+
+def time_sleep(seconds):
+    import time
+    time.sleep(seconds)
+
+def reply_for(key, prompt):
+    status, body = http("POST", DOOR, {
+        "model": "tarx/t-supercomputer",
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "max_tokens": 160,
+        "temperature": 0,
+    }, headers={"Authorization": "Bearer " + key}, timeout=70)
+    if status == 401:
+        return "expired", ""
+    if status == 429:
+        return "busy", "TARX is busy right now. Wait a moment and try again."
+    if status != 200:
+        return "down", "TARX is temporarily unavailable. Try again in a moment."
+    try:
+        content = body["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        content = ""
+    if not content:
+        return "down", "TARX is temporarily unavailable. Try again in a moment."
+    return "ok", content
+
+def send_once(key, prompt):
+    kind, text = reply_for(key, prompt)
+    if kind == "expired":
+        clear_key()
+        key = authorize(True)
+        if not key:
+            return 1
+        kind, text = reply_for(key, prompt)
+        if kind == "expired":
+            say("Your session expired. Let's reconnect your account.")
+            return 1
+    say(text)
+    return 0 if kind == "ok" else 1
+
+def loop():
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return 0
+        text = line.strip()
+        if not text:
+            continue
+        if text.lower() in {"exit", "quit"}:
+            return 0
+        if text.lower() in {"sign out", "logout"}:
+            key = read_key()
+            if key:
+                http("POST", AUTH + "/api/auth/cli/revoke", {"token": key}, timeout=10)
+            clear_key()
+            say("You're signed out.")
+            return 0
+        key = read_key()
+        if not key:
+            key = authorize(False)
+            if not key:
+                return 1
+        if send_once(key, text) != 0 and not read_key():
+            return 1
+
+def main():
+    once = os.environ.get("TARX_CHAT_TEXT", "")
+    key = read_key()
+    reconnect = False
+    if key and introspect(key) == "no":
+        clear_key()
+        key = ""
+        reconnect = True
+    created = False
+    if not key:
+        key = authorize(reconnect)
+        created = True
+        if not key:
+            return 1
+    if once:
+        return send_once(key, once)
+    if not created:
+        say("You're signed in. What would you like to do?")
+    return loop()
+
+try:
+    raise SystemExit(main())
+except SystemExit:
+    raise
+except Exception:
+    say("TARX is temporarily unavailable. Try again in a moment.")
+    raise SystemExit(1)
+PY
 }
 
 cmd_front() {
-  _key=$(_read_chat_key)
-  if [ -n "$_key" ]; then
-    printf "You're signed in. What would you like to do?\n"
-    IFS= read -r _line || return 0
-    [ -n "$_line" ] || return 0
-    TARX_CHAT_KEY="$_key" cmd_chat "$_line"
-    return
-  fi
-  printf "Welcome to TARX. Let's connect your account.\n"
-  if ! command -v python3 >/dev/null 2>&1; then
-    err "python3 is required"
-  fi
-  _start=$(curl -sf -m 20 -X POST https://tarx.com/api/auth/device -H 'content-type: application/json' -d '{}') || err "Sign-in is unavailable. Try again."
-  _device=$(printf '%s' "$_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device_code"])')
-  _url=$(printf '%s' "$_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verification_uri"])')
-  printf "Finish signing in in your browser. I'll pick up here when you're done.\n%s\n" "$_url"
-  if command -v open >/dev/null 2>&1; then open "$_url" >/dev/null 2>&1 || true; fi
-  _i=0
-  while [ "$_i" -lt 150 ]; do
-    _poll=$(curl -sf -m 10 "https://tarx.com/api/auth/device/poll?device_code=${_device}" || true)
-    _status=$(printf '%s' "$_poll" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
-    if [ "$_status" = "complete" ]; then
-      _cred=$(printf '%s' "$_poll" | python3 -c 'import json,sys; print(json.load(sys.stdin)["credential"])')
-      mkdir -p "${HOME}/.tarx/state"
-      umask 077
-      _tmp="${HOME}/.tarx/state/chat-key.tmp.$$"
-      printf '%s\n' "$_cred" > "$_tmp"
-      mv "$_tmp" "${HOME}/.tarx/state/chat-key"
-      chmod 600 "${HOME}/.tarx/state/chat-key"
-      printf "You're signed in. What would you like to do?\n"
-      return 0
-    fi
-    _i=$((_i + 1))
-    sleep 2
-  done
-  err "Sign-in expired. Run tarx to try again."
+  _tarx_session ""
 }
 
 cmd_chat() {
-  # Inference is the supercomputer door. This command does not call a local port.
-  if [ -z "$1" ]; then
-    err "Usage: tarx chat \"your prompt here\""
+  if [ $# -eq 0 ]; then
+    _tarx_session ""
+    return
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    err "python3 is required for tarx chat"
-  fi
-
-  _key="${TARX_CHAT_KEY:-}"
-  if [ -z "$_key" ] && [ -f "${HOME}/.tarx/state/chat-key" ]; then
-    _key=$(tr -d '[:space:]' < "${HOME}/.tarx/state/chat-key")
-  fi
-  if [ -z "$_key" ]; then
-    err "No chat key. Sign in at https://tarx.com/agent, then set TARX_CHAT_KEY or ~/.tarx/state/chat-key. This install does not read a local process."
-  fi
-
-  _prompt="$*"
-  TARX_CHAT_KEY="$_key" TARX_CHAT_TEXT="$_prompt" python3 - << 'PY'
-import json, os, urllib.request
-key = os.environ["TARX_CHAT_KEY"]
-prompt = os.environ["TARX_CHAT_TEXT"]
-body = json.dumps({
-    "model": "tarx/t-supercomputer",
-    "messages": [{"role": "user", "content": prompt}],
-    "stream": False,
-    "max_tokens": 48,
-    "temperature": 0,
-}).encode()
-req = urllib.request.Request(
-    "https://compute.tarx.com/v1/chat/completions",
-    data=body,
-    headers={"content-type": "application/json", "Authorization": "Bearer " + key},
-    method="POST",
-)
-with urllib.request.urlopen(req, timeout=60) as res:
-    data = json.loads(res.read().decode())
-print(data["choices"][0]["message"]["content"])
-PY
+  _tarx_session "$*"
 }
 
 # ── embed ────────────────────────────────────────────────────────────
@@ -1324,7 +1480,7 @@ Commands:
   start             Start all services (inference, mesh, embeddings)
   stop              Graceful shutdown of all services
   status            Health check all services
-  chat "prompt"     Quick inference via local model
+  chat "prompt"     Talk with TARX. tarx with no command opens the conversation.
   embed <file>      Chunk and embed file into RAG store
   search "query"    Semantic search across embedded files
   mesh status       Mesh network info
@@ -1391,3 +1547,5 @@ case "$_cmd" in
     exit 1
     ;;
 esac
+
+# TARX_FRONT_DOOR=1
