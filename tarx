@@ -238,43 +238,44 @@ cmd_status() {
 # ── chat ─────────────────────────────────────────────────────────────
 
 cmd_chat() {
+  # Inference is the supercomputer door. This command does not call a local port.
   if [ -z "$1" ]; then
     err "Usage: tarx chat \"your prompt here\""
   fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "python3 is required for tarx chat"
+  fi
 
-  if ! check_port $INFERENCE_PORT; then
-    err "Inference server not running on port ${INFERENCE_PORT}. Run: tarx start"
+  _key="${TARX_CHAT_KEY:-}"
+  if [ -z "$_key" ] && [ -f "${HOME}/.tarx/state/chat-key" ]; then
+    _key=$(tr -d '[:space:]' < "${HOME}/.tarx/state/chat-key")
+  fi
+  if [ -z "$_key" ]; then
+    err "No chat key. Sign in at https://tarx.com/agent, then set TARX_CHAT_KEY or ~/.tarx/state/chat-key. This install does not read a local process."
   fi
 
   _prompt="$*"
-  # Escape for JSON
-  _escaped=$(printf '%s' "$_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g')
-
-  _payload="{\"model\":\"local\",\"messages\":[{\"role\":\"user\",\"content\":\"${_escaped}\"}],\"stream\":false,\"max_tokens\":2048}"
-
-  _response=$(curl -sf -X POST "http://127.0.0.1:${INFERENCE_PORT}/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -d "$_payload" 2>/dev/null) || err "Request failed. Is the inference server running?"
-
-  # Extract content — handle both formats
-  _content=$(printf '%s' "$_response" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1)
-
-  if [ -z "$_content" ]; then
-    # Try Python if available for proper JSON parsing
-    if command -v python3 >/dev/null 2>&1; then
-      _content=$(printf '%s' "$_response" | python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-print(r['choices'][0]['message']['content'])
-" 2>/dev/null) || true
-    fi
-  fi
-
-  if [ -z "$_content" ]; then
-    log "$_response"
-  else
-    printf '%s\n' "$_content"
-  fi
+  TARX_CHAT_KEY="$_key" TARX_CHAT_TEXT="$_prompt" python3 - << 'PY'
+import json, os, urllib.request
+key = os.environ["TARX_CHAT_KEY"]
+prompt = os.environ["TARX_CHAT_TEXT"]
+body = json.dumps({
+    "model": "tarx/t-supercomputer",
+    "messages": [{"role": "user", "content": prompt}],
+    "stream": False,
+    "max_tokens": 48,
+    "temperature": 0,
+}).encode()
+req = urllib.request.Request(
+    "https://compute.tarx.com/v1/chat/completions",
+    data=body,
+    headers={"content-type": "application/json", "Authorization": "Bearer " + key},
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout=60) as res:
+    data = json.loads(res.read().decode())
+print(data["choices"][0]["message"]["content"])
+PY
 }
 
 # ── embed ────────────────────────────────────────────────────────────
