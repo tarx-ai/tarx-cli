@@ -366,6 +366,13 @@ def lobby(reconnect):
         say("That stays on this visit until the computer is connected.")
         show_commands()
 
+def wake_always_on():
+    say("Always On is on.")
+    say("This computer is connected, and I'll stay in this conversation.")
+    say("The queue is clear, so I'm listening.")
+    say("A specialist starts when you give me one task.")
+    show_commands()
+
 def begin_sign_in():
     status, body = http("POST", AUTH + "/api/auth/device", {}, timeout=20)
     device = body.get("device_code") if status == 200 else ""
@@ -398,7 +405,7 @@ def begin_sign_in():
         state = polled.get("status")
         if state == "complete" and isinstance(polled.get("credential"), str):
             write_key(polled["credential"])
-            say("You're signed in. What would you like to do?")
+            wake_always_on()
             return read_key()
         if state == "denied":
             say("That sign-in was declined.")
@@ -417,7 +424,8 @@ def finish_cancel(device, expired=False):
     state = polled.get("status")
     if state == "complete" and isinstance(polled.get("credential"), str):
         write_key(polled["credential"])
-        say("This terminal was already approved. You're signed in.")
+        say("This terminal was already approved.")
+        wake_always_on()
         return read_key()
     if state == "canceled":
         say("Sign-in cancelled.")
@@ -497,9 +505,7 @@ def loop():
             if read_key():
                 say("This computer is already connected.")
             else:
-                key = begin_sign_in()
-                if key:
-                    say("You're signed in. What would you like to do?")
+                begin_sign_in()
             continue
         if found:
             continue
@@ -532,7 +538,7 @@ def main():
     if once:
         return send_once(key, once)
     if not created:
-        say("You're signed in. What would you like to do?")
+        wake_always_on()
     return loop()
 
 try:
