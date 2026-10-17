@@ -251,6 +251,83 @@ KEY_PATH = HOME / ".tarx" / "state" / "chat-key"
 AUTH = os.environ.get("TARX_AUTH_ORIGIN", "https://tarx.com").rstrip("/")
 DOOR = "https://compute.tarx.com/v1/chat/completions"
 
+# Session-only history: never persisted or shared across credential changes.
+HISTORY = []
+HISTORY_KEY = None
+LABEL_CACHE = {}
+MAX_INPUT_BYTES = 12000
+MAX_CONTEXT_BYTES = 24000
+
+def reset_history():
+    global HISTORY_KEY
+    HISTORY.clear()
+    HISTORY_KEY = None
+    LABEL_CACHE.clear()
+
+def read_message():
+    """Bracketed paste is one message. Enter submits; Ctrl-C cancels input."""
+    if not sys.stdin.isatty():
+        return sys.stdin.readline()
+    import codecs, termios, tty
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chars, cursor, pasted = [], 0, False
+    def paint():
+        sys.stdout.write("\r\x1b[2K> " + "".join(chars).replace("\n", "↵"))
+        if cursor < len(chars):
+            sys.stdout.write("\x1b[%dD" % (len(chars) - cursor))
+        sys.stdout.flush()
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write("\x1b[?2004h")
+        paint()
+        while True:
+            ch = decoder.decode(os.read(fd, 1))
+            if not ch:
+                continue
+            if ch == "\x1b":
+                seq = ""
+                while select.select([fd], [], [], .03)[0]:
+                    seq += os.read(fd, 1).decode("ascii", errors="ignore")
+                    if seq.endswith("~") or (seq.startswith("[") and seq[-1:] in "ABCD"):
+                        break
+                if seq == "[200~":
+                    pasted = True
+                elif seq == "[201~":
+                    pasted = False
+                elif not pasted and seq == "[D":
+                    cursor = max(0, cursor - 1)
+                elif not pasted and seq == "[C":
+                    cursor = min(len(chars), cursor + 1)
+                paint()
+                continue
+            if ch in ("\n", "\r") and not pasted:
+                sys.stdout.write("\n")
+                return "".join(chars) + "\n"
+            if ch == "\x04" and not chars:
+                sys.stdout.write("\n")
+                return ""
+            if ch in ("\x7f", "\b") and not pasted:
+                if cursor:
+                    cursor -= 1
+                    chars.pop(cursor)
+            elif ch == "\x15" and not pasted:
+                chars, cursor = [], 0
+            elif ch == "\t" or ch in ("\n", "\r") or ch.isprintable():
+                chars.insert(cursor, "\n" if ch == "\r" else ch)
+                cursor += 1
+            if not pasted:
+                paint()
+    except KeyboardInterrupt:
+        sys.stdout.write("\nInput cancelled.\n")
+        return "\n"
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+        sys.stdout.write("\x1b[?2004l")
+        sys.stdout.flush()
+
+
 def say(text):
     print(text, flush=True)
 
@@ -284,6 +361,7 @@ def read_key():
         return ""
 
 def write_key(value):
+    reset_history()
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = KEY_PATH.with_name("chat-key.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -295,6 +373,7 @@ def write_key(value):
     os.chmod(KEY_PATH, 0o600)
 
 def clear_key():
+    reset_history()
     try:
         KEY_PATH.unlink()
     except FileNotFoundError:
@@ -317,12 +396,12 @@ def handle_command(text):
     low = " ".join(text.strip().lower().split())
     if low in {"/agents", "/agent"}:
         say("Always On is the agent in this conversation.")
-        say("A specialist takes one task from Always On and brings the result back.")
-        say("Listing them does not start that work.")
+        say("Specialist execution is not connected to this CLI yet.")
+        say("This conversation currently supports text replies.")
         return True
     if low in {"/channels", "/channel"}:
         say("Channels are rooms. Looking does not join the room.")
-        say("Howdy, Builders, Enterprise, and Government are open at https://tarx.com/agent.")
+        say("Open https://tarx.com/agent to view available channels.")
         return True
     if low in {"/help", "/?"}:
         show_commands()
@@ -345,7 +424,7 @@ def lobby(reconnect):
         say("You can look around before connecting an account.")
     show_commands()
     while True:
-        line = sys.stdin.readline()
+        line = read_message()
         if line == "":
             return ""
         text = line.strip()
@@ -371,20 +450,24 @@ def lobby(reconnect):
         show_commands()
 
 def refresh_label(key):
+    if key in LABEL_CACHE:
+        return LABEL_CACHE[key]
     status, body = http("POST", AUTH + "/api/auth/cli/introspect", {"token": key}, timeout=10)
-    if status == 200 and body.get("ok") is True and isinstance(body.get("label"), str):
-        return body["label"].strip()
+    if status == 200 and body.get("ok") is True:
+        LABEL_CACHE.clear()
+        LABEL_CACHE[key] = body.get("label", "").strip() if isinstance(body.get("label"), str) else ""
+        return LABEL_CACHE[key]
     return ""
 
 def wake_always_on():
     label = refresh_label(read_key())
-    say("Always On is on.")
+    say("TARX chat")
     if label:
         say("You are " + label + ", and this computer is connected.")
     else:
         say("This computer is connected, and I'll stay in this conversation.")
-    say("The queue is clear, so I'm listening.")
-    say("A specialist starts when you give me one task.")
+    say("Recent conversation context stays in this session. Sign out to clear it.")
+    say("Paste your message, then press Enter to send. Ctrl-C cancels input.")
     show_commands()
 
 def asks_identity(text):
@@ -475,8 +558,17 @@ def time_sleep(seconds):
     time.sleep(seconds)
 
 def reply_for(key, prompt):
+    global HISTORY_KEY
+    if len(prompt.encode("utf-8")) > MAX_INPUT_BYTES:
+        return "input", "That message is too large. Please keep it under 12,000 UTF-8 bytes."
+    if HISTORY_KEY != key:
+        reset_history()
+        HISTORY_KEY = key
+    messages = HISTORY.copy()
+    while messages and (len(messages) >= 12 or len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + len(prompt.encode("utf-8")) > MAX_CONTEXT_BYTES):
+        del messages[:2]
+    messages.append({"role": "user", "content": prompt})
     label = refresh_label(key)
-    messages = [{"role": "user", "content": prompt}]
     if label:
         messages.insert(0, {
             "role": "system",
@@ -486,7 +578,7 @@ def reply_for(key, prompt):
         "model": "tarx/t-supercomputer",
         "messages": messages,
         "stream": False,
-        "max_tokens": 160,
+        "max_tokens": 768,
         "temperature": 0,
     }, headers={"Authorization": "Bearer " + key}, timeout=70)
     if status == 401:
@@ -501,6 +593,9 @@ def reply_for(key, prompt):
         content = ""
     if not content:
         return "down", "TARX is temporarily unavailable. Try again in a moment."
+    HISTORY[:] = [m for m in messages if m["role"] != "system"] + [{"role": "assistant", "content": content}]
+    if body["choices"][0].get("finish_reason") == "length":
+        content += "\n[Response reached its length limit. Ask me to continue.]"
     return "ok", content
 
 def send_once(key, prompt):
@@ -510,16 +605,14 @@ def send_once(key, prompt):
         key = lobby(True)
         if not key:
             return 1
-        kind, text = reply_for(key, prompt)
-        if kind == "expired":
-            say("Your session expired. Let's reconnect your account.")
-            return 1
+        say("You're connected. Please send your message again; the previous message was not replayed.")
+        return 0
     say(text)
     return 0 if kind == "ok" else 1
 
 def loop():
     while True:
-        line = sys.stdin.readline()
+        line = read_message()
         if line == "":
             return 0
         text = line.strip()
@@ -563,10 +656,15 @@ def main():
     once = os.environ.get("TARX_CHAT_TEXT", "")
     key = read_key()
     reconnect = False
-    if key and introspect(key) == "no":
-        clear_key()
-        key = ""
-        reconnect = True
+    if key:
+        state = introspect(key)
+        if state == "unknown":
+            say("I can't confirm your connection right now. Your saved sign-in is unchanged; try again shortly.")
+            return 1
+        if state == "no":
+            clear_key()
+            key = ""
+            reconnect = True
     created = False
     if not key:
         if once:
@@ -587,6 +685,9 @@ try:
     raise SystemExit(main())
 except SystemExit:
     raise
+except KeyboardInterrupt:
+    say("Request interrupted. No automatic retry was sent.")
+    raise SystemExit(130)
 except Exception:
     say("TARX is temporarily unavailable. Try again in a moment.")
     raise SystemExit(1)
