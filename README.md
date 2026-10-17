@@ -170,3 +170,21 @@ Report security issues using [SECURITY.md](SECURITY.md), not a public issue.
 - [Download TARX Computer](https://tarx.com/download)
 - [Documentation](https://tarx.com/docs)
 - [TARX on GitHub](https://github.com/tarx-ai)
+
+## Conversational client
+
+Run `tarx` to connect and chat. In a terminal supporting bracketed paste, pasted
+multiline text is held until Enter; Ctrl-C cancels input, Ctrl-D exits empty
+input, and left/right arrows edit. Plain redirected input remains line-oriented.
+The client accepts up to 12,000 UTF-8 bytes per message and sends bounded recent
+turns from this process only. History clears when credentials change or the user
+signs out. It is not durable TARX memory. A message pending during credential
+expiry is never replayed automatically into a newly connected account.
+
+Replies use the existing completed-response gateway path, with a 768-token
+output budget and a visible notice on length-limited responses. End-to-end
+streaming requires verification of gateway disclosure filtering before enabling.
+This client does not start specialists or provide local filesystem tools.
+
+Run `python3 tests/test-conversation.py` for conversation and pseudo-terminal
+regressions, plus the existing MCP configuration and route-preflight tests.
