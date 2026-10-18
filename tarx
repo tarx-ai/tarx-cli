@@ -432,28 +432,55 @@ def write_key(value):
     os.replace(tmp, KEY_PATH)
     os.chmod(KEY_PATH, 0o600)
 
-def save_pending(text):
+def new_request_id():
+    import uuid
+    return str(uuid.uuid4())
+
+def save_pending(text, request_id="", state="held"):
     PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
     raw = text.strip()
     if not raw:
         return
+    record = {"text": raw, "request_id": request_id or new_request_id(), "state": state}
     fd = os.open(PENDING_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, (raw + "\n").encode())
+        os.write(fd, (json.dumps(record) + "\n").encode())
     finally:
         os.close(fd)
     os.chmod(PENDING_PATH, 0o600)
 
-def take_pending():
+def load_pending():
     try:
-        text = PENDING_PATH.read_text().strip()
+        raw = PENDING_PATH.read_text().strip()
     except OSError:
-        return ""
+        return None
+    if not raw:
+        return None
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        record = {"text": raw, "request_id": new_request_id(), "state": "held"}
+    if not isinstance(record, dict) or not str(record.get("text") or "").strip():
+        return None
+    record["text"] = str(record["text"]).strip()
+    record["request_id"] = str(record.get("request_id") or new_request_id())
+    record["state"] = "unconfirmed" if record.get("state") == "unconfirmed" else "held"
+    return record
+
+def drop_pending():
     try:
         PENDING_PATH.unlink()
     except OSError:
         pass
-    return text
+
+def pending_decision(record, typed):
+    """Do not send a held draft without confirmation, and do not retry an unconfirmed send unless asked."""
+    word = " ".join(typed.strip().lower().split())
+    if word == "drop":
+        return "drop"
+    if record.get("state") == "unconfirmed":
+        return "retry" if word == "retry" else "wait"
+    return "send" if word == "send" else "wait"
 
 def clear_key():
     reset_history()
@@ -559,6 +586,33 @@ def asks_identity(text):
     cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text.lower())
     cleaned = " ".join(cleaned.split())
     return cleaned in {"who am i", "whoami", "if i am authed who am i", "if i am authenticated who am i"}
+
+def say_pending(key, record):
+    label = refresh_label(key) or "this connected computer, with no account name on the sign-in"
+    say("Saved message, not sent:")
+    say(record["text"])
+    say("Destination: " + label + ".")
+    if record.get("state") == "unconfirmed":
+        say("The previous send may have reached TARX. It was not repeated.")
+        say("Type retry to send it again, or drop to discard it.")
+        return
+    say("Type send to deliver it to that account, or drop to discard it.")
+
+def deliver_pending(key, record):
+    kind, text = reply_for(key, record["text"])
+    say(text)
+    if kind == "ok":
+        drop_pending()
+        return 0
+    if kind == "expired":
+        clear_key()
+        save_pending(record["text"], record["request_id"], "held")
+        say("The sign-in expired. The message is still saved and was not sent.")
+        return 1
+    save_pending(record["text"], record["request_id"], "unconfirmed")
+    say("That send did not finish. It was not repeated.")
+    say("Type retry only if you did not get an answer, or drop to discard it.")
+    return 1
 
 def say_who(key):
     label = refresh_label(key)
@@ -711,6 +765,20 @@ def loop():
         text = line.strip()
         if not text:
             continue
+        pending = load_pending()
+        if pending and read_key():
+            decision = pending_decision(pending, text)
+            if decision == "drop":
+                drop_pending()
+                say("The saved message was discarded.")
+                continue
+            if decision == "wait":
+                say_pending(read_key(), pending)
+                continue
+            if decision in {"send", "retry"}:
+                if deliver_pending(read_key(), pending) != 0 and not read_key():
+                    return 1
+                continue
         if text.lower() in {"exit", "quit"}:
             return 0
         if text.lower() in {"sign out", "logout"}:
@@ -771,13 +839,9 @@ def main():
             return 0
     if once:
         return send_once(key, once)
-    pending = take_pending()
+    pending = load_pending()
     if pending:
-        say("Sending the message saved before sign-in.")
-        sent = send_once(key, pending)
-        if sent != 0:
-            save_pending(pending)
-            return sent
+        say_pending(key, pending)
     if not created:
         wake_always_on()
     return loop()
