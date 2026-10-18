@@ -248,6 +248,7 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", ""))
 KEY_PATH = HOME / ".tarx" / "state" / "chat-key"
+PENDING_PATH = HOME / ".tarx" / "state" / "pending-turn"
 AUTH = os.environ.get("TARX_AUTH_ORIGIN", "https://tarx.com").rstrip("/")
 DOOR = "https://compute.tarx.com/v1/chat/completions"
 
@@ -431,6 +432,29 @@ def write_key(value):
     os.replace(tmp, KEY_PATH)
     os.chmod(KEY_PATH, 0o600)
 
+def save_pending(text):
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    raw = text.strip()
+    if not raw:
+        return
+    fd = os.open(PENDING_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (raw + "\n").encode())
+    finally:
+        os.close(fd)
+    os.chmod(PENDING_PATH, 0o600)
+
+def take_pending():
+    try:
+        text = PENDING_PATH.read_text().strip()
+    except OSError:
+        return ""
+    try:
+        PENDING_PATH.unlink()
+    except OSError:
+        pass
+    return text
+
 def clear_key():
     reset_history()
     try:
@@ -505,7 +529,9 @@ def lobby(reconnect):
             say("This visit is not connected, so there is no account name yet.")
             say("Say /signin to connect this computer.")
             continue
-        say("That stays on this visit until the computer is connected.")
+        save_pending(text)
+        say("That message was not sent. It is saved on this computer.")
+        say("Say /signin to connect this computer.")
         show_commands()
 
 def refresh_label(key):
@@ -735,15 +761,23 @@ def main():
     created = False
     if not key:
         if once:
-            say("Sending that connects this computer.")
-            say("Run tarx, then /signin.")
-            return 1
+            save_pending(once)
+            say("This computer is not connected, so that message was not sent.")
+            say("It is saved on this computer. Run tarx, then /signin.")
+            return 3
         key = lobby(reconnect)
         created = True
         if not key:
             return 0
     if once:
         return send_once(key, once)
+    pending = take_pending()
+    if pending:
+        say("Sending the message saved before sign-in.")
+        sent = send_once(key, pending)
+        if sent != 0:
+            save_pending(pending)
+            return sent
     if not created:
         wake_always_on()
     return loop()
