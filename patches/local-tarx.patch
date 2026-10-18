@@ -1,0 +1,48 @@
+--- tarx
++++ tarx
+@@ -332,11 +332,18 @@
+         sys.stdout.flush()
+     try:
+         tty.setcbreak(fd)
++        attrs = termios.tcgetattr(fd)
++        attrs[0] &= ~(termios.IXON | termios.IXOFF)
++        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+         sys.stdout.write("\x1b[?2004h")
+         paint()
+         while True:
+             ch = decoder.decode(os.read(fd, 1))
+             if not ch:
++                continue
++            if ch == "\x07":
++                pasted = False
++                paint()
+                 continue
+             if ch == "\x1b":
+                 seq = ""
+@@ -450,7 +457,7 @@
+     say("/agents     who can work")
+     say("/channels   rooms you can open")
+     say("/signin     connect this computer")
+-    say("/founder    founder brain on this computer")
++    say("Ctrl-G finishes an interrupted paste; Enter sends. Ctrl-C cancels.")
+ 
+ def handle_command(text):
+     low = " ".join(text.strip().lower().split())
+@@ -468,7 +475,7 @@
+         return True
+     if low in {"/signin", "/sign-in", "sign in", "signin"}:
+         return "signin"
+-    if low in {"/founder", "founder"}:
++    if low == "/john":
+         return "founder"
+     return False
+ 
+@@ -1817,7 +1824,7 @@
+ 
+ # The founder brain is /founder inside tarx, not a second command.
+ cmd_brain() {
+-  printf 'The founder brain is inside tarx. Run tarx, then /founder.\n' >&2
++  printf 'Open your personal session inside tarx.\n' >&2
+   return 2
+ }
+ 

@@ -332,11 +332,18 @@ def read_message():
         sys.stdout.flush()
     try:
         tty.setcbreak(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[0] &= ~(termios.IXON | termios.IXOFF)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
         sys.stdout.write("\x1b[?2004h")
         paint()
         while True:
             ch = decoder.decode(os.read(fd, 1))
             if not ch:
+                continue
+            if ch == "\x07":
+                pasted = False
+                paint()
                 continue
             if ch == "\x1b":
                 seq = ""

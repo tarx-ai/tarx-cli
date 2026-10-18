@@ -1,0 +1,30 @@
+--- brain_loop.py
++++ brain_loop.py
+@@ -447,6 +447,7 @@
+     try:
+         attrs = termios.tcgetattr(fd)
+         # Index 3 is local flags. ISIG is off so Ctrl-C is a byte, not a kill.
++        attrs[0] &= ~(termios.IXON | termios.IXOFF)
+         attrs[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
+         attrs[6][termios.VMIN] = 1
+         attrs[6][termios.VTIME] = 0
+@@ -459,6 +460,11 @@
+             raw = _read_unit(fd)
+             if raw is None:
+                 return None
++            if raw == b"\x07":
++                pasting = False
++                sys.stdout.write("\nPaste ended. Enter sends; Ctrl-C cancels.\n")
++                sys.stdout.flush()
++                continue
+             if raw == b"\x03":
+                 sys.stdout.write("\nInput cancelled.\n")
+                 sys.stdout.flush()
+@@ -797,6 +803,7 @@
+ 
+ def talk(workspace: Path) -> int:
+     print("TARX Brain — private local workspace")
++    print("Ctrl-G ends an interrupted paste; Enter sends. Ctrl-C cancels input.")
+     workspace.mkdir(parents=True, exist_ok=True)
+     print(f"Memory: {workspace}. Successful turns are saved locally.")
+     print("commands: /files, /context, /search QUERY, /read NAME.md, /draft NAME.md INSTRUCTIONS, /write NAME.md CONTENT, /append NAME.md CONTENT, /decide TEXT, /cancel, exit")
