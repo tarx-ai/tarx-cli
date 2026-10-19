@@ -86,7 +86,7 @@ printf '%s\n' "$out" | grep -q '\[OK\] Inference: .*/tarx-qwen2.5-7b-deep-Q4_K_M
 printf '%s\n' "$out" | grep -q '\[OK\] Embedding: .*/nomic-embed-text-v1.5-f16.gguf' || { printf 'present embedding not reported\n%s\n' "$out" >&2; exit 1; }
 rm -rf "$model_dir"
 
-out=$(TARX_FAKE_HEALTH=yes TARX_FAKE_MODEL=tarx-sc-qwen3-8b TARX_DOCTOR_RAM_BYTES= TARX_FAKE_GPU=fail run_doctor)
+out=$(TARX_FAKE_HEALTH=yes TARX_FAKE_MODEL=tarx-sc-qwen3-8b TARX_DOCTOR_RAM_BYTES='' TARX_FAKE_GPU=fail run_doctor)
 printf '%s\n' "$out" | grep -q 'Inference weight unknown; service reports tarx-sc-qwen3-8b' || { printf 'unknown weight not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'Inference model missing:' && { printf 'unknown weight was called missing\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'RAM: unknown' || { printf 'unknown ram not reported\n%s\n' "$out" >&2; exit 1; }
