@@ -68,25 +68,33 @@ run_doctor() {
   HOME="$HOME_BASE" PATH="$FAKE:$PATH" "$TARX" doctor
 }
 
-out=$(TARX_FAKE_HEALTH=no TARX_FAKE_RAM=ok TARX_FAKE_GPU=ok run_doctor)
+out=$(TARX_FAKE_HEALTH=no TARX_DOCTOR_RAM_BYTES=34359738368 TARX_FAKE_GPU=ok run_doctor)
 printf '%s\n' "$out" | grep -q 'Inference model missing:' || { printf 'missing inference not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'Embedding model missing:' || { printf 'missing embedding not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'RAM: 32 GB' || { printf 'measured ram not reported\n%s\n' "$out" >&2; exit 1; }
 
-model_dir="$HOME_BASE/Library/Application Support/tarx/models"
+if [ "$(uname -s)" = "Darwin" ]; then
+  model_dir="$HOME_BASE/Library/Application Support/tarx/models"
+else
+  model_dir="$HOME_BASE/.tarx/models"
+fi
 mkdir -p "$model_dir"
 : > "$model_dir/tarx-qwen2.5-7b-deep-Q4_K_M.gguf"
 : > "$model_dir/nomic-embed-text-v1.5-f16.gguf"
-out=$(TARX_FAKE_HEALTH=no TARX_FAKE_RAM=ok TARX_FAKE_GPU=ok run_doctor)
+out=$(TARX_FAKE_HEALTH=no TARX_DOCTOR_RAM_BYTES=34359738368 TARX_FAKE_GPU=ok run_doctor)
 printf '%s\n' "$out" | grep -q '\[OK\] Inference: .*/tarx-qwen2.5-7b-deep-Q4_K_M.gguf' || { printf 'present inference not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q '\[OK\] Embedding: .*/nomic-embed-text-v1.5-f16.gguf' || { printf 'present embedding not reported\n%s\n' "$out" >&2; exit 1; }
 rm -rf "$model_dir"
 
-out=$(TARX_FAKE_HEALTH=yes TARX_FAKE_MODEL=tarx-sc-qwen3-8b TARX_FAKE_RAM=fail TARX_FAKE_GPU=fail run_doctor)
+out=$(TARX_FAKE_HEALTH=yes TARX_FAKE_MODEL=tarx-sc-qwen3-8b TARX_DOCTOR_RAM_BYTES= TARX_FAKE_GPU=fail run_doctor)
 printf '%s\n' "$out" | grep -q 'Inference weight unknown; service reports tarx-sc-qwen3-8b' || { printf 'unknown weight not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'Inference model missing:' && { printf 'unknown weight was called missing\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'RAM: unknown' || { printf 'unknown ram not reported\n%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | grep -q 'RAM: 0 GB' && { printf 'false zero ram\n%s\n' "$out" >&2; exit 1; }
-printf '%s\n' "$out" | grep -q 'GPU: unknown' || { printf 'unknown gpu not reported\n%s\n' "$out" >&2; exit 1; }
+if [ "$(uname -s)" = "Darwin" ]; then
+  printf '%s\n' "$out" | grep -q 'GPU: unknown' || { printf 'unknown gpu not reported\n%s\n' "$out" >&2; exit 1; }
+else
+  printf '%s\n' "$out" | grep -q 'no NVIDIA GPU detected' || { printf 'linux gpu result not reported\n%s\n' "$out" >&2; exit 1; }
+fi
 
 printf 'doctor states passed\n'

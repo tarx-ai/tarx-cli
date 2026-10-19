@@ -1431,7 +1431,9 @@ cmd_doctor() {
   # Check RAM
   log ""
   log "System:"
-  if [ "$_os" = "Darwin" ]; then
+  if [ "${TARX_DOCTOR_RAM_BYTES+set}" = set ]; then
+    _ram_bytes=$TARX_DOCTOR_RAM_BYTES
+  elif [ "$_os" = "Darwin" ]; then
     _ram_bytes=$(sysctl -n hw.memsize 2>/dev/null) || _ram_bytes=""
   else
     _ram_bytes=$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo 2>/dev/null) || _ram_bytes=""
