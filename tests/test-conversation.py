@@ -70,6 +70,41 @@ class Conversation(unittest.TestCase):
         self.assertEqual(text, 'reply')
         self.assertEqual(len(self.calls), 1)
 
+    def test_shell_and_file_overclaim_uses_the_host_contract(self):
+        prompt = "Can you execute commands, run scripts, and interact with local files and applications?"
+        kind, text = self.ns['reply_for']('account-a', prompt)
+        self.assertEqual(kind, 'ok')
+        self.assertEqual(self.calls, [])
+        self.assertIn('shell execution (unavailable)', text)
+        self.assertIn('file reads (unavailable)', text)
+        self.assertNotIn('I can execute commands', text)
+        kind, recall = self.ns['reply_for']('account-a', 'What did you say you can do?')
+        self.assertEqual(kind, 'ok')
+        self.assertEqual(self.calls, [])
+        self.assertIn('shell execution (unavailable)', recall)
+
+    def test_model_shell_overclaim_is_replaced(self):
+        def http(method, url, body=None, **kw):
+            if url.endswith('/introspect'):
+                return 200, {'ok': True}
+            return 200, {'choices': [{'message': {'content': 'I can execute commands, run scripts, and interact with local files and applications.'}, 'finish_reason': 'stop'}]}
+        self.ns['http'] = http
+        kind, text = self.ns['reply_for']('account-a', 'hello there')
+        self.assertEqual(kind, 'ok')
+        self.assertIn('Not available', text)
+        self.assertNotIn('execute commands, run scripts', text)
+
+    def test_quoted_shell_claim_is_kept(self):
+        def http(method, url, body=None, **kw):
+            if url.endswith('/introspect'):
+                return 200, {'ok': True}
+            return 200, {'choices': [{'message': {'content': 'The note said "I can execute commands, run scripts, and interact with local files and applications."'}, 'finish_reason': 'stop'}]}
+        self.ns['http'] = http
+        kind, text = self.ns['reply_for']('account-a', 'What did the note say?')
+        self.assertEqual(kind, 'ok')
+        self.assertIn('The note said', text)
+        self.assertIn('execute commands', text)
+
     def test_quoted_claim_is_kept(self):
         def http(method, url, body=None, **kw):
             if url.endswith('/introspect'):

@@ -26,3 +26,5 @@ jobs:
         run: sh tests/test-mcp-config.sh
       - name: Test inference route preflight
         run: sh tests/test-route-preflight.sh
+      - name: Test doctor states
+        run: sh tests/test-doctor.sh

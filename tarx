@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.1.0"
+TARX_VERSION="1.1.1"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -265,6 +265,7 @@ def host_capabilities():
         "session_history": "available",
         "memory_write": "unavailable",
         "file_read": "unavailable",
+        "shell_execution": "unavailable",
         "agent_creation": "unavailable",
         "voice": "unavailable",
         "delegation": "unavailable",
@@ -278,7 +279,8 @@ def capability_reply():
         "This terminal can send this conversation to the supercomputer and show the text reply. "
         "History stays in this session only and is cleared when the account changes.\n"
         "Not available on this path: memory writes (" + caps["memory_write"] + "), "
-        "file reads (" + caps["file_read"] + "), agent creation (" + caps["agent_creation"] + "), "
+        "file reads (" + caps["file_read"] + "), shell execution (" + caps["shell_execution"] + "), "
+        "agent creation (" + caps["agent_creation"] + "), "
         "voice controls (" + caps["voice"] + "), delegation (" + caps["delegation"] + "), "
         "and durable Lumbergh tasks (" + caps["lumbergh_tasks"] + ").\n"
         "Signed-in web proof: " + caps["signed_in_web"] + ".\n"
@@ -295,7 +297,19 @@ def asks_capabilities(text):
         "what capabilities do you",
         "capability status",
     )
-    return any(phrase in low for phrase in explicit)
+    if any(phrase in low for phrase in explicit):
+        return True
+    question = "?" in text or low.startswith(("can you", "could you", "do you", "are you able"))
+    tools = (
+        "execute commands",
+        "run scripts",
+        "interact with local files",
+        "interact with applications",
+        "shell execution",
+        "read local files",
+        "access local files",
+    )
+    return question and any(phrase in low for phrase in tools)
 
 def guard_reply(text):
     import re
@@ -303,7 +317,7 @@ def guard_reply(text):
     if re.search(r"\b(not available|cannot|can't|do not have|does not have)\b", unquoted, re.I):
         return text
     claim = re.compile(
-        r"(memory (is|writes are) available|i can (read|write) (a )?file|voice controls are available|signed-in web (is|was) (proved|proven)|durable lumbergh task is saved)",
+        r"(memory (is|writes are) available|i can (read|write) (a )?file|voice controls are available|signed-in web (is|was) (proved|proven)|durable lumbergh task is saved|execute commands|run scripts|interact with local files|interact with (local )?applications|shell execution|i can access (your |local )?files)",
         re.I,
     )
     if claim.search(unquoted):
@@ -1321,6 +1335,52 @@ cmd_route() {
 
 # ── doctor ───────────────────────────────────────────────────────────
 
+served_model_id() {
+  curl -sf -m 2 "http://127.0.0.1:${1}/v1/models" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+rows = payload.get("data") or []
+if isinstance(rows, dict):
+    rows = [rows]
+if not rows or not isinstance(rows[0], dict):
+    raise SystemExit(1)
+name = rows[0].get("id") or rows[0].get("name") or ""
+if not name:
+    raise SystemExit(1)
+print(name)
+' 2>/dev/null || true
+}
+
+doctor_weight() {
+  _label="$1"
+  _port="$2"
+  _expected="$3"
+  _served="$(served_model_id "$_port")"
+  if [ -n "$_served" ] && [ -f "$_served" ]; then
+    _sz=$(wc -c < "$_served" | tr -d ' ')
+    printf '  [OK] %s: %s (%s MB)\n' "$_label" "$_served" "$((_sz / 1048576))"
+    return 0
+  fi
+  if [ -f "$_expected" ]; then
+    _sz=$(wc -c < "$_expected" | tr -d ' ')
+    printf '  [OK] %s: %s (%s MB)\n' "$_label" "$_expected" "$((_sz / 1048576))"
+    return 0
+  fi
+  if check_port "$_port"; then
+    if [ -n "$_served" ]; then
+      printf '  [--] %s weight unknown; service reports %s\n' "$_label" "$_served"
+    else
+      printf '  [--] %s weight unknown; service is running\n' "$_label"
+    fi
+    return 0
+  fi
+  printf '  [!!] %s model missing: %s\n' "$_label" "$_expected"
+  _issues=$((_issues + 1))
+}
+
 cmd_doctor() {
   log "TARX Doctor"
   log "═══════════"
@@ -1362,50 +1422,45 @@ cmd_doctor() {
     log "  [OK] Sufficient space"
   fi
 
-  # Check models
+  # Check models. A running service without a readable weight is unknown, not missing.
   log ""
   log "Models:"
-  if [ -f "${TARX_MODELS}/${INFERENCE_MODEL}" ]; then
-    _sz=$(wc -c < "${TARX_MODELS}/${INFERENCE_MODEL}" | tr -d ' ')
-    printf '  [OK] Inference: %s (%s MB)\n' "$INFERENCE_MODEL" "$((_sz / 1048576))"
-  else
-    printf '  [!!] Inference model missing: %s\n' "${TARX_MODELS}/${INFERENCE_MODEL}"
-    _issues=$((_issues + 1))
-  fi
-
-  if [ -f "${TARX_MODELS}/${EMBED_MODEL}" ]; then
-    _sz=$(wc -c < "${TARX_MODELS}/${EMBED_MODEL}" | tr -d ' ')
-    printf '  [OK] Embedding: %s (%s MB)\n' "$EMBED_MODEL" "$((_sz / 1048576))"
-  else
-    printf '  [!!] Embedding model missing: %s\n' "${TARX_MODELS}/${EMBED_MODEL}"
-    _issues=$((_issues + 1))
-  fi
+  doctor_weight "Inference" "$INFERENCE_PORT" "${TARX_MODELS}/${INFERENCE_MODEL}"
+  doctor_weight "Embedding" "$EMBED_PORT" "${TARX_MODELS}/${EMBED_MODEL}"
 
   # Check RAM
   log ""
   log "System:"
-  if [ "$_os" = "Darwin" ]; then
-    _ram_bytes=$(sysctl -n hw.memsize 2>/dev/null) || _ram_bytes=0
-    _ram_gb=$((_ram_bytes / 1073741824))
+  if [ "${TARX_DOCTOR_RAM_BYTES+set}" = set ]; then
+    _ram_bytes=$TARX_DOCTOR_RAM_BYTES
+  elif [ "$_os" = "Darwin" ]; then
+    _ram_bytes=$(sysctl -n hw.memsize 2>/dev/null) || _ram_bytes=""
   else
-    _ram_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}') || _ram_kb=0
-    _ram_gb=$((_ram_kb / 1048576))
+    _ram_bytes=$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo 2>/dev/null) || _ram_bytes=""
   fi
-
-  if [ "$_ram_gb" -ge 8 ]; then
-    printf '  [OK] RAM: %s GB\n' "$_ram_gb"
+  case "$_ram_bytes" in
+    ""|*[!0-9]*) _ram_bytes="" ;;
+  esac
+  if [ -z "$_ram_bytes" ] || [ "$_ram_bytes" -eq 0 ]; then
+    printf '  [--] RAM: unknown\n'
   else
-    printf '  [!!] RAM: %s GB (need 8 GB+)\n' "$_ram_gb"
-    _issues=$((_issues + 1))
-  fi
-
-  # GPU detection
-  if [ "$_os" = "Darwin" ]; then
-    _gpu=$(system_profiler SPDisplaysDataType 2>/dev/null | grep "Chipset Model" | sed 's/.*: //' | head -1) || true
-    if [ -z "$_gpu" ]; then
-      _gpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null | head -1) || _gpu="unknown"
+    _ram_gb=$(awk -v b="$_ram_bytes" 'BEGIN { printf "%d", b / 1073741824 }')
+    if [ "$_ram_gb" -ge 8 ]; then
+      printf '  [OK] RAM: %s GB\n' "$_ram_gb"
+    else
+      printf '  [!!] RAM: %s GB (need 8 GB+)\n' "$_ram_gb"
+      _issues=$((_issues + 1))
     fi
-    printf '  [OK] GPU: %s (Metal)\n' "$_gpu"
+  fi
+
+  # GPU detection. A CPU brand is not a GPU.
+  if [ "$_os" = "Darwin" ]; then
+    _gpu=$(system_profiler SPDisplaysDataType 2>/dev/null | awk -F': ' '/Chipset Model/ {print $2; exit}') || _gpu=""
+    if [ -n "$_gpu" ]; then
+      printf '  [OK] GPU: %s (Metal)\n' "$_gpu"
+    else
+      printf '  [--] GPU: unknown\n'
+    fi
   else
     if command -v nvidia-smi >/dev/null 2>&1; then
       _gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1) || _gpu="NVIDIA (detected)"
