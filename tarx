@@ -1808,6 +1808,23 @@ PYEOF
   esac
 }
 
+# Read-only local health observations. This is not an install, identity or billing receipt.
+cmd_readiness() {
+  _gate=1
+  for _row in "inference 11435" "mesh 11436" "embed 11437" "cognitive 11438"; do
+    _name="${_row% *}"
+    _port="${_row#* }"
+    if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:${_port}/health" >/dev/null 2>&1; then
+      printf '%s %s health-reachable\n' "$_name" "$_port"
+      [ "$_name" != inference ] || _gate=0
+    else
+      printf '%s %s not-ready\n' "$_name" "$_port"
+    fi
+  done
+  printf 'Local health only; remote compute, model identity and account access not verified.\n'
+  return "$_gate"
+}
+
 # ── help ─────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -1819,6 +1836,7 @@ Usage: tarx <command> [options]
 Commands:
   start             Start all services (inference, mesh, embeddings)
   stop              Graceful shutdown of all services
+  readiness         Bounded local health report; starts nothing
   status            Health check all services
   chat "prompt"     Talk with TARX. tarx with no command opens the conversation.
   embed <file>      Chunk and embed file into RAG store
@@ -1867,6 +1885,7 @@ shift 2>/dev/null || true
 case "$_cmd" in
   start)     cmd_start ;;
   stop)      cmd_stop ;;
+  readiness) cmd_readiness ;;
   status)    cmd_status ;;
   chat)      cmd_chat "$@" ;;
   embed)     cmd_embed "$@" ;;

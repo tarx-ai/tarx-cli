@@ -28,4 +28,6 @@ test "$(wc -c < "$tmp" | tr -d ' ')" -gt 8000 || {
 }
 install -m 755 "$tmp" "$DEST"
 printf 'installed %s\n' "$DEST"
-printf 'TARX inference: https://compute.tarx.com\n'
+printf 'CLI copied. No daemon or model was installed or started.\n'
+printf 'Check local health: %s readiness\n' "$DEST"
+printf 'Remote compute: https://compute.tarx.com (account and availability not verified)\n'
