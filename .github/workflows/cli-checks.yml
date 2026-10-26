@@ -26,6 +26,8 @@ jobs:
         run: sh tests/test-mcp-config.sh
       - name: Test inference route preflight
         run: sh tests/test-route-preflight.sh
+      - name: Test conversational auth never invokes inference
+        run: python3 tests/test-chat-auth.py
       - name: Test doctor states
         run: sh tests/test-doctor.sh
 

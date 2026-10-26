@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.2.1"
+TARX_VERSION="1.2.2"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -243,7 +243,7 @@ _tarx_session() {
   fi
   # The program is on fd 3 so the terminal stays attached to the conversation.
   TARX_CHAT_TEXT="${1-}" python3 /dev/fd/3 3<< 'PY'
-import json, os, select, subprocess, sys, urllib.error, urllib.request
+import json, os, re, select, subprocess, sys, urllib.error, urllib.request
 from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", ""))
@@ -439,6 +439,8 @@ def write_key(value):
     os.chmod(KEY_PATH, 0o600)
 
 def clear_key():
+    os.environ.pop("TARX_CHAT_KEY", None)
+    LABEL_CACHE.clear()
     reset_history()
     try:
         KEY_PATH.unlink()
@@ -457,9 +459,35 @@ def show_commands():
     say("/agents     who can work")
     say("/channels   rooms you can open")
     say("/signin     connect this computer")
+    say("/signout    sign out of this computer")
+
+def sign_out():
+    key = read_key()
+    if key:
+        status, body = http("POST", AUTH + "/api/auth/cli/revoke", {"token": key}, timeout=10)
+        if status != 200 or body.get("ok") is not True:
+            say("Sign-out could not be confirmed. Your saved sign-in is unchanged. Try again.")
+            return
+    clear_key()
+    say("You're signed out. You can keep looking.")
+    show_commands()
+
+def signin_state(key):
+    if not key:
+        return "no"
+    status, body = http("POST", AUTH + "/api/auth/cli/introspect", {"token": key, "spend": False}, timeout=10)
+    if status == 200 and body.get("ok") is True:
+        return "ok" if re.fullmatch(r"tvs_[0-9a-f]{32}", str(body.get("subject_id", ""))) else "no"
+    return "no" if status in (401, 403) else "unknown"
 
 def handle_command(text):
     low = " ".join(text.strip().lower().split())
+    bare = low[1:].strip() if low.startswith("/") else low
+    if bare in {"signin", "sign-in", "sign in", "login", "log-in", "log in"}:
+        return "signin"
+    if bare in {"signout", "sign-out", "sign out", "logout", "log-out", "log out"}:
+        sign_out()
+        return True
     if low in {"/agents", "/agent"}:
         say("Always On is the agent in this conversation.")
         say("Specialist execution is not connected to this CLI yet.")
@@ -467,13 +495,14 @@ def handle_command(text):
         return True
     if low in {"/channels", "/channel"}:
         say("Channels are rooms. Looking does not join the room.")
-        say("Open https://tarx.com/agent to view available channels.")
+        say("Open https://www.tarx.com/agent to view available channels.")
         return True
     if low in {"/help", "/?"}:
         show_commands()
         return True
-    if low in {"/signin", "/sign-in", "sign in", "signin"}:
-        return "signin"
+    if low.startswith("/"):
+        say("Unknown command. Use /help for available commands. No message was sent.")
+        return True
     return False
 
 def guest_command(text):
@@ -550,13 +579,23 @@ def say_who(key):
     say("This computer is connected, but this sign-in did not keep your account name.")
     say("Say /signin once more. I will keep the name from that approval.")
 
+def approval_url(code, supplied_url):
+    if not re.fullmatch(r"[A-Fa-f0-9]{8}", code):
+        return ""
+    if not (supplied_url.startswith(AUTH + "/auth/device?") or supplied_url.startswith(AUTH + "/agent?cli=")):
+        return ""
+    if AUTH in {"https://tarx.com", "https://www.tarx.com"}:
+        return "https://www.tarx.com/agent?cli=" + code
+    return AUTH + "/agent?cli=" + code
+
 def begin_sign_in():
     status, body = http("POST", AUTH + "/api/auth/device", {}, timeout=20)
     device = body.get("device_code") if status == 200 else ""
     url = body.get("verification_uri") if isinstance(body.get("verification_uri"), str) else ""
     code = body.get("user_code") if isinstance(body.get("user_code"), str) else ""
-    if not device or not (url.startswith(AUTH + "/auth/device?") or url.startswith(AUTH + "/agent?cli=")):
-        say("Sign-in is unavailable. Try again in a moment.")
+    url = approval_url(code, url)
+    if not device or not url:
+        say("Sign-in is unavailable. No approval was started.")
         return ""
     say("Finish signing in in your browser. I'll pick up here when you're done.")
     say("This terminal's code is " + code + ".")
@@ -694,18 +733,13 @@ def loop():
             continue
         if text.lower() in {"exit", "quit"}:
             return 0
-        if text.lower() in {"sign out", "logout"}:
-            key = read_key()
-            if key:
-                http("POST", AUTH + "/api/auth/cli/revoke", {"token": key}, timeout=10)
-            clear_key()
-            say("You're signed out. You can keep looking.")
-            show_commands()
-            continue
-        found = handle_command(text) if text.startswith("/") or text.lower() in {"sign in", "signin"} else False
+        found = handle_command(text)
         if found == "signin":
-            if read_key():
+            state = signin_state(read_key())
+            if state == "ok":
                 say("This computer is already connected.")
+            elif state == "unknown":
+                say("I can't confirm your connection right now. Your saved sign-in is unchanged; try again shortly.")
             else:
                 begin_sign_in()
             continue
