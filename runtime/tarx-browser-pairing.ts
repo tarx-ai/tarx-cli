@@ -19,8 +19,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFile, writeFile, mkdir, rename, open, unlink } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import {createLocalJsonStore} from './local-json-store.ts'
 
 import { resolveCliPrincipal, type CliPrincipalResult } from './cli-principal.ts'
 import type { IdentityResolver } from './tarx-eve-listener.ts'
@@ -42,6 +41,7 @@ export type PairRecord = {
   install_id: string
   created_at: number
   expires_at: number
+  task_scopes?: string[]
   approved: boolean
   claimed: boolean
   revoked: boolean
@@ -59,33 +59,13 @@ export type PairStore = {
 
 /** Disposable on-disk pair store (0600). NOT a production grant. */
 export function createFilePairStore(filePath: string): PairStore {
-  filePath=resolve(filePath)
-  async function transaction<T>(operation:(all:Record<string,PairRecord>)=>Promise<T>):Promise<T>{
-    await mkdir(dirname(filePath),{recursive:true,mode:0o700})
-    let lock:Awaited<ReturnType<typeof open>>|undefined
-    for(let i=0;i<200;i++){
-      try{lock=await open(filePath+'.lock','wx',0o600);break}
-      catch(e:any){if(e.code!=='EEXIST')throw e;await new Promise(r=>setTimeout(r,5))}
-    }
-    if(!lock)throw new Error('pair_store_busy')
-    try{
-      let all:Record<string,PairRecord>={}
-      try{all=JSON.parse(await readFile(filePath,'utf8'));if(!all||typeof all!=='object'||Array.isArray(all))throw Error('invalid_pair_store')}
-      catch(e:any){if(e.code!=='ENOENT')throw e}
-      return await operation(all)
-    }finally{await lock.close();await unlink(filePath+'.lock')}
-  }
-  async function persist(all:Record<string,PairRecord>){
-    const temp=filePath+'.'+randomBytes(12).toString('hex')+'.tmp'
-    try{await writeFile(temp,JSON.stringify(all),{mode:0o600,flag:'wx'});await rename(temp,filePath)}
-    finally{await unlink(temp).catch((e:any)=>{if(e.code!=='ENOENT')throw e})}
-  }
-  return {
-    get(h){return transaction(async all=>all[h]??null)},
-    put(rec){return transaction(async all=>{all[rec.challenge_hash]=rec;await persist(all)})},
-    byPairingHash(ph){return transaction(async all=>Object.values(all).find(r=>r.pairing_hash===ph)??null)},
-    mutate(h,update){return transaction(async all=>{const next=update(all[h]??null);if(next.record){all[h]=next.record;await persist(all)}return next.result})},
-  }
+ const store=createLocalJsonStore<PairRecord>(filePath)
+ return {
+  get:store.get,
+  put:rec=>store.put(rec.challenge_hash,rec),
+  byPairingHash:async hash=>(await store.values()).find(rec=>rec.pairing_hash===hash)??null,
+  mutate:(hash,update)=>store.transact(all=>{const next=update(all[hash]??null);if(next.record)all[hash]=next.record;return {result:next.result,write:Boolean(next.record)}}),
+ }
 }
 
 /** CLI-side, local/trusted. Resolves the subject server-side and binds install. */
@@ -117,10 +97,11 @@ export async function createPairingChallenge(input: {
 
 /** Explicit CLI approval. Consent cannot be bypassed: an unapproved challenge
  *  can never be claimed. */
-export async function approvePairingChallenge(challenge: string, store: PairStore, now = Date.now()): Promise<boolean> {
+export async function approvePairingChallenge(challenge: string, store: PairStore, now = Date.now(), taskScope?: string): Promise<boolean> {
+  if(taskScope && taskScope!=='read_launch_note')return false
   return store.mutate(sha256(challenge),rec=>{
     if(!rec||rec.revoked||rec.claimed||now>=rec.expires_at)return {result:false}
-    return {record:{...rec,approved:true},result:true}
+    return {record:{...rec,approved:true,task_scopes:taskScope?[taskScope]:[]},result:true}
   })
 }
 
@@ -171,4 +152,14 @@ export function pairingIdentityResolver(store: PairStore, now: () => number = Da
     if (!STABLE_SUBJECT.test(rec.subject_id) || !rec.install_id) return null
     return { subject_id: rec.subject_id, install_id: rec.install_id }
   }
+}
+
+/** Authorization to execute is separate from paired read access. */
+export async function pairingTaskAccess(req:Parameters<IdentityResolver>[0],store:PairStore){
+ const identity=await pairingIdentityResolver(store)(req)
+ if(!identity)return null
+ const auth=String(req.headers.authorization??'').slice('Bearer '.length).trim()
+ const record=await store.byPairingHash(sha256(auth))
+ if(!record||record.revoked)return null
+ return {...identity,task_scopes:record.task_scopes??[]}
 }

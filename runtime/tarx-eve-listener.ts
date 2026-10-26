@@ -18,8 +18,7 @@
  */
 
 import http from 'node:http'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import {createLocalJsonStore} from './local-json-store.ts'
 import { authorizeSessionAccess, type SessionOwnership, type TransportReadiness } from './tarx-eve-transport.ts'
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
@@ -160,18 +159,6 @@ export function createSessionListener(deps: ListenerDeps) {
 
 /** Disposable on-disk owner store for tests. NOT a production identity grant. */
 export function createFileOwnerStore(filePath: string): OwnerStore {
-  async function readAll(): Promise<Record<string, SessionOwnership>> {
-    try { return JSON.parse(await readFile(filePath, 'utf8')) } catch { return {} }
-  }
-  return {
-    async get(session_id) {
-      return (await readAll())[session_id] ?? null
-    },
-    async put(owner) {
-      const all = await readAll()
-      all[owner.session_id] = owner
-      await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, JSON.stringify(all), 'utf8')
-    },
-  }
+ const store=createLocalJsonStore<SessionOwnership>(filePath)
+ return {get:store.get,put:owner=>store.put(owner.session_id,owner)}
 }
