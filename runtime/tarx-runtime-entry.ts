@@ -65,6 +65,6 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
  try{
   const result=await runRuntimeEntry(process.argv.slice(2))
   if('listener' in result){console.log(JSON.stringify({listening:result.address,mode:'paired_read_attach',task_submission:false}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void result.listener.close().then(()=>process.exit(0))})}
-  else console.log(JSON.stringify(result))
+  else {console.log(JSON.stringify(result));if('ok' in result&&result.ok===false)process.exitCode=1}
  }catch{console.error(JSON.stringify({ok:false,error:'runtime_command_failed',hint:'Check command arguments, saved CLI sign-in and pinned runtime dependencies.'}));process.exitCode=1}
 }

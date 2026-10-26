@@ -34,3 +34,10 @@ test('entrypoint resolves the actual pinned Eve Client without starting a worker
  const runtime:any=await runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','http://127.0.0.1:9999','--eve-root',fileURLToPath(new URL('.',import.meta.url)),'--port','0'])
  try{assert.ok(runtime.address.port>0)}finally{await runtime.listener.close()}
 })
+
+test('failed saved sign-in exits nonzero through the actual command process',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-entry-exit-'))
+ const {spawnSync}=await import('node:child_process')
+ const result=spawnSync(process.execPath,['--experimental-strip-types',fileURLToPath(new URL('./tarx-runtime-entry.ts',import.meta.url)),'challenge','--state-dir',dir,'--credential-file',join(dir,'absent')],{encoding:'utf8'})
+ assert.equal(result.status,1);assert.match(result.stdout,/missing_credential/)
+})
