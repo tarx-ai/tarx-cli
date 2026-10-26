@@ -1,0 +1,18 @@
+{
+  "name": "tarx-eve-runtime",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "help": "node --experimental-strip-types tarx-runtime-entry.ts help"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "3.0.78",
+    "ai": "7.0.153",
+    "eve": "0.83.2",
+    "zod": "4.6.7"
+  },
+  "version": "0.1.0"
+}

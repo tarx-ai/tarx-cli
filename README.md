@@ -1,16 +1,24 @@
 # TARX CLI
 
-The local control plane for TARX: start private inference, inspect runtime health,
-connect AI clients through MCP, and work with project-scoped memory from one
-command.
+Start free at [tarx.com](https://www.tarx.com). The CLI is optional.
 
-TARX is building a governed personal AI runtime where memory, tools,
-permissions, evidence, and execution work together. The CLI exposes a focused
-public surface for operating that runtime without sending local model traffic to
-a third-party inference service.
+> Public developer preview. Installing the CLI does not install a model or background service.
 
-> **Status:** Public developer preview. Interfaces may change before the first
-> stable release.
+Check what is available with `tarx version`, `tarx help`, and `tarx readiness`.
+
+## Optional local runtime
+
+The runtime package requires Node.js24 or newer, npm, Python3, and curl:
+
+```sh
+tarx runtime install
+```
+
+This installs pinned dependencies into a versioned directory and starts nothing. A failed download or dependency install preserves the previous runtime.
+
+Run `tarx`, then `/signin` to connect the CLI account. Runtime pairing requires that saved verified sign-in. Use `tarx runtime help` for challenge, approval and read-only listener commands. See [runtime setup](runtime/README.md).
+
+Browser task submission and automatic worker setup are not included yet. An existing loopback Eve worker is required for read/attach. Windows setup and OS restart recovery are not verified.
 
 ## Agents
 
