@@ -22,8 +22,8 @@ export async function createOwnedPublicWorker(input:{root:string;home:string;eve
   const processChild=spawn(process.execPath,[join(base,'node_modules/eve/bin/eve.js'),'build','--skip-sandbox-prewarm'],{cwd:input.root,detached:true,env:environment,stdio:'ignore'})
   try{await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{try{if(processChild.pid)process.kill(-processChild.pid,'SIGKILL')}catch{}reject(Error('owned_worker_build_timeout'))},90000);processChild.once('error',()=>{clearTimeout(timer);reject(Error('owned_worker_build_failed'))});processChild.once('exit',code=>{clearTimeout(timer);code===0?resolve():reject(Error('owned_worker_build_failed'))})});built=true}catch(e){throw e}
  }
- async function stop(){try{await stopChild()}finally{if(locked){locked=false;await rm(join(input.root,'.runtime.lock'),{recursive:true})}}}
- async function stopChild(){verified=false;const old=child;child=undefined;if(old?.pid){try{process.kill(-old.pid,'SIGTERM');await wait(1200);try{process.kill(-old.pid,'SIGKILL')}catch{}}catch{}for(let i=0;i<30;i++){await wait(100);try{await fetch(host+'/eve/v1/health',{signal:AbortSignal.timeout(150)})}catch{return}}throw Error('owned_worker_stop_timeout')}}
+ async function stop(){await stopChild();if(locked){await rm(join(input.root,'.runtime.lock'),{recursive:true});locked=false}}
+ async function stopChild(){verified=false;const old=child;if(old?.pid){try{process.kill(-old.pid,'SIGTERM');await wait(1200);try{process.kill(-old.pid,'SIGKILL')}catch{}}catch{}for(let i=0;i<30;i++){await wait(100);try{await fetch(host+'/eve/v1/health',{signal:AbortSignal.timeout(150)})}catch{child=undefined;return}}throw Error('owned_worker_stop_timeout')}}
  async function verify(){return verified&&child?.exitCode===null&&child?.signalCode===null&&await profile.verify()}
  async function start(){
   if(child)throw Error('worker_already_owned');if(!await profile.verify())throw Error('profile_changed')

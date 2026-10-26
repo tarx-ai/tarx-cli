@@ -1,30 +1,31 @@
-# Bounded task integration — not enabled in public serve
+# Bounded local tool check
 
-The new controller and HTTP routes are an integration candidate. The default CLI listener still has no registered task executor and returns503 for paired task requests. This source does not turn pairing into permission to run work.
+`tarx runtime install` installs pinned dependencies and starts nothing. Node24+, npm and Python are required. Existing `tarx runtime serve --worker-url URL` stays read-only.
 
-A trusted caller may compose `createBoundedTaskController` with an accepted dedicated public-fixture Eve profile, then pass it to `createPairedSessionListener`. The SDK adapter creates an idle session, persists account/install/session ownership, records dispatch intent, then sends one fixed message. A separate CLI approval `--task read_launch_note` is required; read-only pairings cannot submit. A browser cannot supply its subject, install, file path, prompt, tool name or profile proof.
+The opt-in `serve-check` command builds and starts one authenticated loopback Eve0.83.2 worker. It exposes only `read_launch_note`, which returns a fixed public test sentence. No private files, arbitrary prompts/paths, default tools, delegation, sandbox, model startup or billing. This is a connectivity check, not a general always-on agent.
 
-POST `/tasks` accepts exactly `{request_id,task:"read_launch_note"}` with a pinned origin and scoped bearer. An identical request returns its existing record and does not dispatch again. GET `/tasks/REQUEST_ID` reads only owned durable state. The stable idempotency boundary is account+install+request id. One in-flight task per account/install; an uncertain dispatch is retained and never automatically retried.
+After existing CLI sign-in, request a challenge and explicitly approve the task:
 
-A success receipt requires a completed turn and exactly one successful, matching tool result containing the known public fixture. A completion event or model text alone cannot mark success. Receipts state `not_a_charge`; no billing/energy event is emitted. Failed, private or unexpected tool results never become a successful public receipt.
+```
+tarx runtime challenge
+tarx runtime approve --challenge CODE --task read_launch_note
+tarx runtime serve-check --worker-root NEW_DIRECTORY --model-url http://127.0.0.1:PORT/v1 --model-id MODEL --worker-port WORKER_PORT
+```
 
-## Acceptance remaining
+Choose an existing model endpoint and an unused worker port. The browser claims the approved code once. Approval without `--task` grants read-only pairing. The worker authentication remains inside the local bridge; the browser gets only a scoped pairing credential. Installation/page load never starts the worker.
 
-The profile verifier cannot just return true in production. It must prove the dedicated worker has only the reviewed fixture tool, no private context, no default tools or delegation, and authenticated inbound routes. Public serve does not supply that proof or executor. Next: real authenticated scoped-worker integration using a mock model, then actual conversation task/read/reload acceptance. Prior native-model tool proof remains separate and must not be repeated from a monitor.
+GET `/task-capabilities` requires the pinned Origin and valid unrevoked pairing bearer. Its separate `available_tasks` and `permitted_tasks` arrays come from actual trusted worker discovery intersected with stored approval. No executor yields empty arrays, missing/revoked bearer401, discovery failure503. Health does not prove model responsiveness.
 
-Tests here exercise real local persistence/HTTP with executor doubles. They are not real Eve task or production account acceptance. No worker/model/service is started by the test suite.
+POST `/tasks` accepts exactly `{request_id,task:"read_launch_note"}`. The browser saves its request id before sending. The controller reserves account/install/request ownership before idle session creation and dispatch intent before the fixed message. Repeated requests return the original record. GET `/tasks/REQUEST_ID` reads owned durable outcomes. Uncertain dispatch is retained and never automatically repeated. One in-flight task per account/install is allowed.
 
-Protected profile integration now has an opt-in actual Eve test:
-`TARX_TEST_WORKER=1 node --experimental-strip-types --test tarx-public-worker.integration.test.ts`.
-It uses a disposable mock model and child worker, verifies unauthenticated session creation cannot invoke the model, then actual SDK idle/create/send, fixed-tool receipt, worker restart and durable session replay with no duplicate call. This is not browser/production account acceptance. The profile denies sandbox opening and disables optional sandbox auto-install. Eve0.83.2 accepts `queue`/`steer`, not `reject`; this adapter uses queue only for a newly created, exclusively owned idle session behind the persistent no-resubmit ledger.
-Public serve remains executor-free. Profile file verification alone does not attest an arbitrary remote worker or provide OS isolation; enabling a production executor still requires a trusted owned-worker lifecycle binding.
+Completion requires one exact successful tool result and completed turn; model text alone cannot create a receipt. Receipts state `not_a_charge`. No balance, energy or payment is emitted.
 
-Owned lifecycle now uses `eve build --skip-sandbox-prewarm` once, then `eve start --no-schedules` on loopback. It checks authenticated runtime discovery contains exactly the one reviewed static tool and zero dynamic tools before becoming trusted. The actual mock test exercises this production build/start path and same-build restart. No Docker/sandbox/model is started; the authored sandbox still refuses opening. The production public CLI entry and task-capability/approval discovery are not yet registered.
+For clean reopening, repeat the same serve-check arguments with `--resume true`. Sources/model/dependency link must match. A held `.runtime.lock` prevents another owner and is never forcibly taken over. Clean shutdown releases it only after its owned listener closes; failure preserves the lock. Build output is regenerated from validated sources, and durable Eve/owner/task/pair state is reused. Abrupt process death, stale-lock operator recovery and OS reboot are not yet accepted. There is no installed background service.
 
-Candidate explicit command (not released):
-`tarx runtime serve-check --worker-root NEW_DIRECTORY --model-url http://127.0.0.1:PORT/v1 --model-id MODEL --worker-port PORT`
-The installed wrapper supplies eve-root. This builds/starts only the dedicated scoped worker, not the model, and exposes the paired listener. Existing `serve` remains read-only. Use a new worker-root; reusing an existing root fails rather than replacing files. Same-process worker recovery is tested; reopening a worker profile after CLI exit/OS restart is not implemented yet, so this is not an always-on service claim.
+Validation: normal tests cover stores/auth/discovery/HTTP/idempotency. Opt-in actual worker test:
 
-`GET /task-capabilities` requires the pinned Origin and valid unrevoked pairing bearer. Returns `{available_tasks:string[],permitted_tasks:string[]}` from actual trusted worker discovery intersected with stored task scopes; no executor yields empty lists, revoked bearer401, discovery failure503. Merely pairing does not grant execution. Approve separately with `tarx runtime approve --challenge CODE --task read_launch_note`. Model responsiveness stays false until an actual outcome; inventory is not a model-performance claim.
+```
+TARX_TEST_WORKER=1 node --experimental-strip-types --test tarx-public-worker.integration.test.ts
+```
 
-Candidate saved-profile reopening: repeat the same serve-check arguments with `--resume true`. Exact authored content/model configuration and dependency link must match; changes fail without overwriting files. A held `.runtime.lock` rejects another owner; no stale-lock forcing. Fresh worker authentication is generated for each owner. Build output is regenerated from validated sources; durable `.eve` workflow state, owner/task ledger and scoped pairing state are reused. Clean entry teardown/recreation and fresh worker-object recovery are tested with a mock model. Abrupt CLI crash/stale-lock recovery and actual OS reboot remain unproved; an orphan/held lock requires operator recovery, not automatic deletion.
+That test uses disposable identity and a loopback mock model, actual production build/start, CLI commands/pairing/tool receipt, worker restart and clean entry recreation. A separate browser test used the real paired Eve listener/mock model: one POST, one tool result, same receipt after reload, no extra model calls, revocation preserves receipt. These are local fixture acceptance, not production email identity, arbitrary tools, real OS lifecycle or throughput certification. A separate one-shot native-model compatibility trial is recorded privately; do not rerun it from monitoring.
