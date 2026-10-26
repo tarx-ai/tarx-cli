@@ -22,7 +22,7 @@ export async function installIdentity(stateDir:string):Promise<string>{
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any}={}){
  const command=args[0]??'help',options:Record<string,string>={}
- for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
+ for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
  if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
  if(!['challenge','approve','revoke','serve'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
@@ -34,7 +34,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
  }
  if(command==='approve'||command==='revoke'){
   const challenge=options.challenge??'';if(!/^[a-f0-9]{64}$/.test(challenge))throw Error('invalid_challenge')
-  if(command==='approve')return {ok:await approvePairingChallenge(challenge,store)}
+  if(command==='approve')return {ok:await approvePairingChallenge(challenge,store,Date.now(),options.task)}
   await revokePairing(createHash('sha256').update(challenge).digest('hex'),store);return {ok:true}
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
@@ -65,7 +65,7 @@ const invokedEntry=process.argv[1]?await realpath(resolve(process.argv[1])).catc
 if(invokedEntry&&import.meta.url===pathToFileURL(invokedEntry).href){
  try{
   const result=await runRuntimeEntry(process.argv.slice(2))
-  if('listener' in result){console.log(JSON.stringify({listening:result.address,mode:'paired_read_attach',task_submission:false}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void result.listener.close().then(()=>process.exit(0))})}
+  if('listener' in result&&result.listener){const listener=result.listener;console.log(JSON.stringify({listening:result.address,mode:'paired_read_attach',task_submission:false}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void listener.close().then(()=>process.exit(0))})}
   else {console.log(JSON.stringify(result));if('ok' in result&&result.ok===false)process.exitCode=1}
  }catch{console.error(JSON.stringify({ok:false,error:'runtime_command_failed',hint:'Check command arguments, saved CLI sign-in and pinned runtime dependencies.'}));process.exitCode=1}
 }

@@ -40,7 +40,10 @@ jobs:
           cache-dependency-path: runtime/package-lock.json
       - name: Install pinned runtime dependencies without scripts
         working-directory: runtime
-        run: npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Strict runtime contract typecheck
+        working-directory: runtime
+        run: ./node_modules/.bin/tsc --noEmit
       - name: Test runtime identity and HTTP commands
         working-directory: runtime
         run: node --test --experimental-strip-types *.test.ts
