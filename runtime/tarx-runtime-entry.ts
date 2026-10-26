@@ -24,7 +24,7 @@ export async function installIdentity(stateDir:string):Promise<string>{
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any}={}){
  const command=args[0]??'help',options:Record<string,string>={}
- for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
+ for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port|resume)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
  if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
  if(!['challenge','approve','revoke','serve','serve-check'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
@@ -44,7 +44,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   if(!options['worker-root']||!options['eve-root']||!options['model-url']||!options['model-id']||!options['worker-port'])throw Error('owned_worker_options_required')
   const listenerPort=Number(options.port??3270);if(!Number.isInteger(listenerPort)||listenerPort<0||listenerPort>65535)throw Error('invalid_port')
   const root=resolve(options['worker-root'])
-  const worker=await createOwnedPublicWorker({root,home:root+'-home',eveRoot:resolve(options['eve-root']),modelBaseURL:options['model-url'],modelId:options['model-id'],port:Number(options['worker-port'])})
+  const worker=await createOwnedPublicWorker({root,home:root+'-home',eveRoot:resolve(options['eve-root']),modelBaseURL:options['model-url'],modelId:options['model-id'],port:Number(options['worker-port']),resume:options.resume==='true'})
   try{await worker.start()
    const owners=createFileOwnerStore(join(state,'owners.json'))
    const tasks=createBoundedTaskController({file:join(state,'tasks.json'),owners,executor:createEveReadNoteExecutor(worker.client,worker.verify)})
