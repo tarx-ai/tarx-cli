@@ -40,5 +40,6 @@ export async function createOwnedPublicWorker(input:{root:string;home:string;eve
    await wait(300)
   }throw Error('owned_worker_start_timeout')}catch(e){await stop();throw e}
  }
- return {client,start,stop,verify,host}
+ async function tools(){if(!await verify())return [];const info=await client.info({signal:AbortSignal.timeout(1500)});const names=info.tools.static.map((tool:any)=>tool.name);return info.tools.dynamic.length===0&&names.length===1&&names[0]==='read_launch_note'?names:[]}
+ return {client,start,stop,verify,host,tools}
 }

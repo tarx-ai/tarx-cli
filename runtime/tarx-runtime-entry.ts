@@ -8,6 +8,8 @@ import {createRequire} from 'node:module'
 import {pathToFileURL} from 'node:url'
 import {createFilePairStore,createPairingChallenge,approvePairingChallenge,revokePairing} from './tarx-browser-pairing.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
+import {createOwnedPublicWorker} from './tarx-owned-worker.ts'
+import {createBoundedTaskController,createEveReadNoteExecutor} from './tarx-bounded-task.ts'
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
 
 export async function installIdentity(stateDir:string):Promise<string>{
@@ -22,9 +24,9 @@ export async function installIdentity(stateDir:string):Promise<string>{
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any}={}){
  const command=args[0]??'help',options:Record<string,string>={}
- for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
- if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
- if(!['challenge','approve','revoke','serve'].includes(command))throw Error('unknown_command')
+ for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
+ if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
+ if(!['challenge','approve','revoke','serve','serve-check'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
  const store=createFilePairStore(join(state,'pairs.json'))
  if(command==='challenge'){
@@ -38,6 +40,19 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   await revokePairing(createHash('sha256').update(challenge).digest('hex'),store);return {ok:true}
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
+ if(command==='serve-check'){
+  if(!options['worker-root']||!options['eve-root']||!options['model-url']||!options['model-id']||!options['worker-port'])throw Error('owned_worker_options_required')
+  const listenerPort=Number(options.port??3270);if(!Number.isInteger(listenerPort)||listenerPort<0||listenerPort>65535)throw Error('invalid_port')
+  const root=resolve(options['worker-root'])
+  const worker=await createOwnedPublicWorker({root,home:root+'-home',eveRoot:resolve(options['eve-root']),modelBaseURL:options['model-url'],modelId:options['model-id'],port:Number(options['worker-port'])})
+  try{await worker.start()
+   const owners=createFileOwnerStore(join(state,'owners.json'))
+   const tasks=createBoundedTaskController({file:join(state,'tasks.json'),owners,executor:createEveReadNoteExecutor(worker.client,worker.verify)})
+   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
+   const address=await listener.listen()
+   return {listener:{close:async()=>{try{await listener.close()}finally{await worker.stop()}}},address,task_submission:true}
+  }catch(e){await worker.stop();throw e}
+ }
  if(!options['worker-url'])throw Error('existing_worker_required')
  const workerURL=localURL(options['worker-url'])
  const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
@@ -65,7 +80,7 @@ const invokedEntry=process.argv[1]?await realpath(resolve(process.argv[1])).catc
 if(invokedEntry&&import.meta.url===pathToFileURL(invokedEntry).href){
  try{
   const result=await runRuntimeEntry(process.argv.slice(2))
-  if('listener' in result&&result.listener){const listener=result.listener;console.log(JSON.stringify({listening:result.address,mode:'paired_read_attach',task_submission:false}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void listener.close().then(()=>process.exit(0))})}
+  if('listener' in result&&result.listener){const listener=result.listener;console.log(JSON.stringify({listening:result.address,mode:'paired_runtime',task_submission:'task_submission' in result&&result.task_submission===true}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void listener.close().then(()=>process.exit(0))})}
   else {console.log(JSON.stringify(result));if('ok' in result&&result.ok===false)process.exitCode=1}
  }catch{console.error(JSON.stringify({ok:false,error:'runtime_command_failed',hint:'Check command arguments, saved CLI sign-in and pinned runtime dependencies.'}));process.exitCode=1}
 }

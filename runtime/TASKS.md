@@ -20,3 +20,9 @@ It uses a disposable mock model and child worker, verifies unauthenticated sessi
 Public serve remains executor-free. Profile file verification alone does not attest an arbitrary remote worker or provide OS isolation; enabling a production executor still requires a trusted owned-worker lifecycle binding.
 
 Owned lifecycle now uses `eve build --skip-sandbox-prewarm` once, then `eve start --no-schedules` on loopback. It checks authenticated runtime discovery contains exactly the one reviewed static tool and zero dynamic tools before becoming trusted. The actual mock test exercises this production build/start path and same-build restart. No Docker/sandbox/model is started; the authored sandbox still refuses opening. The production public CLI entry and task-capability/approval discovery are not yet registered.
+
+Candidate explicit command (not released):
+`tarx runtime serve-check --worker-root NEW_DIRECTORY --model-url http://127.0.0.1:PORT/v1 --model-id MODEL --worker-port PORT`
+The installed wrapper supplies eve-root. This builds/starts only the dedicated scoped worker, not the model, and exposes the paired listener. Existing `serve` remains read-only. Use a new worker-root; reusing an existing root fails rather than replacing files. Same-process worker recovery is tested; reopening a worker profile after CLI exit/OS restart is not implemented yet, so this is not an always-on service claim.
+
+`GET /task-capabilities` requires the pinned Origin and valid unrevoked pairing bearer. Returns `{available_tasks:string[],permitted_tasks:string[]}` from actual trusted worker discovery intersected with stored task scopes; no executor yields empty lists, revoked bearer401, discovery failure503. Merely pairing does not grant execution. Approve separately with `tarx runtime approve --challenge CODE --task read_launch_note`. Model responsiveness stays false until an actual outcome; inventory is not a model-performance claim.

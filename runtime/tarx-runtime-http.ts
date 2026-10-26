@@ -3,9 +3,17 @@
 import {createSessionListener,type ListenerDeps} from './tarx-eve-listener.ts'
 import type {createBoundedTaskController} from './tarx-bounded-task.ts'
 import {claimPairing,pairingIdentityResolver,pairingTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
-export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>}){
+export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
   const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
+  if(path==='/task-capabilities'){
+   if(req.method!=='GET')return reply(405,{error:'method_not_allowed'})
+   if(!deps.allowedOrigins.has(String(req.headers.origin??'')))return reply(403,{error:'untrusted_origin'})
+   const identity=await pairingTaskAccess(req,deps.pairStore);if(!identity)return reply(401,{error:'missing_identity'})
+   let discovered:string[]=[];try{discovered=deps.tasks&&deps.taskDiscovery?await deps.taskDiscovery():[]}catch{return reply(503,{error:'task_discovery_unavailable'})}
+   const available=discovered.filter(name=>name==='read_launch_note')
+   return reply(200,{available_tasks:available,permitted_tasks:available.filter(name=>identity.task_scopes.includes(name))})
+  }
   if(path==='/tasks'||path.startsWith('/tasks/')){
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''
    if(!deps.allowedOrigins.has(origin))return reply(403,{error:'untrusted_origin'})

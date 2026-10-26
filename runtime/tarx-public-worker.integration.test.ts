@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
-import {mkdtemp,rm} from 'node:fs/promises'
+import {mkdtemp,rm,writeFile} from 'node:fs/promises'
 import {join,resolve} from 'node:path'
 import {tmpdir} from 'node:os'
 import {setTimeout as wait} from 'node:timers/promises'
@@ -9,6 +9,7 @@ import {createRequire} from 'node:module'
 import {pathToFileURL} from 'node:url'
 import {createOwnedPublicWorker} from './tarx-owned-worker.ts'
 import {createBoundedTaskController,createEveReadNoteExecutor,TASK_NAME,PUBLIC_NOTE} from './tarx-bounded-task.ts'
+import {runRuntimeEntry} from './tarx-runtime-entry.ts'
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
 test('authenticated Eve task and owned-worker recovery',{skip:process.env.TARX_TEST_WORKER!=='1',timeout:120000},async()=>{
  const {Client}=await import(pathToFileURL(createRequire(resolve('package.json')).resolve('eve/client')).href)
@@ -29,5 +30,19 @@ test('authenticated Eve task and owned-worker recovery',{skip:process.env.TARX_T
  assert.equal(result.body.status,'completed',JSON.stringify(result));assert.equal(result.body.receipt.result,PUBLIC_NOTE)
  const before=calls;await worker.stop();assert.equal(await worker.verify(),false);await worker.start();assert.deepEqual(await factory().read(identity,body.request_id),result);assert.equal((await factory().submit(identity,body)).body.status,'completed')
  const events=[];for await(const event of executor.events(result.body.session_id))events.push(event);assert.equal(events.filter((e:any)=>e.type==='action.result').length,1);assert.equal(calls,before)
+ await worker.stop()
+ const state=join(parent,'entry-state'),key=join(parent,'fixture-key');await writeFile(key,'tarx_cli_'+'f'.repeat(64))
+ const challenge:any=await runRuntimeEntry(['challenge','--state-dir',state,'--credential-file',key],{fetcher:(async()=>new Response(JSON.stringify({ok:true,subject_id:identity.subject_id}))) as typeof fetch})
+ assert.equal(challenge.ok,true);await runRuntimeEntry(['approve','--state-dir',state,'--challenge',challenge.challenge,'--task',TASK_NAME])
+ const running:any=await runRuntimeEntry(['serve-check','--state-dir',state,'--worker-root',join(parent,'entry-worker'),'--eve-root',resolve('.'),'--model-url',`http://127.0.0.1:${mp}/v1`,'--model-id','mock','--worker-port',String(port),'--port','0'])
+ try{
+ const base='http://127.0.0.1:'+running.address.port,origin='https://www.tarx.com'
+ const claim=await(await fetch(base+'/pairing/claim',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({challenge:challenge.challenge})})).json()
+ const headers={origin,'content-type':'application/json',authorization:'Bearer '+claim.pairing_credential}
+ assert.deepEqual(await(await fetch(base+'/task-capabilities',{headers})).json(),{available_tasks:[TASK_NAME],permitted_tasks:[TASK_NAME]})
+ assert.equal((await fetch(base+'/tasks',{method:'POST',headers,body:JSON.stringify({...body,request_id:'entry_task_0001'})})).status,202)
+ let receipt:any;for(let i=0;i<120;i++){receipt=await(await fetch(base+'/tasks/entry_task_0001',{headers})).json();if(receipt.status==='completed')break;await wait(250)}assert.equal(receipt.receipt?.result,PUBLIC_NOTE)
+ const count=calls;assert.equal((await fetch(base+'/tasks',{method:'POST',headers,body:JSON.stringify({...body,request_id:'entry_task_0001'})})).status,200);assert.equal(calls,count)
+ }finally{await running.listener.close()}
  }finally{await worker?.stop();await new Promise<void>(r=>model.close(()=>r()));await rm(parent,{recursive:true,force:true})}
 })
