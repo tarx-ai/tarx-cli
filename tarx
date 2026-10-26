@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.1.1"
+TARX_VERSION="1.2.0"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -1827,6 +1827,72 @@ cmd_readiness() {
 
 # ── help ─────────────────────────────────────────────────────────────
 
+# Optional runtime dependencies are installed explicitly; no background startup.
+cmd_runtime() {
+  case "${1:-help}" in
+    help|--help|-h)
+      cat <<'RUNTIME_HELP'
+TARX runtime — optional local connection tools
+  tarx runtime install                    Install pinned runtime dependencies (Node >=24)
+  tarx runtime challenge                  Request a one-use code after CLI sign-in
+  tarx runtime approve --challenge CODE    Approve that code on this computer
+  tarx runtime revoke --challenge CODE     Revoke its connection
+  tarx runtime serve --worker-url URL      Read/attach an existing loopback Eve worker
+Install does not start a service, model, or worker. Task submission is not available yet.
+RUNTIME_HELP
+      return ;;
+    install)
+      command -v node >/dev/null 2>&1 || err "Install Node.js 24 or newer, then retry."
+      command -v npm >/dev/null 2>&1 || err "npm is required for runtime dependencies."
+      node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' || err "Node.js 24 or newer is required."
+      python3 - "${TARX_RUNTIME_HOME:-${HOME}/.tarx/runtime}" <<'RUNTIME_INSTALL'
+import json,os,pathlib,re,shutil,subprocess,sys,tarfile,tempfile
+root=pathlib.Path(sys.argv[1]).expanduser().resolve()
+root.mkdir(parents=True,exist_ok=True,mode=0o700)
+stage=pathlib.Path(tempfile.mkdtemp(prefix='.stage-',dir=root))
+try:
+    meta=stage/'commit.json'
+    subprocess.run(['curl','-fsSL','--max-time','30','https://api.github.com/repos/tarx-ai/tarx-cli/commits/main','-o',str(meta)],check=True,stdout=subprocess.DEVNULL)
+    sha=json.loads(meta.read_text()).get('sha','')
+    if not re.fullmatch('[0-9a-f]{40}',sha):raise ValueError('invalid_source_revision')
+    archive=stage/'source.tar.gz'
+    subprocess.run(['curl','-fsSL','--max-time','90',f'https://codeload.github.com/tarx-ai/tarx-cli/tar.gz/{sha}','-o',str(archive)],check=True,stdout=subprocess.DEVNULL)
+    dest=stage/'runtime';dest.mkdir()
+    with tarfile.open(archive,'r:gz') as source:
+        prefix=f'tarx-cli-{sha}/runtime/'
+        for member in source.getmembers():
+            if not member.name.startswith(prefix):continue
+            relative=pathlib.PurePosixPath(member.name[len(prefix):])
+            if not relative.parts:continue
+            if relative.is_absolute() or '..' in relative.parts or not member.isfile() or len(relative.parts)!=1:raise ValueError('invalid_runtime_archive')
+            if member.size>2_000_000:raise ValueError('runtime_file_too_large')
+            data=source.extractfile(member).read()
+            (dest/relative.name).write_bytes(data)
+    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts']
+    if any(not(dest/name).is_file() for name in required):raise ValueError('incomplete_runtime_archive')
+    package=json.loads((dest/'package.json').read_text())
+    if package.get('dependencies',{}).get('eve')!='0.83.2':raise ValueError('unexpected_runtime_version')
+    subprocess.run(['npm','ci','--ignore-scripts','--omit=dev','--no-audit','--no-fund'],cwd=dest,check=True,timeout=300)
+    versions=root/'versions';versions.mkdir(exist_ok=True)
+    version=versions/(sha+'-'+stage.name.removeprefix('.stage-'))
+    os.rename(dest,version)
+    link=stage/'current';link.symlink_to(version,target_is_directory=True)
+    os.replace(link,root/'current')
+    print('Runtime dependencies installed. No service, worker or model was started.')
+except Exception:
+    print('Runtime install failed; the previous runtime is unchanged. Check Node/npm, network and available disk space.',file=sys.stderr)
+    sys.exit(1)
+finally:
+    shutil.rmtree(stage,ignore_errors=True)
+RUNTIME_INSTALL
+      return ;;
+  esac
+  command -v node >/dev/null 2>&1 || err "Install Node.js 24 or newer, then retry."
+  _runtime_dir="${TARX_RUNTIME_HOME:-${HOME}/.tarx/runtime}/current"
+  [ -f "$_runtime_dir/tarx-runtime-entry.ts" ] || err "Run tarx runtime install first."
+  node --experimental-strip-types "$_runtime_dir/tarx-runtime-entry.ts" "$@" --eve-root "$_runtime_dir"
+}
+
 cmd_help() {
   cat <<'USAGE'
 TARX — Local AI Engine
@@ -1837,6 +1903,7 @@ Commands:
   start             Start all services (inference, mesh, embeddings)
   stop              Graceful shutdown of all services
   readiness         Bounded local health report; starts nothing
+  runtime help      Optional local connection tools (no automatic startup)
   status            Health check all services
   chat "prompt"     Talk with TARX. tarx with no command opens the conversation.
   embed <file>      Chunk and embed file into RAG store
@@ -1886,6 +1953,7 @@ case "$_cmd" in
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   readiness) cmd_readiness ;;
+  runtime)   cmd_runtime "$@" ;;
   status)    cmd_status ;;
   chat)      cmd_chat "$@" ;;
   embed)     cmd_embed "$@" ;;
