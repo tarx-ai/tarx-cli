@@ -13,3 +13,8 @@ A success receipt requires a completed turn and exactly one successful, matching
 The profile verifier cannot just return true in production. It must prove the dedicated worker has only the reviewed fixture tool, no private context, no default tools or delegation, and authenticated inbound routes. Public serve does not supply that proof or executor. Next: real authenticated scoped-worker integration using a mock model, then actual conversation task/read/reload acceptance. Prior native-model tool proof remains separate and must not be repeated from a monitor.
 
 Tests here exercise real local persistence/HTTP with executor doubles. They are not real Eve task or production account acceptance. No worker/model/service is started by the test suite.
+
+Protected profile integration now has an opt-in actual Eve test:
+`TARX_TEST_WORKER=1 node --experimental-strip-types --test tarx-public-worker.integration.test.ts`.
+It uses a disposable mock model and child worker, verifies unauthenticated session creation cannot invoke the model, then actual SDK idle/create/send, fixed-tool receipt, worker restart and durable session replay with no duplicate call. This is not browser/production account acceptance. The profile denies sandbox opening and disables optional sandbox auto-install. Eve0.83.2 accepts `queue`/`steer`, not `reject`; this adapter uses queue only for a newly created, exclusively owned idle session behind the persistent no-resubmit ledger.
+Public serve remains executor-free. Profile file verification alone does not attest an arbitrary remote worker or provide OS isolation; enabling a production executor still requires a trusted owned-worker lifecycle binding.

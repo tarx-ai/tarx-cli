@@ -85,12 +85,12 @@ export function createBoundedTaskController(input:{file:string;owners:OwnerStore
  * A trusted local profile verifier must attest the exact fixture tool, no
  * private instructions/context, no default tools and no delegation. A browser
  * flag or a tool name alone is not such evidence. */
-export function createEveReadNoteExecutor(client:{sessions:{create:()=>Promise<{session:{state:{sessionId:string}}}>;attach:(id:string)=>{send:(message:string,options:{turnPolicy:'reject'})=>Promise<{result:()=>Promise<unknown>}>;stream:(options:{follow:false})=>AsyncIterable<any>}}},verifyProfile:()=>Promise<boolean>):ScopedExecutor{
+export function createEveReadNoteExecutor(client:{sessions:{create:()=>Promise<{session:{state:{sessionId:string}}}>;attach:(id:string)=>{send:(message:string,options:{turnPolicy:'queue'})=>Promise<{result:()=>Promise<unknown>}>;stream:(options:{follow:false})=>AsyncIterable<any>}}},verifyProfile:()=>Promise<boolean>):ScopedExecutor{
  async function verify(){if(!await verifyProfile())throw Error('trusted_profile_required')}
  return {
   profile:TASK_NAME,
   async prepare(){await verify();return (await client.sessions.create()).session.state.sessionId},
-  async start(id,message){await verify();if(message!==TASK_MESSAGE)throw Error('invalid_task_message');const response=await client.sessions.attach(id).send(message,{turnPolicy:'reject'});void response.result().catch(()=>{/* outcome is read from durable events, never invented here */})},
+  async start(id,message){await verify();if(message!==TASK_MESSAGE)throw Error('invalid_task_message');const response=await client.sessions.attach(id).send(message,{turnPolicy:'queue'});void response.result().catch(()=>{/* outcome is read from durable events, never invented here */})},
   async *events(id){yield*client.sessions.attach(id).stream({follow:false})},
  }
 }
