@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Opt-in local command entry. No worker/model startup or host registration. */
-import {readFile,writeFile,mkdir,open} from 'node:fs/promises'
+import {readFile,writeFile,mkdir,open,realpath} from 'node:fs/promises'
 import {join,resolve} from 'node:path'
 import {homedir} from 'node:os'
 import {randomBytes,createHash} from 'node:crypto'
@@ -61,7 +61,8 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
  const address=await listener.listen()
  return {listener,address}
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){
+const invokedEntry=process.argv[1]?await realpath(resolve(process.argv[1])).catch(()=>null):null
+if(invokedEntry&&import.meta.url===pathToFileURL(invokedEntry).href){
  try{
   const result=await runRuntimeEntry(process.argv.slice(2))
   if('listener' in result){console.log(JSON.stringify({listening:result.address,mode:'paired_read_attach',task_submission:false}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void result.listener.close().then(()=>process.exit(0))})}

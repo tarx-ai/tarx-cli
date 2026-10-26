@@ -41,3 +41,11 @@ test('failed saved sign-in exits nonzero through the actual command process',asy
  const result=spawnSync(process.execPath,['--experimental-strip-types',fileURLToPath(new URL('./tarx-runtime-entry.ts',import.meta.url)),'challenge','--state-dir',dir,'--credential-file',join(dir,'absent')],{encoding:'utf8'})
  assert.equal(result.status,1);assert.match(result.stdout,/missing_credential/)
 })
+
+test('installed symlink entry executes and fails closed without saved sign-in',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-entry-link-'))
+ const {symlink}=await import('node:fs/promises'),{spawnSync}=await import('node:child_process')
+ const link=join(dir,'entry.ts');await symlink(fileURLToPath(new URL('./tarx-runtime-entry.ts',import.meta.url)),link)
+ const result=spawnSync(process.execPath,['--experimental-strip-types',link,'challenge','--state-dir',join(dir,'state'),'--credential-file',join(dir,'absent')],{encoding:'utf8'})
+ assert.equal(result.status,1);assert.match(result.stdout,/missing_credential/)
+})
