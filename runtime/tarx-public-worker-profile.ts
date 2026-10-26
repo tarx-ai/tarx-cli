@@ -23,7 +23,7 @@ export async function createPublicWorkerProfile(root:string,modelBaseURL:string,
    async function walk(path:string):Promise<string[]>{const found:string[]=[];for(const name of await readdir(join(root,path))){const relative=path?path+'/'+name:name;const stat=await lstat(join(root,relative));if(stat.isSymbolicLink())throw Error('profile_symlink');if(stat.isDirectory())found.push(...await walk(relative));else found.push(relative)}return found}
    if((await lstat(root)).isSymbolicLink()||(await lstat(join(root,'agent'))).isSymbolicLink())return false
    const roots=await readdir(root)
-   if(roots.some(name=>!['agent','package.json','node_modules','.eve'].includes(name)))return false
+   if(roots.some(name=>!['agent','package.json','node_modules','.eve','.output'].includes(name)))return false
    const actual=(await walk('agent')).sort(),expected=Object.keys(files).filter(p=>p.startsWith('agent/')).sort()
    if(JSON.stringify(actual)!==JSON.stringify(expected))return false
    for(const [path,content]of Object.entries(files)){if((await lstat(join(root,path))).isSymbolicLink()||await readFile(join(root,path),'utf8')!==content)return false}
