@@ -27,7 +27,7 @@ function rpc(value:unknown):Rpc|null{
 }
 
 /** Serialized as a static inline script. No challenge/prompt is in the page or URL. */
-function bridgeClient(config:{parent:string;nonce:string}){
+function bridgeClient(config:{parent:string;nonce:string;returnName?:string}){
  const owner=window.opener
  const active=new Map<string,AbortController>()
  let connected:MessagePort|null=null
@@ -56,7 +56,13 @@ function bridgeClient(config:{parent:string;nonce:string}){
   }
   port.start()
  })
- document.getElementById('return')?.addEventListener('click',()=>owner?.focus())
+ document.getElementById('return')?.addEventListener('click',()=>{
+  if(!owner)return
+  // Safari ignores cross-origin opener.focus(). An explicit named-context open
+  // selects the existing parent without navigating it or closing the transport.
+  if(config.returnName)window.open('',config.returnName)?.focus()
+  else owner.focus()
+ })
  owner?.postMessage({type:'tarx.local-bridge.ready',version:1},config.parent)
 }
 
@@ -83,18 +89,20 @@ export function createBrowserBridge(options:{port?:number;corePort?:number}={}){
   if(url.origin!==own)return send(res,403,{error:'untrusted_host'})
   if(req.method==='GET'&&url.pathname==='/bridge'){
    const parent=url.searchParams.get('origin')??'https://www.tarx.com'
-   if(!PARENTS.has(parent)||[...url.searchParams.keys()].some(k=>k!=='origin'))return send(res,403,{error:'untrusted_parent'})
+   const returnName=url.searchParams.get('return')??undefined
+   if(!PARENTS.has(parent)||[...url.searchParams.keys()].some(k=>!['origin','return'].includes(k))||
+      (returnName!==undefined&&!/^tarx-return-[a-f0-9-]{32,64}$/.test(returnName)))return send(res,403,{error:'untrusted_parent'})
    for(const [key,s] of sessions)if(s.expires<=Date.now())sessions.delete(key)
    if(sessions.size>=32)return send(res,429,{error:'too_many_bridges'})
    const existing=[...sessions].find(([,s])=>s.parent===parent)
    const nonce=existing?.[0]??randomBytes(32).toString('hex')
    if(!existing)sessions.set(nonce,{parent,expires:Date.now()+NONCE_TTL})
-   const script='('+bridgeClient.toString()+')('+JSON.stringify({parent,nonce})+')'
+   const script='('+bridgeClient.toString()+')('+JSON.stringify({parent,nonce,returnName})+')'
    const hash=createHash('sha256').update(script).digest('base64')
    res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff',
     'referrer-policy':'no-referrer','x-frame-options':'DENY',
     'content-security-policy':"default-src 'none'; script-src 'sha256-"+hash+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"})
-   return res.end('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>TARX private connection</title><h1>Private connection</h1><p>This tab connects TARX to the local model on this Mac. Keep it open while using private chat.</p><p>Approvals and conversation stay in your TARX conversation.</p><button id="return">Return to TARX</button><script>'+script+'</script>')
+   return res.end('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>TARX private connection</title><h1>Private connection</h1><p>This window connects TARX to the local model on this Mac. Keep it open while using private chat.</p><p>Approvals and conversation stay in your TARX conversation.</p><button id="return">Return to TARX</button><script>'+script+'</script>')
   }
   if(req.method!=='POST'||url.pathname!=='/rpc')return send(res,404,{error:'not_found'})
   const nonce=req.headers['x-tarx-local-bridge']
