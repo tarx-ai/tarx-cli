@@ -98,7 +98,7 @@ export async function createPairingChallenge(input: {
 /** Explicit CLI approval. Consent cannot be bypassed: an unapproved challenge
  *  can never be claimed. */
 export async function approvePairingChallenge(challenge: string, store: PairStore, now = Date.now(), taskScope?: string): Promise<boolean> {
-  if(taskScope && taskScope!=='read_launch_note')return false
+  if(taskScope && !['read_launch_note','personal_chat'].includes(taskScope))return false
   return store.mutate(sha256(challenge),rec=>{
     if(!rec||rec.revoked||rec.claimed||now>=rec.expires_at)return {result:false}
     return {record:{...rec,approved:true,task_scopes:taskScope?[taskScope]:[]},result:true}

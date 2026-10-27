@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-/** Opt-in local command entry. No worker/model startup or host registration. */
+import {loadPersonalClient} from './tarx-personal-config.ts'
+/** Explicit local commands. No model startup or OS service registration.
+ * serve-check alone explicitly starts its owned Eve check worker. */
 import {readFile,writeFile,mkdir,open,realpath} from 'node:fs/promises'
 import {join,resolve} from 'node:path'
 import {homedir} from 'node:os'
@@ -22,11 +24,11 @@ export async function installIdentity(stateDir:string):Promise<string>{
  return id
 }
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
-export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any}={}){
+export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv}={}){
  const command=args[0]??'help',options:Record<string,string>={}
  for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port|resume)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
- if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
- if(!['challenge','approve','revoke','serve','serve-check'].includes(command))throw Error('unknown_command')
+ if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
+ if(!['challenge','approve','revoke','serve','serve-check','serve-personal'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
  const store=createFilePairStore(join(state,'pairs.json'))
  if(command==='challenge'){
@@ -40,6 +42,12 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   await revokePairing(createHash('sha256').update(challenge).digest('hex'),store);return {ok:true}
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
+ const personalClient=await loadPersonalClient(testDeps.personalHome??homedir(),testDeps.personalEnv??process.env)
+ if(command==='serve-personal'){
+  const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
+  const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
+  return {listener,address:await listener.listen(),personal_configured:Boolean(personalClient)}
+ }
  if(command==='serve-check'){
   if(!options['worker-root']||!options['eve-root']||!options['model-url']||!options['model-id']||!options['worker-port'])throw Error('owned_worker_options_required')
   const listenerPort=Number(options.port??3270);if(!Number.isInteger(listenerPort)||listenerPort<0||listenerPort>65535)throw Error('invalid_port')
@@ -48,7 +56,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   try{await worker.start()
    const owners=createFileOwnerStore(join(state,'owners.json'))
    const tasks=createBoundedTaskController({file:join(state,'tasks.json'),owners,executor:createEveReadNoteExecutor(worker.client,worker.verify)})
-   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
+   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
    const address=await listener.listen()
    return {listener:{close:async()=>{try{await listener.close()}finally{await worker.stop()}}},address,task_submission:true}
   }catch(e){await worker.stop();throw e}
@@ -66,7 +74,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   const {Client}=await import(pathToFileURL(require.resolve('eve/client')).href)
   client=new Client({host:workerURL})
  }
- const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
+ const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,ownerStore:createFileOwnerStore(join(state,'owners.json')),eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
   let reachable=false
   let timeout:ReturnType<typeof setTimeout>|undefined
   try{const h=await Promise.race([client.health(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('health_timeout')),1500)})]);reachable=h?.ok===true&&h?.status==='ready'}catch{}finally{if(timeout)clearTimeout(timeout)}
