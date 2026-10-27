@@ -32,6 +32,7 @@ jobs:
           python3 tests/test-approval-url-guardrails.py
       - name: Test conversation and private/compute entrypoints
         run: |
+          python3 tests/test-terminal-ui.py
           python3 tests/test-conversation.py
           python3 tests/test-chat-destination.py
       - name: Test doctor states

@@ -26,7 +26,7 @@ class AuthTests(unittest.TestCase):
         self.ns['KEY_PATH'].write_text('fixture-key')
         self.lines, self.calls, self.messages = [], [], []
         self.ns['say'] = self.messages.append
-        self.ns['show_commands'] = lambda: None
+        self.ns['show_commands'] = lambda **_: None
         self.ns['read_message'] = lambda: self.lines.pop(0) if self.lines else ''
         self.ns['send_once'] = lambda *_: self.fail('auth or slash intent reached inference')
         self.ns['http'] = self.http

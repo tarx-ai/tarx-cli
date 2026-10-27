@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.3.0"
+TARX_VERSION="1.3.1"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -414,23 +414,78 @@ def reset_history():
     HISTORY_KEY = None
     LABEL_CACHE.clear()
 
+def terminal_ui():
+    return (sys.stdin.isatty() and sys.stdout.isatty()
+            and os.environ.get("TERM", "") != "dumb"
+            and __import__("shutil").get_terminal_size((80, 24)).columns >= 36)
+
+
+def accent(text, code="36"):
+    if terminal_ui() and "NO_COLOR" not in os.environ:
+        return "\x1b[" + code + "m" + text + "\x1b[0m"
+    return text
+
+
+def input_frame(text, cursor, columns):
+    # Horizontal viewport keeps the editable row inside narrow terminal bounds.
+    # Retain the original Unicode/paste content; only its presentation is clipped.
+    import unicodedata
+    def display(ch):
+        return "↵" if ch == "\n" else " " if ch == "\t" else ch
+    def cells(ch):
+        if unicodedata.combining(ch) or unicodedata.category(ch) in ("Cf", "Mn", "Me"):
+            return 0
+        return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    width = max(6, columns - 6)
+    start = 0
+    left = sum(cells(display(c)) for c in text[:cursor])
+    while left >= width and start < cursor:
+        left -= cells(display(text[start]))
+        start += 1
+    shown, used = "", 0
+    for ch in text[start:]:
+        value = display(ch); size = cells(value)
+        if used + size > width:
+            break
+        shown += value; used += size
+    caret = 4 + sum(cells(display(c)) for c in text[start:cursor])
+    return "│ › " + shown + " " * (width - used) + " │", caret
+
+
+def render_reply(text):
+    if not terminal_ui():
+        say(text)
+        return
+    # Model output is untrusted terminal data, never terminal control sequences.
+    safe = "".join(ch for ch in text if ch.isprintable() or ch in "\n\t")
+    say("\n" + accent("TARX", "1;36"))
+    say(safe)
+    say("")
+
+
 def read_message():
     """Bracketed paste is one message. Enter submits; Ctrl-C cancels input."""
-    if not sys.stdin.isatty():
+    if not terminal_ui():
         return sys.stdin.readline()
     import codecs, termios, tty
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     chars, cursor, pasted = [], 0, False
+    width = min(96, __import__("shutil").get_terminal_size((80, 24)).columns - 1)
+    mode, _ = chat_destination()
+    label = " PRIVATE · LOCAL " if mode == "personal" else " PRIVATE · BLOCKED " if mode == "personal_misconfigured" else " SUPERCOMPUTER "
+    top = "┌" + label + "─" * max(0, width - len(label) - 2) + "┐"
+    bottom = "└" + "─" * (width - 2) + "┘"
     def paint():
-        sys.stdout.write("\r\x1b[2K> " + "".join(chars).replace("\n", "↵"))
-        if cursor < len(chars):
-            sys.stdout.write("\x1b[%dD" % (len(chars) - cursor))
+        line, caret = input_frame("".join(chars), cursor, width)
+        sys.stdout.write("\r\x1b[2K" + accent(line) + "\r\x1b[%dC" % caret)
         sys.stdout.flush()
+    def finish():
+        sys.stdout.write("\x1b[1B\r\n")
     try:
         tty.setcbreak(fd)
-        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.write("\x1b[?2004h\n" + accent(top) + "\n" + " " * width + "\n" + accent(bottom) + "\x1b[1A\r")
         paint()
         while True:
             ch = decoder.decode(os.read(fd, 1))
@@ -453,10 +508,10 @@ def read_message():
                 paint()
                 continue
             if ch in ("\n", "\r") and not pasted:
-                sys.stdout.write("\n")
+                finish()
                 return "".join(chars) + "\n"
             if ch == "\x04" and not chars:
-                sys.stdout.write("\n")
+                finish()
                 return ""
             if ch in ("\x7f", "\b") and not pasted:
                 if cursor:
@@ -470,7 +525,8 @@ def read_message():
             if not pasted:
                 paint()
     except KeyboardInterrupt:
-        sys.stdout.write("\nInput cancelled.\n")
+        finish()
+        sys.stdout.write("Input cancelled.\n")
         return "\n"
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, previous)
@@ -544,7 +600,10 @@ def introspect(key):
         return "no"
     return "unknown"
 
-def show_commands():
+def show_commands(full=False):
+    if terminal_ui() and not full:
+        say(accent("  /private", "1;36") + " local   " + accent("/compute TASK", "1;36") + " extra compute   " + accent("/help", "2") + " all commands")
+        return
     say("/agents     who can work")
     say("/channels   rooms you can open")
     say("/signin     connect this computer")
@@ -605,7 +664,7 @@ def handle_command(text):
         say("Open https://www.tarx.com/agent to view available channels.")
         return True
     if low in {"/help", "/?"}:
-        show_commands()
+        show_commands(full=True)
         return True
     if low.startswith("/"):
         say("Unknown command. Use /help for available commands. No message was sent.")
@@ -667,7 +726,14 @@ def refresh_label(key):
     return ""
 
 def wake_always_on():
+    if terminal_ui():
+        say("\n" + accent("TARX", "1;36") + "  " + accent("Enter to send · Ctrl-C cancel · /help", "2"))
     mode, _ = chat_destination()
+    if terminal_ui() and mode != "supercomputer":
+        say(accent("Private · local runtime selected", "1;32") if mode == "personal" else accent("Private · blocked", "1;33"))
+        say("Availability checked on send. Extra compute needs /compute TASK.")
+        show_commands()
+        return
     if mode != "supercomputer":
         say("Private mode selected. Replies use only your configured local runtime." if mode == "personal" else
             "Private mode is blocked. Configure a loopback personal runtime first.")
@@ -887,7 +953,7 @@ def send_once(key, prompt):
             return 1
         say("You're connected. Please send your message again; the previous message was not replayed.")
         return 0
-    say(text)
+    render_reply(text)
     return 0 if kind == "ok" else 1
 
 def loop():
