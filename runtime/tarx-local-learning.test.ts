@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp,mkdir,writeFile,chmod,lstat,readFile,rm} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,chmod,lstat,readFile,readdir,rm,symlink,unlink} from 'node:fs/promises'
 import {spawn} from 'node:child_process'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
@@ -28,6 +28,19 @@ function assertWire(body: Record<string, unknown>) {
   for (const key of Object.keys(body)) assert.ok(WIRE.has(key), key)
   assert.equal('candidate_version' in body, false)
   assert.equal('active_version' in body, false)
+}
+
+async function provenDeadPid(): Promise<number> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const child = spawn(process.execPath, ['-e', 'process.exit(0)'], {stdio: 'ignore'})
+    const pid = child.pid
+    await new Promise((resolve) => child.once('exit', resolve))
+    if (!pid || pid <= 1) continue
+    try { process.kill(pid, 0) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid
+    }
+  }
+  throw Error('no proven dead pid')
 }
 
 async function untilSettled(post: (body: unknown) => Promise<Response>) {
@@ -226,6 +239,14 @@ test('a live same-process lease stays training and is not rerun', async () => {
     const stolen = await restarted.handle(ns, ['personal_learning'], {action: 'train', request_id: randomUUID()})
     assert.equal(stolen.code, 409)
     assert.equal(f.captured.length, 1)
+    const leasePath = join(f.dir, 'state', 'training-lease.json')
+    const leaseBefore = await readFile(leasePath, 'utf8')
+    const foreignPause = await restarted.handle(ns, ['personal_learning'], {action: 'pause'})
+    assert.equal(foreignPause.code, 409)
+    assert.equal(await readFile(leasePath, 'utf8'), leaseBefore)
+    const still = await restarted.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.equal(still.body.state, 'training')
+    assert.equal(f.captured.length, 1)
   } finally {
     await f.post({action: 'pause'}).catch(() => {})
     await f.listener.close()
@@ -277,6 +298,11 @@ test('a revoked pairing cannot apply a late training result', async () => {
   assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})).code, 200)
   const req = randomUUID()
   assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: req}, {stillAuthorized: async () => authorized})).code, 202)
+  const lease = join(dir, 'state', 'training-lease.json')
+  const leaseWhileRunning = await readFile(lease, 'utf8')
+  assert.match(leaseWhileRunning, /"pid":/)
+  assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})).code, 409)
+  assert.equal(await readFile(lease, 'utf8'), leaseWhileRunning)
   authorized = false
   open()
   let body: Record<string, unknown> = {}
@@ -288,6 +314,12 @@ test('a revoked pairing cannot apply a late training result', async () => {
   assert.equal(body.state, 'interrupted')
   assert.equal(body.version, undefined)
   assert.equal(calls, 1)
+  let released = false
+  for (let i = 0; i < 50; i++) {
+    if (await readFile(lease, 'utf8').then(() => false, () => true)) { released = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(released, true)
   assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: req})).code, 200)
   assert.equal(calls, 1)
 })
@@ -442,6 +474,8 @@ test('active adapter is served from disk across a new controller, and the other 
       const isolated = await turn(otherToken, 'owner B phrase')
       assert.equal(isolated.status, 200)
       assert.equal(seen[1].body.adapters, undefined)
+      assert.equal(seen[1].body.model, 'fixture')
+      assert.notEqual(seen[1].body.model, f.base)
       assert.equal(JSON.stringify(seen[1].body).includes(adapter), false)
       await chmod(join(adapter, 'adapters.safetensors'), 0o644)
       const before = seen.length
@@ -455,11 +489,32 @@ test('active adapter is served from disk across a new controller, and the other 
       assert.equal(configClosed.status, 503)
       assert.equal(seen.length, configTamper)
       await writeFile(join(adapter, 'adapter_config.json'), CONFIG_BYTES, {mode: 0o600})
+      await chmod(adapter, 0o707)
+      const dirTamper = seen.length
+      const dirClosed = await turn(f.token, 'owner A directory tamper')
+      assert.equal(dirClosed.status, 503)
+      assert.equal(seen.length, dirTamper)
+      await chmod(adapter, 0o700)
+      const outside = join(f.dir, 'foreign-adapter-config.json')
+      await writeFile(outside, Buffer.from('{"lora_parameters":{"rank":8}}\n'), {mode: 0o600})
+      await unlink(join(adapter, 'adapter_config.json'))
+      await symlink(outside, join(adapter, 'adapter_config.json'))
+      const linkTamper = seen.length
+      const linkClosed = await turn(f.token, 'owner A config symlink')
+      assert.equal(linkClosed.status, 503)
+      assert.equal(seen.length, linkTamper)
+      await unlink(join(adapter, 'adapter_config.json'))
+      await writeFile(join(adapter, 'adapter_config.json'), CONFIG_BYTES, {mode: 0o600})
+      const restored = await turn(f.token, 'owner A restored')
+      assert.equal(restored.status, 200)
+      assert.equal(seen.at(-1)?.body.adapters, adapter)
+      assert.equal(seen.at(-1)?.body.model, f.base)
       const paused = await rebuilt.handle(ns, ['personal_chat', 'personal_learning'], {action: 'pause'})
       assert.equal(paused.body.state, 'candidate')
       const baseTurn = await turn(f.token, 'owner A paused')
       assert.equal(baseTurn.status, 200)
       assert.equal(seen.at(-1)?.body.adapters, undefined)
+      assert.equal(seen.at(-1)?.body.model, 'fixture')
     } finally { await listener.close() }
   } finally {
     await f.listener.close()
@@ -480,6 +535,13 @@ test('base digest cache hits on unchanged file identity and misses after tamper'
   assert.equal(second, first)
   assert.equal(baseDigestObservations().fileReads, afterFirst)
   assert.ok(afterFirst >= 2)
+  const labeled = await baseModelDigest(join(base, '..', 'base'))
+  assert.equal(labeled, first)
+  assert.equal(baseDigestObservations().fileReads, afterFirst)
+  const link = join(dir, 'linked-base')
+  await symlink(base, link)
+  assert.equal(await baseModelDigest(link), null)
+  assert.equal(baseDigestObservations().fileReads, afterFirst)
   await writeFile(join(base, 'config.json'), '{"model_type":"qwen3","changed":true}\n')
   const third = await baseModelDigest(base)
   assert.notEqual(third, first)
@@ -559,9 +621,12 @@ await new Promise(()=>{})
       runner: async () => { parentStarts += 1; return {ok: false, status: 'failed', error: 'parent_should_not_run'} },
     })
     const foreign = 'b8'.repeat(32)
+    const childLease = join(childDir, 'artifacts', 'training-lease.json')
+    const childLeaseBefore = await readFile(childLease, 'utf8')
     const overlap = await parent.handle(foreign, scopes, {action: 'train', request_id: randomUUID()})
     assert.equal(overlap.code, 409)
     assert.equal(parentStarts, 0)
+    assert.equal(await readFile(childLease, 'utf8'), childLeaseBefore)
     const job = (await readFile(join(childDir, 'job'), 'utf8')).trim()
     const exited = new Promise((resolve) => child.once('exit', resolve))
     child.kill('SIGKILL')
@@ -619,6 +684,14 @@ test('an uncertain lease fails closed and is left in place', async () => {
     const train = await learning.handle('c9'.repeat(32), ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})
     assert.equal(train.code, 409)
     assert.equal(await readFile(lease, 'utf8'), body)
+    const dead = await provenDeadPid()
+    const writable = JSON.stringify({pid: dead, namespace: 'c9'.repeat(32), job_id: randomUUID(), nonce: 'ab'.repeat(16)})
+    await writeFile(lease, writable)
+    await chmod(lease, 0o666)
+    assert.equal(((await lstat(lease)).mode & 0o022) !== 0, true)
+    const stillBlocked = await learning.handle('c9'.repeat(32), ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})
+    assert.equal(stillBlocked.code, 409)
+    assert.equal(await readFile(lease, 'utf8'), writable)
   } finally {
     await rm(dir, {recursive: true, force: true})
   }
@@ -652,7 +725,19 @@ test('pause aborts the runner but the lease stays until that runner settles', as
     assert.equal((await learning.handle(owner, scopes, {action: 'train', request_id: randomUUID()})).code, 202)
     assert.equal((await learning.handle(owner, scopes, {action: 'pause'})).code, 200)
     assert.equal(aborted, true)
-    assert.match(await readFile(lease, 'utf8'), /"pid":/)
+    const held = await readFile(lease, 'utf8')
+    assert.match(held, /"pid":/)
+    let during = 0
+    const other = createLearningController({
+      file: join(dir, 'state.json'),
+      stateRoot: join(dir, 'artifacts'),
+      config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv) => argv},
+      runner: async () => { during += 1; return {ok: false, status: 'failed', error: 'started_while_settling'} },
+    })
+    const blocked = await other.handle(owner, scopes, {action: 'train', request_id: randomUUID()})
+    assert.equal(blocked.code, 409)
+    assert.equal(during, 0)
+    assert.equal(await readFile(lease, 'utf8'), held)
     finish()
     let gone = false
     for (let i = 0; i < 50; i++) {
@@ -666,26 +751,166 @@ test('pause aborts the runner but the lease stays until that runner settles', as
   }
 })
 
+test('an orphan training record without a lease stays busy and is not stolen', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-lease-orphan-'))
+  const base = join(dir, 'base')
+  const artifacts = join(dir, 'artifacts')
+  await mkdir(base)
+  await mkdir(artifacts, {mode: 0o700})
+  await writeFile(join(base, 'config.json'), '{}')
+  await writeFile(join(base, 'model.safetensors'), 'fixture')
+  const ns = 'e3'.repeat(32)
+  const job = randomUUID()
+  await writeFile(join(dir, 'state.json'), JSON.stringify({
+    [ns]: {
+      namespace: ns,
+      examples: [{example_id: randomUUID(), prompt: 'synthetic', response: 'synthetic'}],
+      state: 'training',
+      job_id: job,
+      versions: [],
+      jobs: {[job]: 'training'},
+    },
+  }), {mode: 0o600})
+  let calls = 0
+  const learning = createLearningController({
+    file: join(dir, 'state.json'),
+    stateRoot: artifacts,
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv) => argv},
+    runner: async () => { calls += 1; return {ok: false, status: 'failed', error: 'orphan_ran'} },
+  })
+  const scopes = ['personal_chat', 'personal_learning']
+  try {
+    const status = await learning.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.equal(status.body.state, 'training')
+    assert.equal(status.body.job_id, job)
+    const stolen = await learning.handle(ns, scopes, {action: 'train', request_id: randomUUID()})
+    assert.equal(stolen.code, 409)
+    assert.equal(calls, 0)
+    const again = await learning.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.equal(again.body.state, 'training')
+    assert.equal(again.body.job_id, job)
+    assert.equal(await readFile(join(artifacts, 'training-lease.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code), 'ENOENT')
+  } finally {
+    await rm(dir, {recursive: true, force: true})
+  }
+})
+
+test('a proven-dead owner is interrupted without a rerun and keeps the prior active adapter', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-lease-dead-'))
+  const base = join(dir, 'base')
+  const artifacts = join(dir, 'artifacts')
+  await mkdir(base)
+  await mkdir(artifacts, {mode: 0o700})
+  await writeFile(join(base, 'config.json'), '{}')
+  await writeFile(join(base, 'model.safetensors'), 'fixture')
+  const ns = 'e4'.repeat(32)
+  const prior = randomUUID()
+  const job = randomUUID()
+  const pid = await provenDeadPid()
+  const lease = join(artifacts, 'training-lease.json')
+  await writeFile(lease, JSON.stringify({pid, namespace: ns, job_id: job, nonce: 'ab'.repeat(16)}), {mode: 0o600})
+  await chmod(lease, 0o600)
+  await writeFile(join(dir, 'state.json'), JSON.stringify({
+    [ns]: {
+      namespace: ns,
+      examples: [{example_id: randomUUID(), prompt: 'synthetic', response: 'synthetic'}],
+      state: 'training',
+      job_id: job,
+      active_version: prior,
+      versions: [{version: prior, job_id: prior, adapter_sha256: 'a'.repeat(64), base_sha256: 'b'.repeat(64), adapter_config_sha256: 'c'.repeat(64)}],
+      jobs: {[prior]: 'candidate', [job]: 'training'},
+    },
+  }), {mode: 0o600})
+  let calls = 0
+  const learning = createLearningController({
+    file: join(dir, 'state.json'),
+    stateRoot: artifacts,
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv) => argv},
+    runner: async () => { calls += 1; return {ok: false, status: 'failed', error: 'dead_owner_reran'} },
+  })
+  try {
+    const status = await learning.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.equal(status.body.state, 'active')
+    assert.equal(status.body.version, prior)
+    assert.equal(calls, 0)
+    assert.equal(await readFile(lease, 'utf8').catch((error: NodeJS.ErrnoException) => error.code), 'ENOENT')
+    const replay = await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: job})
+    assert.equal(replay.code, 200)
+    assert.equal(replay.body.state, 'interrupted')
+    assert.equal(calls, 0)
+  } finally {
+    await rm(dir, {recursive: true, force: true})
+  }
+})
+
 test('venv python keeps its prefix when the interpreter path is a symlink', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tarx-venv-'))
   const created = await new Promise<number>((resolve) => {
     const child = spawn('python3', ['-m', 'venv', '--without-pip', join(dir, 'venv')], {stdio: 'ignore'})
     child.once('exit', (code) => resolve(code ?? 1))
   })
-  if (created !== 0) return
-  const py = join(dir, 'venv', 'bin', 'python3')
-  const info = await lstat(py).catch(() => lstat(join(dir, 'venv', 'bin', 'python')))
-  const interpreter = info.isSymbolicLink() ? py : join(dir, 'venv', 'bin', 'python')
+  assert.equal(created, 0)
+  let interpreter = join(dir, 'venv', 'bin', 'python3')
+  try { await lstat(interpreter) } catch { interpreter = join(dir, 'venv', 'bin', 'python') }
   assert.equal((await lstat(interpreter)).isSymbolicLink(), true)
+  const {realpath} = await import('node:fs/promises')
+  const target = await realpath(interpreter)
+  const pythons = (await readdir(join(dir, 'venv', 'lib'))).filter((name) => name.startsWith('python'))
+  assert.equal(pythons.length > 0, true)
+  await writeFile(join(dir, 'venv', 'lib', pythons[0], 'site-packages', 'tarx_venv_marker.py'), 'TOKEN = "venv-kept"\n')
   const script = join(dir, 'prefix.py')
   const prefixFile = join(dir, 'prefix.txt')
-  await writeFile(script, `import json,sys\nopen(${JSON.stringify(prefixFile)},'w').write(sys.prefix)\nprint(json.dumps({"ok":False,"status":"failed","error":"venv_prefix"}))\n`)
+  await writeFile(script, [
+    'import json, sys',
+    'marker = "missing"',
+    'try:',
+    '    import tarx_venv_marker',
+    '    marker = tarx_venv_marker.TOKEN',
+    'except Exception:',
+    '    marker = "missing"',
+    `open(${JSON.stringify(prefixFile)}, "w").write(sys.prefix + "\\n" + marker + "\\n")`,
+    'print(json.dumps({"ok": False, "status": "failed", "error": "venv_prefix"}))',
+    '',
+  ].join('\n'))
   const ns = 'ab'.repeat(32)
-  const job = randomUUID()
   const state = join(dir, 'state')
-  const request = {action: 'train' as const, base_path: dir, state_root: state, owner: ns, job_id: job, examples_path: join(state, ns, 'examples', job + '.jsonl'), adapter_path: join(state, ns, 'versions', job), iterations: 128}
-  const result = await createSubprocessRunner()({interpreter, runnerScript: script, basePath: dir, sandboxWrap: (argv) => argv, deadlineMs: 8000}, request, '{}\n')
-  assert.equal(result.error, 'venv_prefix')
-  const {realpath} = await import('node:fs/promises')
-  assert.equal(await realpath(await readFile(prefixFile, 'utf8')), await realpath(join(dir, 'venv')))
+  const launch = (py: string, job: string) => createSubprocessRunner()({
+    interpreter: py, runnerScript: script, basePath: dir, sandboxWrap: (argv) => argv, deadlineMs: 8000,
+  }, {
+    action: 'train' as const, base_path: dir, state_root: state, owner: ns, job_id: job,
+    examples_path: join(state, ns, 'examples', job + '.jsonl'),
+    adapter_path: join(state, ns, 'versions', job), iterations: 128,
+  }, '{}\n')
+  const kept = await launch(interpreter, randomUUID())
+  assert.equal(kept.error, 'venv_prefix')
+  const keptLines = (await readFile(prefixFile, 'utf8')).trim().split('\n')
+  assert.equal(await realpath(keptLines[0]), await realpath(join(dir, 'venv')))
+  assert.equal(keptLines[1], 'venv-kept')
+  const lost = await launch(target, randomUUID())
+  assert.equal(lost.error, 'venv_prefix')
+  const lostLines = (await readFile(prefixFile, 'utf8')).trim().split('\n')
+  assert.notEqual(await realpath(lostLines[0]), await realpath(join(dir, 'venv')))
+  assert.equal(lostLines[1], 'missing')
+})
+
+test('an adapter request refuses an alias and sends only the verified absolute base', async () => {
+  const seen: Record<string, unknown>[] = []
+  const client = createLoopbackPersonalClient({
+    baseURL: 'http://127.0.0.1:9/v1',
+    model: 'fixture-alias',
+    fetcher: (async (_url, init) => {
+      seen.push(JSON.parse(String(init?.body)))
+      return new Response(JSON.stringify({choices: [{message: {content: 'ok'}}]}), {status: 200})
+    }) as typeof fetch,
+  })
+  const messages = [{role: 'user' as const, content: 'synthetic'}]
+  assert.equal(await client(messages, {adapters: '/tmp/adapter-dir', model: 'fixture-alias'}), null)
+  assert.equal(await client(messages, {adapters: 'relative/adapter', model: '/tmp/verified-base'}), null)
+  assert.equal(seen.length, 0)
+  assert.equal(await client(messages, {adapters: '/tmp/adapter-dir', model: '/tmp/verified-base'}), 'ok')
+  assert.equal(seen[0].model, '/tmp/verified-base')
+  assert.equal(seen[0].adapters, '/tmp/adapter-dir')
+  assert.equal(await client(messages), 'ok')
+  assert.equal(seen[1].model, 'fixture-alias')
+  assert.equal(seen[1].adapters, undefined)
 })
