@@ -177,7 +177,9 @@ class Conversation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             script = Path(td) / 'test.py'
             script.write_text(code)
-            proc = subprocess.Popen([sys.executable, str(script)], stdin=slave, stdout=slave, stderr=slave)
+            env=dict(os.environ, TERM="xterm-256color", COLUMNS="80", LINES="24")
+            proc = subprocess.Popen([sys.executable, str(script)], stdin=slave, stdout=slave, stderr=slave,env=env)
+            self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
             os.close(slave)
             output = b''
             deadline = time.monotonic() + 5

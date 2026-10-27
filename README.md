@@ -6,6 +6,10 @@ Free AI at [tarx.com](https://www.tarx.com). The CLI is optional.
 
 Check what is available with `tarx version`, `tarx help`, and `tarx readiness`.
 
+## Terminal interface
+
+Interactive terminals show a route-labeled input frame, compact command hints and separated replies. `/help` shows all commands. Narrow/dumb terminals and redirected output stay plain; `NO_COLOR` disables color. A selected local route does not imply model availability.
+
 ## Private chat and explicit extra compute (CLI 1.3.0)
 
 Installing the CLI still starts no model or service. Existing installs without a personal runtime keep a clearly labeled **remote supercomputer conversation**; they are not private/local-ready.
