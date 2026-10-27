@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {createBrowserBridge} from './tarx-browser-bridge.ts'
 import {loadPersonalClient} from './tarx-personal-config.ts'
 /** Explicit local commands. No model startup or OS service registration.
  * serve-check alone explicitly starts its owned Eve check worker. */
@@ -27,8 +28,8 @@ function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv}={}){
  const command=args[0]??'help',options:Record<string,string>={}
  for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port|resume)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
- if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
- if(!['challenge','approve','revoke','serve','serve-check','serve-personal'].includes(command))throw Error('unknown_command')
+ if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
+ if(!['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
  const store=createFilePairStore(join(state,'pairs.json'))
  if(command==='challenge'){
@@ -42,11 +43,15 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   await revokePairing(createHash('sha256').update(challenge).digest('hex'),store);return {ok:true}
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
+ if(command==='serve-browser'){const listener=createBrowserBridge({port:Number(options.port??3271)});return {listener,address:await listener.listen()}}
  const personalClient=await loadPersonalClient(testDeps.personalHome??homedir(),testDeps.personalEnv??process.env)
  if(command==='serve-personal'){
   const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
   const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
-  return {listener,address:await listener.listen(),personal_configured:Boolean(personalClient)}
+  const address=await listener.listen()
+  const browser=createBrowserBridge({port:options.port==='0'?0:3271,corePort:address.port})
+  try{const browser_bridge=await browser.listen();return {listener:{close:async()=>{await browser.close();await listener.close()}},address,browser_bridge,personal_configured:Boolean(personalClient)}}
+  catch(error){await listener.close();throw error}
  }
  if(command==='serve-check'){
   if(!options['worker-root']||!options['eve-root']||!options['model-url']||!options['model-id']||!options['worker-port'])throw Error('owned_worker_options_required')
@@ -88,7 +93,7 @@ const invokedEntry=process.argv[1]?await realpath(resolve(process.argv[1])).catc
 if(invokedEntry&&import.meta.url===pathToFileURL(invokedEntry).href){
  try{
   const result=await runRuntimeEntry(process.argv.slice(2))
-  if('listener' in result&&result.listener){const listener=result.listener;console.log(JSON.stringify({listening:result.address,mode:'paired_runtime',task_submission:'task_submission' in result&&result.task_submission===true}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void listener.close().then(()=>process.exit(0))})}
+  if('listener' in result&&result.listener){const listener=result.listener;console.log(JSON.stringify({listening:result.address,mode:'paired_runtime',browser_bridge:'browser_bridge' in result?result.browser_bridge:undefined,task_submission:'task_submission' in result&&result.task_submission===true}));for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void listener.close().then(()=>process.exit(0))})}
   else {console.log(JSON.stringify(result));if('ok' in result&&result.ok===false)process.exitCode=1}
  }catch{console.error(JSON.stringify({ok:false,error:'runtime_command_failed',hint:'Check command arguments, saved CLI sign-in and pinned runtime dependencies.'}));process.exitCode=1}
 }

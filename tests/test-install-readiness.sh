@@ -33,7 +33,7 @@ cmp "$ROOT/tarx" "$TARX_BIN"
 [ -x "$TARX_BIN" ]
 grep -q 'No daemon or model was installed or started' "$STAGE/install.out"
 "$TARX_BIN" version > "$STAGE/version"
-grep -q '1.4.0' "$STAGE/version"
+grep -q '1.4.1' "$STAGE/version"
 "$TARX_BIN" help | grep -q 'readiness'
 if "$TARX_BIN" readiness > "$STAGE/fresh"; then printf 'empty install falsely ready\n' >&2; exit 1; fi
 grep -q '^inference 11435 not-ready$' "$STAGE/fresh"

@@ -29,3 +29,9 @@ TARX_TEST_WORKER=1 node --experimental-strip-types --test tarx-public-worker.int
 ```
 
 That test uses disposable identity and a loopback mock model, actual production build/start, CLI commands/pairing/tool receipt, worker restart and clean entry recreation. A separate browser test used the real paired Eve listener/mock model: one POST, one tool result, same receipt after reload, no extra model calls, revocation preserves receipt. These are local fixture acceptance, not production email identity, arbitrary tools, real OS lifecycle or throughput certification. A separate one-shot native-model compatibility trial is recorded privately; do not rerun it from monitoring.
+
+## Safari-compatible private browser transport
+
+`tarx runtime serve-personal` explicitly starts the paired listener on127.0.0.1:3270 and its browser transport on127.0.0.1:3271, using the existing owner-only personal runtime profile. No model, Eve worker or OS service starts. Leave this foreground command running. `serve-browser` starts only the transport for an already-running listener.
+
+Safari blocks the public HTTPS page's direct HTTP fetch to loopback. The shared private-chat card therefore opens a local transport tab on an explicit click. That tab uses same-origin local HTTP and a pinned-opener MessageChannel; approvals and text remain in the main conversational UI. The helper accepts only claim/personal RPCs, not arbitrary URLs/tools/remote compute. It keeps model keys server-side; existing explicit personal_chat approval and revoke enforcement remain authoritative. No browser security setting or certificate trust is changed.

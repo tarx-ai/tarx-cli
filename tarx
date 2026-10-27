@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.4.0"
+TARX_VERSION="1.4.1"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -2129,7 +2129,8 @@ TARX runtime — optional local connection tools
   tarx runtime approve --challenge CODE    Approve that code on this computer
   tarx runtime revoke --challenge CODE     Revoke its connection
   tarx runtime serve --worker-url URL      Read/attach an existing loopback Eve worker
-  tarx runtime serve-personal              Paired private chat with the configured local model
+  tarx runtime serve-personal              Private chat plus browser transport (configured local model)
+  tarx runtime serve-browser               Browser transport for an already running paired listener
   tarx runtime serve-check                Explicit bounded check worker (see runtime/TASKS.md)
 Install starts nothing. serve is read-only; serve-check requires separate task approval.
 RUNTIME_HELP
@@ -2161,7 +2162,7 @@ try:
             if member.size>2_000_000:raise ValueError('runtime_file_too_large')
             data=source.extractfile(member).read()
             (dest/relative.name).write_bytes(data)
-    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts']
+    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts','tarx-browser-bridge.ts']
     if any(not(dest/name).is_file() for name in required):raise ValueError('incomplete_runtime_archive')
     package=json.loads((dest/'package.json').read_text())
     if package.get('dependencies',{}).get('eve')!='0.83.2':raise ValueError('unexpected_runtime_version')
