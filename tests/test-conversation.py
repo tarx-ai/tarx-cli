@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 import unittest
+import os
+from unittest.mock import patch
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'tarx').read_text().split("3<< 'PY'\n",1)[1].split('\nPY\n}',1)[0]
 TREE = ast.parse(SOURCE)
@@ -23,7 +25,12 @@ PROMPT = (
 class Conversation(unittest.TestCase):
     def setUp(self):
         self.ns = {}
-        exec(compile(MODULE, '<chat>', 'exec'), self.ns)
+        fixture_home = tempfile.TemporaryDirectory()
+        self.addCleanup(fixture_home.cleanup)
+        environment = {k:v for k,v in os.environ.items() if not k.startswith('TARX_PERSONAL_')}
+        environment['HOME'] = fixture_home.name
+        with patch.dict(os.environ, environment, clear=True):
+            exec(compile(MODULE, '<chat>', 'exec'), self.ns)
         self.calls = []
         def http(method, url, body=None, **kw):
             if url.endswith('/introspect'):
