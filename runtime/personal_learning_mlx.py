@@ -141,7 +141,7 @@ def train(request:dict)->dict:
  if not artifact.is_file() or artifact.stat().st_size==0:raise Refused('missing_adapter')
  for p in adapter.rglob('*'):
   if p.is_file():p.chmod(0o600)
- result={'ok':True,'status':'trained','adapter_sha256':digest_file(artifact),'base_sha256':before,
+ result={'ok':True,'status':'trained','adapter_sha256':digest_file(artifact),'adapter_config_sha256':digest_file(adapter/'adapter_config.json'),'base_sha256':before,
   'base_control_passed':base_control,'candidate_control_passed':candidate_control}
  (adapter/'training-receipt.json').write_text(json.dumps(result,sort_keys=True)+'\n')
  return result
