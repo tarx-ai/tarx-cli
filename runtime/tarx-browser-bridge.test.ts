@@ -94,3 +94,23 @@ test('actual browser script accepts only pinned opener/channel and uses same-ori
   assert.equal(f.page.text.includes(challenge),false)
  }finally{await f.close()}
 })
+
+test('Return selects the existing named parent with an empty URL, without closing its transport',async()=>{
+ const f=await fixture()
+ try{
+  const name='tarx-return-'+'ef'.repeat(16)
+  const page=await call(f.port,'/bridge?origin='+encodeURIComponent(parent)+'&return='+name)
+  assert.equal(page.status,200)
+  const source=page.text.match(/<script>([\s\S]*)<\/script>/)?.[1];assert.ok(source)
+  let click:any;let focused=0;const opens:any[]=[]
+  new Script(source).runInContext(createContext({window:{opener:{postMessage(){},focus(){throw Error('Safari ignores this path')}},
+   addEventListener(){},open:(...args:any[])=>{opens.push(args);return {focus(){focused++}}}},
+   document:{getElementById:()=>({addEventListener:(_event:string,fn:any)=>click=fn})},Map,AbortController}))
+  click()
+  assert.deepEqual(opens,[['',name]])
+  assert.equal(focused,1)
+  for(const bad of ['_blank','_top','https://evil.example','tarx-return-short'])
+   assert.equal((await call(f.port,'/bridge?return='+encodeURIComponent(bad))).status,403)
+  assert.equal(f.seen.length,0)
+ }finally{await f.close()}
+})
