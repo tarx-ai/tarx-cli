@@ -7,9 +7,9 @@ import {createHash,randomBytes} from 'node:crypto'
 import {validatePersonalTurn} from './tarx-personal-turn.ts'
 
 const PARENTS=new Set(['https://www.tarx.com','https://tarx.com'])
-const MAX_BODY=33280
+const MAX_BODY=270336
 const NONCE_TTL=24*60*60*1000
-type Rpc={id:string;kind:'claim';challenge:string}|{id:string;kind:'personal';bearer:string;messages:unknown}
+type Rpc={id:string;kind:'claim';challenge:string}|{id:string;kind:'personal';bearer:string;messages:unknown}|{id:string;kind:'learning';bearer:string;request:unknown}
 function rpc(value:unknown):Rpc|null{
  if(!value||typeof value!=='object'||Array.isArray(value))return null
  const row=value as Record<string,unknown>
@@ -21,6 +21,20 @@ function rpc(value:unknown):Rpc|null{
  if(row.kind==='personal'){
   if(Object.keys(row).some(k=>!['id','kind','bearer','messages'].includes(k))||typeof row.bearer!=='string'||!/^tpc_[a-f0-9]{64}$/.test(row.bearer))return null
   if(!validatePersonalTurn({messages:row.messages}).ok||Buffer.byteLength(JSON.stringify({messages:row.messages}))>32768)return null
+  return row as Rpc
+ }
+ if(row.kind==='learning'){
+  if(Object.keys(row).some(k=>!['id','kind','bearer','request'].includes(k))||typeof row.bearer!=='string'||!/^tpc_[a-f0-9]{64}$/.test(row.bearer))return null
+  // Strict: request must be a plain object with a known action and only its
+  // allowed keys. Reject null, arrays, unknown actions, and extra fields.
+  const req=row.request
+  if(!req||typeof req!=='object'||Array.isArray(req))return null
+  const r=req as Record<string,unknown>
+  const allowed:Record<string,string[]>={status:['action'],pause:['action'],add_example:['action','example_id','prompt','response'],train:['action','request_id'],activate:['action','version']}
+  const keys=allowed[typeof r.action==='string'?r.action:'']
+  const present=Object.keys(r)
+  if(!keys||present.length!==keys.length||present.some(k=>!keys.includes(k)))return null
+  if(Buffer.byteLength(JSON.stringify(req))>262144)return null
   return row as Rpc
  }
  return null
@@ -42,7 +56,7 @@ function bridgeClient(config:{parent:string;nonce:string;returnName?:string}){
    const m=e.data
    if(!m||typeof m!=='object'||typeof m.id!=='string')return
    if(m.kind==='abort'){active.get(m.id)?.abort();return}
-   if((m.kind!=='claim'&&m.kind!=='personal')||active.has(m.id)||active.size>=2)return
+   if((m.kind!=='claim'&&m.kind!=='personal'&&m.kind!=='learning')||active.has(m.id)||active.size>=2)return
    const controller=new AbortController();active.set(m.id,controller)
    try{
     const response=await fetch('/rpc',{method:'POST',credentials:'omit',cache:'no-store',redirect:'error',
@@ -112,11 +126,11 @@ export function createBrowserBridge(options:{port?:number;corePort?:number}={}){
   let input:Rpc|null
   try{input=rpc(await readBody(req))}catch{return send(res,400,{error:'invalid_request'})}
   if(!input)return send(res,400,{error:'invalid_request'})
-  const payload=input.kind==='claim'?{challenge:input.challenge}:{messages:input.messages}
+  const payload=input.kind==='claim'?{challenge:input.challenge}:input.kind==='learning'?input.request:{messages:input.messages}
   const body=JSON.stringify(payload)
   const headers:Record<string,string>={'origin':session.parent,'content-type':'application/json','content-length':String(Buffer.byteLength(body))}
-  if(input.kind==='personal')headers.authorization='Bearer '+input.bearer
-  const upstream=httpRequest({hostname:'127.0.0.1',port:corePort,path:input.kind==='claim'?'/pairing/claim':'/personal-turn',method:'POST',headers,agent:false},response=>{
+  if(input.kind==='personal'||input.kind==='learning')headers.authorization='Bearer '+input.bearer
+  const upstream=httpRequest({hostname:'127.0.0.1',port:corePort,path:input.kind==='claim'?'/pairing/claim':input.kind==='learning'?'/personal-learning':'/personal-turn',method:'POST',headers,agent:false},response=>{
    const chunks:Buffer[]=[];let size=0
    response.on('data',chunk=>{size+=chunk.length;if(size>65536){upstream.destroy();return}chunks.push(Buffer.from(chunk))})
    response.on('end',()=>{try{send(res,response.statusCode??503,JSON.parse(Buffer.concat(chunks).toString('utf8')))}catch{send(res,503,{error:'unreachable'})}})

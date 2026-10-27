@@ -59,6 +59,27 @@ test('local browser relay strips RPC envelope; target is pinned and credentials 
  }finally{await f.close()}
 })
 
+test('learning RPC forwards to /personal-learning with strict request validation',async()=>{
+ const f=await fixture()
+ try{
+  // valid learning request passes through; path is /personal-learning, bearer in header, body is the request
+  const ok=await call(f.port,'/rpc',{id:'learn1',kind:'learning',bearer,request:{action:'status'}},f.headers)
+  assert.equal(ok.status,200)
+  assert.equal(f.seen.length,1)
+  assert.equal(f.seen[0].path,'/personal-learning')
+  assert.deepEqual(f.seen[0].body,{action:'status'})
+  assert.equal(f.seen[0].headers.authorization,'Bearer '+bearer)
+  assert.equal(f.seen[0].headers.origin,parent)
+  // null, array, unknown action, and extra fields are rejected before reaching core
+  for(const bad of [null,[],{action:'delete'},{action:'status',extra:1},{action:'add_example',example_id:'x'},{notaction:'status'}]){
+   assert.equal((await call(f.port,'/rpc',{id:'bad',kind:'learning',bearer,request:bad},f.headers)).status,400,JSON.stringify(bad))
+  }
+  // a bad bearer shape is rejected
+  assert.equal((await call(f.port,'/rpc',{id:'bad',kind:'learning',bearer:'nope',request:{action:'status'}},f.headers)).status,400)
+  assert.equal(f.seen.length,1) // only the one valid request reached core
+ }finally{await f.close()}
+})
+
 test('foreign origin, missing nonce, DNS-rebinding Host and oversized Unicode never reach paired listener',async()=>{
  const f=await fixture()
  try{

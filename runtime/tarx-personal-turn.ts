@@ -1,5 +1,6 @@
 import {request as httpRequest} from 'node:http'
 import {request as httpsRequest} from 'node:https'
+import {isAbsolute} from 'node:path'
 /**
  * Personal-turn bridge — paired browser -> owned local personal runtime.
  *
@@ -31,7 +32,10 @@ export type PersonalTurnResult =
 /** The owned personal client, bound by the entrypoint to the local worker. It
  * is given the already-validated messages; it must not be handed a URL/key by
  * the caller of /personal-turn. Returns raw assistant text or null on failure. */
-export type PersonalClient = (messages: PersonalTurnMessage[]) => Promise<string | null>
+/** Server-owned local options. The browser cannot set these. */
+export type PersonalLocalOptions = { adapters?: string }
+
+export type PersonalClient = (messages: PersonalTurnMessage[], local?: PersonalLocalOptions) => Promise<string | null>
 
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g
 
@@ -64,9 +68,9 @@ export function sanitizeAssistant(text: string): string {
 }
 
 /** Run a validated personal turn against the owned client. Fail-closed. */
-export async function runPersonalTurn(client: PersonalClient, req: PersonalTurnRequest): Promise<PersonalTurnResult> {
+export async function runPersonalTurn(client: PersonalClient, req: PersonalTurnRequest, local?: PersonalLocalOptions): Promise<PersonalTurnResult> {
   let raw: string | null
-  try { raw = await client(req.messages) } catch { return { ok: false, error: 'personal_runtime_unavailable' } }
+  try { raw = await client(req.messages, local?.adapters ? { adapters: local.adapters } : undefined) } catch { return { ok: false, error: 'personal_runtime_unavailable' } }
   if (raw == null) return { ok: false, error: 'personal_runtime_unavailable' }
   const content = sanitizeAssistant(raw)
   if (!content) return { ok: false, error: 'empty_reply' }
@@ -107,12 +111,18 @@ export function createLoopbackPersonalClient(input: {
       req.on('error', reject); req.end(init?.body as string)
     })
   })
-  return async (messages) => {
+  return async (messages, local) => {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (input.apiKey) headers.authorization = 'Bearer ' + input.apiKey // stays server-side
+    const payload: Record<string, unknown> = { model: input.model, messages, stream: false, max_tokens: 768, temperature: 0 }
+    // Only a server-verified absolute adapter directory. Never a browser path.
+    if (local?.adapters) {
+      if (!isAbsolute(local.adapters) || local.adapters.includes('\0') || local.adapters.split(/[\\/]/).includes('..')) return null
+      payload.adapters = local.adapters
+    }
     let res: Response
     try {
-      res = await doFetch(endpoint, { method: 'POST', redirect: 'error', headers, body: JSON.stringify({ model: input.model, messages, stream: false, max_tokens: 768, temperature: 0 }), signal: AbortSignal.timeout(70_000) })
+      res = await doFetch(endpoint, { method: 'POST', redirect: 'error', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(70_000) })
     } catch { return null }
     if (!res.ok) return null
     let body: any

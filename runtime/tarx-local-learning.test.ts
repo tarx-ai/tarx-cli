@@ -1,0 +1,440 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {mkdtemp,mkdir,writeFile,chmod,lstat,readFile} from 'node:fs/promises'
+import {join} from 'node:path'
+import {tmpdir} from 'node:os'
+import {randomUUID,createHash} from 'node:crypto'
+import {createServer} from 'node:http'
+import {createFilePairStore,createPairingChallenge,approvePairingChallenge,revokePairing} from './tarx-browser-pairing.ts'
+import {createFileOwnerStore} from './tarx-eve-listener.ts'
+import {createPairedSessionListener} from './tarx-runtime-http.ts'
+import {createLoopbackPersonalClient} from './tarx-personal-turn.ts'
+import {baseModelDigest,createLearningController,createSubprocessRunner,denyNetworkArgv,ownerNamespace,type RunnerResult,type RunnerRequest} from './tarx-local-learning.ts'
+
+/**
+ * Node contract fixtures. The injected runner is not Root's MLX proof.
+ * The child-launch test executes a real subprocess. Run:
+ *   node --test --experimental-strip-types tarx-local-learning.test.ts
+ */
+
+const origin = 'https://www.tarx.com'
+const subject = 'tvs_' + 'a'.repeat(32)
+const WIRE = new Set(['ok', 'state', 'configured', 'approved_examples', 'version', 'job_id', 'error'])
+const ADAPTER_BYTES = Buffer.from('fixture-adapter')
+
+function assertWire(body: Record<string, unknown>) {
+  for (const key of Object.keys(body)) assert.ok(WIRE.has(key), key)
+  assert.equal('candidate_version' in body, false)
+  assert.equal('active_version' in body, false)
+}
+
+async function untilSettled(post: (body: unknown) => Promise<Response>) {
+  let body: Record<string, unknown> = {}
+  for (let i = 0; i < 100; i++) {
+    body = await (await post({action: 'status'})).json() as Record<string, unknown>
+    if (body.state !== 'training') return body
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return body
+}
+
+async function paired(scopes: string[], subjectId = subject, install = 'fixture_install') {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-learn-'))
+  const base = join(dir, 'base')
+  await mkdir(base, {recursive: true})
+  await writeFile(join(base, 'config.json'), '{"model_type":"qwen3"}\n')
+  await writeFile(join(base, 'model.safetensors'), 'fixture-weights')
+  const base_sha256 = await baseModelDigest(base)
+  if (!base_sha256) throw Error('fixture base')
+  const adapter_sha256 = createHash('sha256').update(ADAPTER_BYTES).digest('hex')
+  const pairs = createFilePairStore(join(dir, 'pairs.json'))
+  const ch = await createPairingChallenge({loadCredential: async () => 'tarx_cli_' + 'f'.repeat(64), install_id: install, store: pairs, fetcher: (async () => new Response(JSON.stringify({ok: true, subject_id: subjectId}))) as typeof fetch})
+  if (!ch.ok) throw Error('fixture')
+  await approvePairingChallenge(ch.challenge, pairs, Date.now(), scopes)
+  const captured: {request: RunnerRequest; jsonl: string}[] = []
+  let release: ((result: RunnerResult) => void) | undefined
+  let runnerResult: RunnerResult = {ok: true, status: 'trained', adapter_sha256, base_sha256, base_control_passed: false, candidate_control_passed: true}
+  const runner = async (_config: unknown, request: RunnerRequest, jsonl: string) => {
+    captured.push({request, jsonl})
+    if (release) await new Promise<RunnerResult>((done) => { release = done })
+    await mkdir(request.adapter_path, {recursive: true, mode: 0o700})
+    await chmod(request.adapter_path, 0o700)
+    await writeFile(join(request.adapter_path, 'adapters.safetensors'), ADAPTER_BYTES, {mode: 0o600})
+    return {...runnerResult, adapter_sha256, base_sha256}
+  }
+  const learning = createLearningController({file: join(dir, 'learning.json'), stateRoot: join(dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: base, sandboxWrap: (argv) => argv}, runner})
+  const listener = createPairedSessionListener({host: '127.0.0.1', port: 0, allowedOrigins: new Set([origin]), pairStore: pairs, ownerStore: createFileOwnerStore(join(dir, 'owners.json')), eveClient: () => ({attach: () => ({async *stream() {}})}), readiness: async () => ({config_valid: true, worker_reachable: false, model_responsive: false, tools: [], healthy: false}), learning})
+  const {port} = await listener.listen()
+  const baseURL = 'http://127.0.0.1:' + port
+  const claim = await fetch(baseURL + '/pairing/claim', {method: 'POST', headers: {origin, 'content-type': 'application/json'}, body: JSON.stringify({challenge: ch.challenge})})
+  const token = (await claim.json() as {pairing_credential: string}).pairing_credential
+  const post = (body: unknown, hdr: Record<string, string> = {}) => fetch(baseURL + '/personal-learning', {method: 'POST', headers: {origin, 'content-type': 'application/json', authorization: 'Bearer ' + token, ...hdr}, body: JSON.stringify(body)})
+  return {
+    listener, dir, base, baseURL, post, token, captured, learning, pairs, challenge: ch.challenge,
+    hold: () => { let done: (result: RunnerResult) => void = () => {}; const gate = new Promise<RunnerResult>((resolve) => { done = resolve }); release = (result) => done(result); return gate },
+    setRunner: (result: Partial<RunnerResult>) => { runnerResult = {...runnerResult, ...result} },
+    revoke: () => revokePairing(createHash('sha256').update(ch.challenge).digest('hex'), pairs),
+  }
+}
+
+test('scope approval combos: learning requires personal_chat; invalid scope refused', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-scope-'))
+  const pairs = createFilePairStore(join(dir, 'pairs.json'))
+  const mk = async () => { const ch = await createPairingChallenge({loadCredential: async () => 'tarx_cli_' + 'f'.repeat(64), install_id: 'i', store: pairs, fetcher: (async () => new Response(JSON.stringify({ok: true, subject_id: subject}))) as typeof fetch}); if (!ch.ok) throw Error('x'); return ch.challenge }
+  assert.equal(await approvePairingChallenge(await mk(), pairs, Date.now(), ['personal_chat', 'personal_learning']), true)
+  assert.equal(await approvePairingChallenge(await mk(), pairs, Date.now(), ['personal_learning']), false)
+  assert.equal(await approvePairingChallenge(await mk(), pairs, Date.now(), ['shell']), false)
+})
+
+test('chat-only pairing can read status but cannot mutate', async () => {
+  const f = await paired(['personal_chat'])
+  try {
+    const status = await f.post({action: 'status'})
+    assert.equal(status.status, 200)
+    assert.equal((await status.json() as {configured: boolean}).configured, true)
+    assert.equal((await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})).status, 403)
+    assert.equal((await f.post({action: 'train', request_id: randomUUID()})).status, 403)
+    assert.equal(f.captured.length, 0)
+  } finally { await f.listener.close() }
+})
+
+test('train returns 202 immediately and a finished duplicate does not run again', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    const id = randomUUID()
+    assert.equal((await f.post({action: 'add_example', example_id: id, prompt: 'call me Cedar', response: 'Okay, Cedar.'})).status, 200)
+    const dup = await f.post({action: 'add_example', example_id: id, prompt: 'call me Cedar', response: 'Okay, Cedar.'})
+    assert.equal((await dup.json() as {approved_examples: number}).approved_examples, 1)
+    assert.equal((await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'x'.repeat(2001), response: 'r'})).status, 400)
+    const req = randomUUID()
+    const train = await f.post({action: 'train', request_id: req})
+    const accepted = await train.json() as Record<string, unknown>
+    assert.equal(train.status, 202)
+    assert.equal(accepted.state, 'training')
+    assert.equal(accepted.job_id, req)
+    assertWire(accepted)
+    const body = await untilSettled(f.post)
+    assert.equal(body.state, 'candidate')
+    assert.equal(body.version, req)
+    assertWire(body)
+    assert.equal(f.captured.length, 1)
+    const cap = f.captured[0]
+    assert.match(cap.request.owner, /^[a-f0-9]{64}$/)
+    assert.equal(cap.request.adapter_path.endsWith('/versions/' + req), true)
+    assert.equal(cap.request.iterations, 64)
+    assert.deepEqual(cap.jsonl.trim().split('\n').map((line) => JSON.parse(line)), [{prompt: 'call me Cedar', response: 'Okay, Cedar.'}])
+    const again = await f.post({action: 'train', request_id: req})
+    assert.equal(again.status, 200)
+    assert.equal((await again.json() as {state: string}).state, 'candidate')
+    assert.equal(f.captured.length, 1)
+  } finally { await f.listener.close() }
+})
+
+test('a running duplicate stays 202 and a second owner is busy', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  const other = 'cd'.repeat(32)
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+    f.hold()
+    const req = randomUUID()
+    const train = await f.post({action: 'train', request_id: req})
+    assert.equal(train.status, 202)
+    const replay = await f.post({action: 'train', request_id: req})
+    assert.equal(replay.status, 202)
+    assert.equal(f.captured.length, 1)
+    const busy = await f.learning.handle(other, ['personal_chat', 'personal_learning'], {action: 'add_example', example_id: randomUUID(), prompt: 'q', response: 's'})
+    assert.equal(busy.code, 200)
+    const second = await f.learning.handle(other, ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})
+    assert.equal(second.code, 409)
+    assert.equal(f.captured.length, 1)
+  } finally { await f.listener.close() }
+})
+
+test('candidate requires candidate_control_passed; base_control is diagnostic only', async () => {
+  {
+    const f = await paired(['personal_chat', 'personal_learning'])
+    try {
+      await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+      f.setRunner({ok: true, status: 'trained', candidate_control_passed: false, base_control_passed: true})
+      assert.equal((await f.post({action: 'train', request_id: randomUUID()})).status, 202)
+      const body = await untilSettled(f.post)
+      assert.equal(body.state, 'failed')
+      assert.equal('version' in body, false)
+      assertWire(body)
+    } finally { await f.listener.close() }
+  }
+  {
+    const f = await paired(['personal_chat', 'personal_learning'])
+    try {
+      await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+      const req = randomUUID()
+      f.setRunner({base_control_passed: false, candidate_control_passed: true})
+      assert.equal((await f.post({action: 'train', request_id: req})).status, 202)
+      const body = await untilSettled(f.post)
+      assert.equal(body.state, 'candidate')
+      assert.equal(body.version, req)
+      assertWire(body)
+    } finally { await f.listener.close() }
+  }
+})
+
+test('a failed candidate retains the previously active version', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+    const good = randomUUID()
+    assert.equal((await f.post({action: 'train', request_id: good})).status, 202)
+    assert.equal((await untilSettled(f.post)).state, 'candidate')
+    assert.equal((await (await f.post({action: 'activate', version: good})).json() as {state: string}).state, 'active')
+    f.setRunner({ok: true, status: 'trained', candidate_control_passed: false})
+    assert.equal((await f.post({action: 'train', request_id: randomUUID()})).status, 202)
+    const after = await untilSettled(f.post)
+    assert.equal(after.state, 'active')
+    assert.equal(after.version, good)
+    assertWire(after)
+  } finally { await f.listener.close() }
+})
+
+test('restart marks an unfinished job interrupted and does not rerun it', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+    f.hold()
+    const req = randomUUID()
+    assert.equal((await f.post({action: 'train', request_id: req})).status, 202)
+    const restarted = createLearningController({file: join(f.dir, 'learning.json'), stateRoot: join(f.dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: f.base, sandboxWrap: (argv) => argv}, runner: async () => { throw Error('rerun') }})
+    const status = await restarted.handle(ownerNamespace(subject, 'fixture_install'), ['personal_chat'], {action: 'status'})
+    assert.equal(status.body.state, 'interrupted')
+    const again = await restarted.handle(ownerNamespace(subject, 'fixture_install'), ['personal_learning'], {action: 'train', request_id: req})
+    assert.equal(again.code, 200)
+    assert.equal(again.body.state, 'interrupted')
+    assert.equal(f.captured.length, 1)
+  } finally { await f.listener.close() }
+})
+
+test('pause or revoke during a job discards a late completion', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+    const gate = f.hold()
+    const req = randomUUID()
+    assert.equal((await f.post({action: 'train', request_id: req})).status, 202)
+    assert.equal((await f.post({action: 'pause'})).status, 200)
+    gate.catch(() => {})
+    // Release is stored by hold(); the runner is awaiting it. Completing after pause must not activate.
+    const ns = ownerNamespace(subject, 'fixture_install')
+    const late = createLearningController({file: join(f.dir, 'learning.json'), stateRoot: join(f.dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: f.base, sandboxWrap: (argv) => argv}})
+    const status = await late.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.notEqual(status.body.state, 'active')
+    assert.equal(status.body.version, undefined)
+  } finally { await f.listener.close() }
+})
+
+test('a revoked pairing cannot apply a late training result', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-revoke-'))
+  const base = join(dir, 'base')
+  await mkdir(base, {recursive: true})
+  await writeFile(join(base, 'config.json'), '{"model_type":"qwen3"}\n')
+  await writeFile(join(base, 'model.safetensors'), 'fixture-weights')
+  const base_sha256 = await baseModelDigest(base)
+  if (!base_sha256) throw Error('fixture')
+  let open: () => void = () => {}
+  const gate = new Promise<void>((resolve) => { open = resolve })
+  let calls = 0
+  const learning = createLearningController({
+    file: join(dir, 'learning.json'), stateRoot: join(dir, 'state'),
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: base, sandboxWrap: (argv) => argv},
+    runner: async (_config, request) => {
+      calls += 1
+      await gate
+      await mkdir(request.adapter_path, {recursive: true, mode: 0o700})
+      await writeFile(join(request.adapter_path, 'adapters.safetensors'), ADAPTER_BYTES, {mode: 0o600})
+      return {ok: true, status: 'trained' as const, adapter_sha256: createHash('sha256').update(ADAPTER_BYTES).digest('hex'), base_sha256, candidate_control_passed: true, base_control_passed: false}
+    },
+  })
+  const ns = 'ef'.repeat(32)
+  let authorized = true
+  assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})).code, 200)
+  const req = randomUUID()
+  assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: req}, {stillAuthorized: async () => authorized})).code, 202)
+  authorized = false
+  open()
+  let body: Record<string, unknown> = {}
+  for (let i = 0; i < 50; i++) {
+    body = (await learning.handle(ns, ['personal_chat'], {action: 'status'})).body
+    if (body.state !== 'training') break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(body.state, 'interrupted')
+  assert.equal(body.version, undefined)
+  assert.equal(calls, 1)
+  assert.equal((await learning.handle(ns, ['personal_chat', 'personal_learning'], {action: 'train', request_id: req})).code, 200)
+  assert.equal(calls, 1)
+})
+
+test('aggregate example bytes are capped at 256KB', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    const big = '\u00e9'.repeat(2000)
+    let rejected = false
+    for (let i = 0; i < 64; i++) {
+      const response = await f.post({action: 'add_example', example_id: randomUUID(), prompt: big, response: big})
+      if (response.status === 400) { rejected = true; break }
+    }
+    assert.equal(rejected, true)
+  } finally { await f.listener.close() }
+})
+
+test('activate requires a verified version; pause returns to base; no private text leaks', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'secret preference phrase', response: 'noted'})
+    const req = randomUUID()
+    await f.post({action: 'train', request_id: req})
+    await untilSettled(f.post)
+    assert.equal((await f.post({action: 'activate', version: randomUUID()})).status, 404)
+    const act = await f.post({action: 'activate', version: req})
+    const active = await act.json() as Record<string, unknown>
+    assert.equal(active.state, 'active')
+    assert.equal(active.version, req)
+    assertWire(active)
+    const paused = await (await f.post({action: 'pause'})).json() as {state: string}
+    assert.equal(paused.state, 'candidate')
+    const status = await (await f.post({action: 'status'})).text()
+    assert.equal(status.includes('secret preference phrase'), false)
+    assert.equal(status.includes(f.base), false)
+  } finally { await f.listener.close() }
+})
+
+test('foreign origin, missing identity, and revoked pairing are refused with no runner call', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  try {
+    assert.equal((await f.post({action: 'status'}, {origin: 'https://evil.example'})).status, 403)
+    const noAuth = await fetch(f.baseURL + '/personal-learning', {method: 'POST', headers: {origin, 'content-type': 'application/json'}, body: JSON.stringify({action: 'status'})})
+    assert.equal(noAuth.status, 401)
+    await f.revoke()
+    assert.equal((await f.post({action: 'status'})).status, 401)
+    assert.equal(f.captured.length, 0)
+  } finally { await f.listener.close() }
+})
+
+test('owner namespace is derived from subject+install, not the browser', () => {
+  const a = ownerNamespace(subject, 'install_1')
+  assert.match(a, /^[a-f0-9]{64}$/)
+  assert.notEqual(a, ownerNamespace(subject, 'install_2'))
+  assert.notEqual(a, ownerNamespace('tvs_' + 'c'.repeat(32), 'install_1'))
+})
+
+test('not configured -> mutations 503, status off, personal chat keeps the base path', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-off-'))
+  const learning = createLearningController({file: join(dir, 'l.json'), stateRoot: join(dir, 's')})
+  const ns = 'ab'.repeat(32)
+  const r1 = await learning.handle(ns, ['personal_learning'], {action: 'status'})
+  assert.equal(r1.body.state, 'off')
+  const r2 = await learning.handle(ns, ['personal_learning'], {action: 'train', request_id: randomUUID()})
+  assert.equal(r2.code, 503)
+  assert.deepEqual(await learning.resolveAdapter(ns), {kind: 'base'})
+})
+
+test('real child receives bounded stdin and a minimal offline env', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-child-'))
+  const script = join(dir, 'echo-runner.mjs')
+  await writeFile(script, `let raw='';process.stdin.on('data',c=>raw+=c);process.stdin.on('end',async()=>{const req=JSON.parse(raw);const {writeFile}=await import('node:fs/promises');const {dirname,join}=await import('node:path');await writeFile(join(dirname(req.adapter_path),'captured-stdin.json'),JSON.stringify({req,env:process.env}));process.stdout.write(JSON.stringify({ok:true,status:'failed',error:'fixture_child'}))})\n`)
+  const ns = 'ab'.repeat(32)
+  const job = randomUUID()
+  const state = join(dir, 'state')
+  const request = {action: 'train' as const, base_path: join(dir, 'base'), state_root: state, owner: ns, job_id: job, examples_path: join(state, ns, 'examples', job + '.jsonl'), adapter_path: join(state, ns, 'versions', job), iterations: 64}
+  const result = await createSubprocessRunner()({interpreter: process.execPath, runnerScript: script, basePath: request.base_path, sandboxWrap: (argv) => argv, deadlineMs: 5000}, request, '{"prompt":"secret example","response":"secret answer"}\n')
+  assert.equal(result.ok, false)
+  assert.equal(result.error, 'fixture_child')
+  const captured = JSON.parse(await readFile(join(state, ns, 'versions', 'captured-stdin.json'), 'utf8')) as {req: RunnerRequest; env: Record<string, string>}
+  assert.equal(captured.req.job_id, job)
+  assert.equal(captured.env.HF_HUB_OFFLINE, '1')
+  assert.equal(captured.env.WANDB_MODE, 'disabled')
+  assert.equal('HOME' in captured.env, false)
+  assert.equal(JSON.stringify(captured.env).includes('secret'), false)
+  const info = await lstat(request.examples_path)
+  assert.equal(info.mode & 0o077, 0)
+  assert.equal(await readFile(request.examples_path, 'utf8'), '{"prompt":"secret example","response":"secret answer"}\n')
+})
+
+test('darwin trainer launch uses sandbox-exec and refuses a raw interpreter', async () => {
+  const wrapped = denyNetworkArgv(['/usr/bin/python3', '/opt/tarx/personal_learning_mlx.py'])
+  assert.equal(wrapped[0], '/usr/bin/sandbox-exec')
+  assert.match(wrapped[2], /deny network\*/)
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-nosandbox-'))
+  const ns = 'cd'.repeat(32)
+  const job = randomUUID()
+  const state = join(dir, 'state')
+  const request = {action: 'train' as const, base_path: dir, state_root: state, owner: ns, job_id: job, examples_path: join(state, ns, 'examples', job + '.jsonl'), adapter_path: join(state, ns, 'versions', job), iterations: 64}
+  const refused = await createSubprocessRunner()({interpreter: process.execPath, runnerScript: process.execPath, basePath: dir}, request, '{}\n')
+  assert.equal(refused.error, 'unavailable')
+  assert.equal(await readFile(request.examples_path, 'utf8').catch(() => ''), '')
+  if (process.platform === 'darwin') {
+    const sandboxed = join(dir, 'sandboxed.mjs')
+    await writeFile(sandboxed, `process.stdin.on('data',()=>{});process.stdin.on('end',()=>{process.stdout.write(JSON.stringify({ok:false,status:'failed',error:'sandboxed_child'}))})\n`)
+    const job2 = randomUUID()
+    const request2 = {...request, job_id: job2, examples_path: join(state, ns, 'examples', job2 + '.jsonl'), adapter_path: join(state, ns, 'versions', job2)}
+    const ran = await createSubprocessRunner()({interpreter: process.execPath, runnerScript: sandboxed, basePath: dir, sandboxWrap: denyNetworkArgv, deadlineMs: 8000}, request2, '{}\n')
+    assert.equal(ran.error, 'sandboxed_child')
+  }
+})
+
+test('active adapter is served from disk across a new controller, and the other owner stays isolated', async () => {
+  const f = await paired(['personal_chat', 'personal_learning'])
+  const seen: {body: {adapters?: string; messages: {content: string}[]}}[] = []
+  const model = createServer(async (req, res) => {
+    let raw = ''
+    for await (const chunk of req) raw += chunk
+    seen.push({body: JSON.parse(raw) as {adapters?: string; messages: {content: string}[]}})
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({choices: [{message: {content: 'fixture reply'}}]}))
+  })
+  await new Promise<void>((resolve) => model.listen(0, '127.0.0.1', () => resolve()))
+  const address = model.address()
+  if (!address || typeof address === 'string') throw Error('fixture model')
+  const personal = createLoopbackPersonalClient({baseURL: `http://127.0.0.1:${address.port}`, model: 'fixture', apiKey: 'LOCAL_FIXTURE_KEY'})
+  try {
+    await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
+    const req = randomUUID()
+    await f.post({action: 'train', request_id: req})
+    await untilSettled(f.post)
+    assert.equal((await f.post({action: 'activate', version: req})).status, 200)
+    const ns = ownerNamespace(subject, 'fixture_install')
+    const adapter = join(f.dir, 'state', ns, 'versions', req)
+    const rebuilt = createLearningController({file: join(f.dir, 'learning.json'), stateRoot: join(f.dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: f.base, sandboxWrap: (argv) => argv}})
+    const listener = createPairedSessionListener({host: '127.0.0.1', port: 0, allowedOrigins: new Set([origin]), pairStore: f.pairs, ownerStore: createFileOwnerStore(join(f.dir, 'owners.json')), personalClient: personal, learning: rebuilt, eveClient: () => ({attach: () => ({async *stream() {}})}), readiness: async () => ({config_valid: true, worker_reachable: false, model_responsive: false, tools: [], healthy: false})})
+    const {port} = await listener.listen()
+    const turn = (token: string, content: string) => fetch(`http://127.0.0.1:${port}/personal-turn`, {method: 'POST', headers: {origin, 'content-type': 'application/json', authorization: 'Bearer ' + token}, body: JSON.stringify({messages: [{role: 'user', content}]})})
+    try {
+      const first = await turn(f.token, 'owner A phrase')
+      assert.equal(first.status, 200)
+      assert.equal(seen[0].body.adapters, adapter)
+      assert.equal(JSON.stringify(seen[0].body).includes('call me'), false)
+      const otherSubject = 'tvs_' + 'b'.repeat(32)
+      const otherChallenge = await createPairingChallenge({loadCredential: async () => 'tarx_cli_' + 'f'.repeat(64), install_id: 'other_install', store: f.pairs, fetcher: (async () => new Response(JSON.stringify({ok: true, subject_id: otherSubject}))) as typeof fetch})
+      if (!otherChallenge.ok) throw Error('fixture pair')
+      assert.equal(await approvePairingChallenge(otherChallenge.challenge, f.pairs, Date.now(), ['personal_chat']), true)
+      const otherClaim = await fetch(`http://127.0.0.1:${port}/pairing/claim`, {method: 'POST', headers: {origin, 'content-type': 'application/json'}, body: JSON.stringify({challenge: otherChallenge.challenge})})
+      const otherToken = (await otherClaim.json() as {pairing_credential: string}).pairing_credential
+      const isolated = await turn(otherToken, 'owner B phrase')
+      assert.equal(isolated.status, 200)
+      assert.equal(seen[1].body.adapters, undefined)
+      assert.equal(JSON.stringify(seen[1].body).includes(adapter), false)
+      await chmod(join(adapter, 'adapters.safetensors'), 0o644)
+      const before = seen.length
+      const closed = await turn(f.token, 'owner A after tamper')
+      assert.equal(closed.status, 503)
+      assert.equal(seen.length, before)
+      await chmod(join(adapter, 'adapters.safetensors'), 0o600)
+      const paused = await rebuilt.handle(ns, ['personal_chat', 'personal_learning'], {action: 'pause'})
+      assert.equal(paused.body.state, 'candidate')
+      const baseTurn = await turn(f.token, 'owner A paused')
+      assert.equal(baseTurn.status, 200)
+      assert.equal(seen.at(-1)?.body.adapters, undefined)
+    } finally { await listener.close() }
+  } finally {
+    await f.listener.close()
+    await new Promise<void>((resolve) => model.close(() => resolve()))
+  }
+})
