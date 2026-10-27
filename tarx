@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.2.2"
+TARX_VERSION="1.3.0"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -242,14 +242,92 @@ _tarx_session() {
     err "TARX needs Python 3 on this computer before it can continue."
   fi
   # The program is on fd 3 so the terminal stays attached to the conversation.
-  TARX_CHAT_TEXT="${1-}" python3 /dev/fd/3 3<< 'PY'
-import json, os, re, select, subprocess, sys, urllib.error, urllib.request
+  TARX_CHAT_TEXT="${1-}" python3 -c 'import os; exec(compile(os.fdopen(3).read(), "<tarx-chat>", "exec"))' 3<< 'PY'
+import json, os, re, select, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", ""))
 KEY_PATH = HOME / ".tarx" / "state" / "chat-key"
 AUTH = os.environ.get("TARX_AUTH_ORIGIN", "https://tarx.com").rstrip("/")
 DOOR = "https://compute.tarx.com/v1/chat/completions"
+# Personal runtime: the private local model. OPT-IN and loopback-only. When set,
+# personal-mode turns go here and NEVER fall back to the remote supercomputer
+# door. Unset = today's behavior (remote supercomputer conversation), unchanged.
+PERSONAL_CONFIG_PATH = HOME / ".tarx" / "state" / "personal-runtime.json"
+PERSONAL_CONFIG_ERROR = False
+
+
+def personal_settings():
+    global PERSONAL_CONFIG_ERROR
+    settings = {}
+    if PERSONAL_CONFIG_PATH.exists():
+        try:
+            info = PERSONAL_CONFIG_PATH.stat()
+            if not PERSONAL_CONFIG_PATH.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise ValueError("unsafe personal profile")
+            if info.st_size > 8192:
+                raise ValueError("oversized personal profile")
+            settings = json.loads(PERSONAL_CONFIG_PATH.read_text())
+            if not isinstance(settings, dict):
+                raise ValueError("invalid personal profile")
+        except (OSError, ValueError, TypeError):
+            PERSONAL_CONFIG_ERROR = True
+    url = os.environ.get("TARX_PERSONAL_RUNTIME_URL", settings.get("url", ""))
+    model = os.environ.get("TARX_PERSONAL_RUNTIME_MODEL", settings.get("model", "tarx-personal"))
+    key = os.environ.get("TARX_PERSONAL_RUNTIME_KEY", "")
+    key_file = settings.get("key_file")
+    if key_file and not key:
+        try:
+            path = Path(key_file).expanduser().resolve()
+            # A profile can reference its owner's existing local credential,
+            # never another user's file or an unbounded/shared-readable file.
+            path.relative_to(HOME.resolve())
+            info = path.stat()
+            if not path.is_file() or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 8192:
+                raise ValueError("unsafe local credential file")
+            key = path.read_text().strip()
+        except (OSError, ValueError, TypeError):
+            PERSONAL_CONFIG_ERROR = True
+    if not all(isinstance(v, str) for v in (url, model, key)):
+        PERSONAL_CONFIG_ERROR = True
+        return "", "", ""
+    if any(ord(ch) < 32 for ch in key.strip()):
+        PERSONAL_CONFIG_ERROR = True
+    return url.strip(), model.strip(), key.strip()
+
+
+PERSONAL_RUNTIME_URL, PERSONAL_RUNTIME_MODEL, PERSONAL_RUNTIME_KEY = personal_settings()
+ROUTE_OVERRIDE = None
+
+
+def _is_loopback_http(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+        return (parsed.scheme in ("http", "https")
+                and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and not parsed.username and not parsed.password
+                and not parsed.query and not parsed.fragment
+                and parsed.path in ("", "/", "/v1", "/v1/", "/v1/chat/completions")
+                and (port is None or 0 < port <= 65535))
+    except (ValueError, TypeError):
+        return False
+
+
+def chat_destination():
+    if ROUTE_OVERRIDE == "supercomputer":
+        return "supercomputer", DOOR
+    if PERSONAL_RUNTIME_URL or PERSONAL_CONFIG_PATH.exists() or PERSONAL_CONFIG_ERROR or ROUTE_OVERRIDE == "personal":
+        if PERSONAL_CONFIG_ERROR or not _is_loopback_http(PERSONAL_RUNTIME_URL) or not PERSONAL_RUNTIME_MODEL:
+            return "personal_misconfigured", ""
+        parsed = urllib.parse.urlsplit(PERSONAL_RUNTIME_URL)
+        return "personal", parsed._replace(path="/v1/chat/completions").geturl()
+    return "supercomputer", DOOR
+
+
+class NoChatRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 # Session-only history: never persisted or shared across credential changes.
 HISTORY = []
@@ -275,8 +353,14 @@ def host_capabilities():
 
 def capability_reply():
     caps = host_capabilities()
+    mode, _ = chat_destination()
+    route = ("Personal chat uses only the configured local runtime. /compute sends only the task you explicitly provide to the supercomputer. "
+             if mode == "personal" else
+             "Personal mode is blocked until a valid loopback runtime is configured. "
+             if mode == "personal_misconfigured" else
+             "This terminal can send this conversation to the supercomputer and show the text reply. ")
     return (
-        "This terminal can send this conversation to the supercomputer and show the text reply. "
+        route +
         "History stays in this session only and is cleared when the account changes.\n"
         "Not available on this path: memory writes (" + caps["memory_write"] + "), "
         "file reads (" + caps["file_read"] + "), shell execution (" + caps["shell_execution"] + "), "
@@ -404,7 +488,12 @@ def http(method, url, body=None, headers=None, timeout=20):
     for name, value in (headers or {}).items():
         req.add_header(name, value)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
+        # Never follow a response redirect with a private prompt or bearer.
+        # Loopback must also bypass HTTP(S)_PROXY settings.
+        handlers = [NoChatRedirect()]
+        if _is_loopback_http(url):
+            handlers.append(urllib.request.ProxyHandler({}))
+        with urllib.request.build_opener(*handlers).open(req, timeout=timeout) as res:
             raw = res.read().decode()
             return res.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
@@ -460,6 +549,9 @@ def show_commands():
     say("/channels   rooms you can open")
     say("/signin     connect this computer")
     say("/signout    sign out of this computer")
+    say("/private    use the configured personal runtime")
+    say("/remote     start a separate supercomputer conversation")
+    say("/compute TASK  send only this task to the supercomputer")
 
 def sign_out():
     key = read_key()
@@ -481,12 +573,27 @@ def signin_state(key):
     return "no" if status in (401, 403) else "unknown"
 
 def handle_command(text):
+    global ROUTE_OVERRIDE
     low = " ".join(text.strip().lower().split())
     bare = low[1:].strip() if low.startswith("/") else low
     if bare in {"signin", "sign-in", "sign in", "login", "log-in", "log in"}:
         return "signin"
     if bare in {"signout", "sign-out", "sign out", "logout", "log-out", "log out"}:
         sign_out()
+        return True
+    if low == "/compute" or low.startswith("/compute "):
+        return "compute"
+    if low in {"/private", "use private mode"}:
+        ROUTE_OVERRIDE = "personal"
+        reset_history()
+        mode, _ = chat_destination()
+        say("Private mode selected. Your messages stay local." if mode == "personal" else
+            "Private mode is blocked. Configure a loopback personal runtime first. Nothing was sent.")
+        return True
+    if low in {"/remote", "use remote mode"}:
+        ROUTE_OVERRIDE = "supercomputer"
+        reset_history()
+        say("Started a separate supercomputer conversation. Prior private context is excluded.")
         return True
     if low in {"/agents", "/agent"}:
         say("Always On is the agent in this conversation.")
@@ -535,7 +642,12 @@ def lobby(reconnect):
             say("You can keep looking.")
             show_commands()
             continue
+        if found == "compute":
+            say(compute_task("", text)[1])
+            continue
         if found:
+            if chat_destination()[0] != "supercomputer":
+                return ""
             continue
         if asks_identity(text):
             say("This visit is not connected, so there is no account name yet.")
@@ -555,6 +667,14 @@ def refresh_label(key):
     return ""
 
 def wake_always_on():
+    mode, _ = chat_destination()
+    if mode != "supercomputer":
+        say("Private mode selected. Replies use only your configured local runtime." if mode == "personal" else
+            "Private mode is blocked. Configure a loopback personal runtime first.")
+        say("Local availability is checked when you send. /compute sends only a task you explicitly provide.")
+        show_commands()
+        return
+    say("This conversation uses the supercomputer.")
     label = refresh_label(read_key())
     say("TARX chat")
     if label:
@@ -662,54 +782,101 @@ def time_sleep(seconds):
     import time
     time.sleep(seconds)
 
+def response_text(status, body, personal=False):
+    if personal and status in (401, 403):
+        return "down", "The local runtime rejected its local credential. Your supercomputer sign-in is unchanged."
+    if not personal and status == 401:
+        return "expired", ""
+    if status == 429:
+        return "busy", "TARX is busy right now. Wait a moment and try again."
+    if status != 200:
+        return "down", ("The local runtime is unavailable. Nothing was sent to the supercomputer." if personal else
+                        "TARX is temporarily unavailable. Try again in a moment.")
+    try:
+        choice = body["choices"][0]
+        content = choice["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        content = ""
+    if not content:
+        return "down", "TARX returned no reply. No automatic retry was sent."
+    content = guard_reply(content)
+    if choice.get("finish_reason") == "length":
+        content += "\n[Response reached its length limit. Ask me to continue.]"
+    return "ok", content
+
+
+def compute_task(key, text):
+    global HISTORY_KEY
+    parts = text.strip().split(None, 1)
+    task = parts[1].strip() if len(parts) == 2 else ""
+    if not task:
+        return "input", "Use /compute followed by a task you approve for the supercomputer. Your conversation history is excluded."
+    if len(task.encode("utf-8")) > MAX_INPUT_BYTES:
+        return "input", "That task is too large. Nothing was sent."
+    # This is an extra safeguard; the primary boundary is explicit task-only
+    # dispatch. No HISTORY, account label, memory, adapter or local credential.
+    if re.search(r"tarx_cli_|-----BEGIN .*PRIVATE KEY|(?:/Users/|/home/|~/.tarx/)|[A-Za-z]:\\Users\\|\bsk-[A-Za-z0-9]{12}", task, re.I):
+        return "input", "That task contains a credential or private-path marker. Keep it local or write a public task without it."
+    if not key:
+        return "input", "Use /signin before sending a task to the supercomputer. Nothing was sent."
+    status, body = http("POST", DOOR, {
+        "model": "tarx/t-supercomputer",
+        "messages": [{"role": "user", "content": task}],
+        "stream": False, "max_tokens": 768, "temperature": 0,
+    }, headers={"Authorization": "Bearer " + key}, timeout=70)
+    kind, content = response_text(status, body)
+    mode, destination = chat_destination()
+    if kind == "ok" and mode == "personal":
+        scope = (key, mode, destination, PERSONAL_RUNTIME_MODEL)
+        if HISTORY_KEY != scope:
+            reset_history()
+            HISTORY_KEY = scope
+        # Return the public task/result to local context, never the reverse.
+        HISTORY.extend([{"role": "user", "content": "Approved supercomputer task: " + task},
+                        {"role": "assistant", "content": "Supercomputer result: " + content}])
+        while HISTORY and (len(HISTORY) > 12 or len(json.dumps(HISTORY, ensure_ascii=False).encode("utf-8")) > MAX_CONTEXT_BYTES):
+            del HISTORY[:2]
+    return kind, content
+
+
 def reply_for(key, prompt):
     global HISTORY_KEY
+    if prompt.strip().split(None, 1)[0:1] and prompt.strip().split(None, 1)[0].lower() == "/compute":
+        return compute_task(key, prompt)
     if len(prompt.encode("utf-8")) > MAX_INPUT_BYTES:
         return "input", "That message is too large. Please keep it under 12,000 UTF-8 bytes."
-    if HISTORY_KEY != key:
+    mode, destination = chat_destination()
+    if mode == "personal_misconfigured":
+        return "down", "Personal runtime is misconfigured. Use a loopback URL without credentials, query or fragment. Nothing was sent."
+    history_key = (key, mode, destination, PERSONAL_RUNTIME_MODEL if mode == "personal" else "")
+    if HISTORY_KEY != history_key:
         reset_history()
-        HISTORY_KEY = key
+        HISTORY_KEY = history_key
     messages = HISTORY.copy()
     while messages and (len(messages) >= 12 or len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + len(prompt.encode("utf-8")) > MAX_CONTEXT_BYTES):
         del messages[:2]
     if asks_capabilities(prompt):
         answer = capability_reply()
-        HISTORY[:] = messages + [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": answer},
-        ]
+        HISTORY[:] = messages + [{"role": "user", "content": prompt}, {"role": "assistant", "content": answer}]
         return "ok", answer
     messages.append({"role": "user", "content": prompt})
-    label = refresh_label(key)
-    if label:
-        messages.insert(0, {
-            "role": "system",
-            "content": "You are TARX, Always On. The human signed in on this computer is " + label + ". If they ask who they are, answer with that name. Do not invent a different identity.",
-        })
-    status, body = http("POST", DOOR, {
-        "model": "tarx/t-supercomputer",
-        "messages": messages,
-        "stream": False,
-        "max_tokens": 768,
-        "temperature": 0,
-    }, headers={"Authorization": "Bearer " + key}, timeout=70)
-    if status == 401:
-        return "expired", ""
-    if status == 429:
-        return "busy", "TARX is busy right now. Wait a moment and try again."
-    if status != 200:
-        return "down", "TARX is temporarily unavailable. Try again in a moment."
-    try:
-        content = body["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, TypeError, AttributeError):
-        content = ""
-    if not content:
-        return "down", "TARX is temporarily unavailable. Try again in a moment."
-    content = guard_reply(content)
-    if body["choices"][0].get("finish_reason") == "length":
-        content += "\n[Response reached its length limit. Ask me to continue.]"
-    HISTORY[:] = [m for m in messages if m["role"] != "system"] + [{"role": "assistant", "content": content}]
-    return "ok", content
+    if mode == "personal":
+        headers = {"Authorization": "Bearer " + PERSONAL_RUNTIME_KEY} if PERSONAL_RUNTIME_KEY else {}
+        model = PERSONAL_RUNTIME_MODEL
+    else:
+        headers = {"Authorization": "Bearer " + key}
+        model = "tarx/t-supercomputer"
+        label = refresh_label(key)
+        if label:
+            messages.insert(0, {"role": "system", "content": "You are TARX, Always On. The human signed in on this computer is " + label + ". If they ask who they are, answer with that name. Do not invent a different identity."})
+    status, body = http("POST", destination, {
+        "model": model, "messages": messages,
+        "stream": False, "max_tokens": 768, "temperature": 0,
+    }, headers=headers, timeout=70)
+    kind, content = response_text(status, body, personal=mode == "personal")
+    if kind == "ok":
+        HISTORY[:] = [m for m in messages if m["role"] != "system"] + [{"role": "assistant", "content": content}]
+    return kind, content
 
 def send_once(key, prompt):
     kind, text = reply_for(key, prompt)
@@ -743,26 +910,50 @@ def loop():
             else:
                 begin_sign_in()
             continue
+        if found == "compute":
+            send_once(read_key(), text)
+            continue
         if found:
             continue
         key = read_key()
         if asks_identity(text):
+            if chat_destination()[0] != "supercomputer":
+                say("This is a local personal session. Account identity is checked only through /signin.")
+                continue
             if not key:
                 say("This visit is not connected, so there is no account name yet.")
                 say("Say /signin to connect this computer.")
             else:
                 say_who(key)
             continue
-        if not key:
+        if not key and chat_destination()[0] == "supercomputer":
             say("That stays on this visit until the computer is connected.")
             show_commands()
             continue
-        if send_once(key, text) != 0 and not read_key():
+        if send_once(key, text) != 0 and not read_key() and chat_destination()[0] == "supercomputer":
             return 1
 
 def main():
     once = os.environ.get("TARX_CHAT_TEXT", "")
     key = read_key()
+    # Explicit one-shot commands remain host-controlled as in the interactive loop.
+    if once:
+        found = handle_command(once)
+        if found == "compute":
+            return send_once(key, once)
+        if found == "signin":
+            if signin_state(key) == "ok":
+                say("This computer is already connected.")
+            else:
+                begin_sign_in()
+            return 0
+        if found:
+            return 0
+    if chat_destination()[0] != "supercomputer":
+        if once:
+            return send_once(key, once)
+        wake_always_on()
+        return loop()
     reconnect = False
     if key:
         state = introspect(key)
@@ -781,7 +972,7 @@ def main():
             return 1
         key = lobby(reconnect)
         created = True
-        if not key:
+        if not key and chat_destination()[0] == "supercomputer":
             return 0
     if once:
         return send_once(key, once)

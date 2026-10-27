@@ -1,10 +1,32 @@
 # TARX CLI
 
-Start free at [tarx.com](https://www.tarx.com). The CLI is optional.
+Free AI at [tarx.com](https://www.tarx.com). The CLI is optional.
 
 > Public developer preview. Installing the CLI does not install a model or background service.
 
 Check what is available with `tarx version`, `tarx help`, and `tarx readiness`.
+
+## Private chat and explicit extra compute (CLI 1.3.0)
+
+Installing the CLI still starts no model or service. Existing installs without a personal runtime keep a clearly labeled **remote supercomputer conversation**; they are not private/local-ready.
+
+To use an already running personal model, configure its loopback OpenAI-compatible endpoint in the local shell before launching TARX:
+
+```sh
+export TARX_PERSONAL_RUNTIME_URL=http://127.0.0.1:YOUR_PORT/v1
+export TARX_PERSONAL_RUNTIME_MODEL=YOUR_LOCAL_MODEL_ID
+tarx
+```
+
+Replace `YOUR_PORT` and `YOUR_LOCAL_MODEL_ID` with the values for that existing runtime. If that service requires authentication, set `TARX_PERSONAL_RUNTIME_KEY` locally using its own credential. Never reuse the cloud `TARX_CHAT_KEY` or paste credentials into chat. No founder-specific path, model or key is assumed.
+
+For a persistent per-user setup, an operator may instead create `~/.tarx/state/personal-runtime.json` (owner-only permissions `0600`) with `url`, `model`, and an optional `key_file` pointing to that user's existing owner-only credential file inside their home directory. Environment settings override those fields. No secret is copied into the profile. A malformed, shared-readable or broken profile blocks personal mode; it never selects remote chat instead.
+
+Personal mode sends conversation only to that loopback runtime, with its local model ID and local credential. It makes no automatic account-label lookup. Invalid configuration, redirects, rejection or downtime fail closed with no supercomputer fallback. `/private` selects this mode and clears prior context; without configuration it remains blocked. `/remote` explicitly starts a separate remote conversation and clears prior private context. History is bounded, session-only and cleared when its destination or account changes.
+
+For extra compute, enter `/compute` followed by a task you approve for the supercomputer. Only that task is sent through the existing authenticated compute gateway—no private history, account-label prompt, adapter or local credential. Credential/private-path markers are refused as an additional safeguard; explicit task selection is the boundary, not automatic detection of all sensitive language. Successful results return to local context for follow-up. A task failure does not automatically retry. This is text-request routing, not a new durable Eve task receipt or background worker claim.
+
+These controls do not provision models, add tools, start training or prove personal-model readiness on every installation.
 
 ## Optional local runtime
 

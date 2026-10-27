@@ -2,6 +2,8 @@
 import ast
 from pathlib import Path
 import unittest
+import os
+from unittest.mock import patch
 import tempfile
 
 source = (Path(__file__).resolve().parent.parent / 'tarx').read_text().split("3<< 'PY'\n", 1)[1].split('\nPY\n', 1)[0]
@@ -12,7 +14,12 @@ module = ast.Module(body=[n for n in tree.body if not isinstance(n, ast.Try)], t
 class AuthTests(unittest.TestCase):
     def setUp(self):
         self.ns = {}
-        exec(compile(module, '<tarx-chat>', 'exec'), self.ns)
+        fixture_home = tempfile.TemporaryDirectory()
+        self.addCleanup(fixture_home.cleanup)
+        environment = {k:v for k,v in os.environ.items() if not k.startswith('TARX_PERSONAL_')}
+        environment['HOME'] = fixture_home.name
+        with patch.dict(os.environ, environment, clear=True):
+            exec(compile(module, '<tarx-chat>', 'exec'), self.ns)
         self.tmp = tempfile.TemporaryDirectory()
         self.ns['KEY_PATH'] = Path(self.tmp.name) / 'chat-key'
         self.ns['os'].environ.pop('TARX_CHAT_KEY', None)

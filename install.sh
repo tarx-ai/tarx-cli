@@ -1,5 +1,5 @@
 #!/bin/sh
-# Place the TARX CLI. Inference is the supercomputer door, not a local port.
+# Place the CLI only. Personal routing requires an existing configured local runtime.
 #   curl -fsSL https://raw.githubusercontent.com/tarx-ai/tarx-cli/main/install.sh | sh
 set -eu
 
