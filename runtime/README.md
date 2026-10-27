@@ -19,3 +19,11 @@ This increment exposes pairing and read/attach only. It does not submit tasks or
 ## Verification
 
 `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` then `node --test --experimental-strip-types *.test.ts` in this directory. `python3 tests/test-runtime-package.py` from the repository root tests real staged install commands with fake network/dependency processes and disposable storage. No production sign-in, grant, inference or service is used.
+
+## Paired private chat (runtime0.3.0)
+
+`tarx runtime serve-personal` starts only the loopback listener, using the same owner-only `~/.tarx/state/personal-runtime.json` or `TARX_PERSONAL_RUNTIME_*` settings as CLI chat. It starts no model/Eve worker. A missing/unsafe/unreachable local configuration fails closed; no remote fallback. `serve` and `serve-check` also wire this personal client when configured.
+
+Private chat requires a fresh pairing explicitly approved on the trusted CLI with `--task personal_chat`; prior read-only or tool scopes do not silently gain inference. The browser claims the challenge using the existing conversational pairing flow. Never paste model credentials into the browser. Revocation blocks future requests and withholds in-flight replies. `/personal-turn` accepts only bounded user/assistant messages, returns ordinary text, and cannot select model/url/key or execute tools. The existing `/tasks` endpoint remains local Eve tools; supercomputer compute uses the separate explicit hosted task-only web route.
+
+On a phone, localhost refers to that phone, not a Mac. Configuration/readiness is not a responsive-model claim. Actual personal chat is accepted only after a scoped approved request succeeds; no per-user training or OS lifecycle guarantee.
