@@ -34,13 +34,13 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
    let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>32768)return reply(413,{error:'body_too_large'})}
    let body:any;try{body=JSON.parse(raw)}catch{return reply(400,{error:'invalid_json'})}
    const valid=validatePersonalTurn(body);if(!valid.ok)return reply(400,{error:'invalid_turn'})
-   let adapters:string|undefined
+   let local:{adapters:string;model:string}|undefined
    if(deps.learning){
     const resolved:AdapterResolution=await deps.learning.resolveAdapter(ownerNamespace(identity.subject_id,identity.install_id))
     if(resolved.kind==='closed')return reply(503,{error:'personal_runtime_unavailable'})
-    if(resolved.kind==='adapter')adapters=resolved.path
+    if(resolved.kind==='adapter')local={adapters:resolved.path,model:resolved.model}
    }
-   const result=await runPersonalTurn(deps.personalClient,{messages:valid.messages},adapters?{adapters}:undefined)
+   const result=await runPersonalTurn(deps.personalClient,{messages:valid.messages},local)
    if(!result.ok)return reply(result.error==='personal_runtime_unavailable'?503:502,{error:result.error})
    if(!await pairingTaskAccess(req,deps.pairStore))return reply(401,{error:'missing_identity'})
    return reply(200,{role:'assistant',content:result.content})

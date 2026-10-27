@@ -33,7 +33,7 @@ export type PersonalTurnResult =
  * is given the already-validated messages; it must not be handed a URL/key by
  * the caller of /personal-turn. Returns raw assistant text or null on failure. */
 /** Server-owned local options. The browser cannot set these. */
-export type PersonalLocalOptions = { adapters?: string }
+export type PersonalLocalOptions = { adapters?: string; model?: string }
 
 export type PersonalClient = (messages: PersonalTurnMessage[], local?: PersonalLocalOptions) => Promise<string | null>
 
@@ -70,7 +70,7 @@ export function sanitizeAssistant(text: string): string {
 /** Run a validated personal turn against the owned client. Fail-closed. */
 export async function runPersonalTurn(client: PersonalClient, req: PersonalTurnRequest, local?: PersonalLocalOptions): Promise<PersonalTurnResult> {
   let raw: string | null
-  try { raw = await client(req.messages, local?.adapters ? { adapters: local.adapters } : undefined) } catch { return { ok: false, error: 'personal_runtime_unavailable' } }
+  try { raw = await client(req.messages, local?.adapters ? { adapters: local.adapters, model: local.model } : undefined) } catch { return { ok: false, error: 'personal_runtime_unavailable' } }
   if (raw == null) return { ok: false, error: 'personal_runtime_unavailable' }
   const content = sanitizeAssistant(raw)
   if (!content) return { ok: false, error: 'empty_reply' }
@@ -118,6 +118,8 @@ export function createLoopbackPersonalClient(input: {
     // Only a server-verified absolute adapter directory. Never a browser path.
     if (local?.adapters) {
       if (!isAbsolute(local.adapters) || local.adapters.includes('\0') || local.adapters.split(/[\\/]/).includes('..')) return null
+      if (!local.model || !isAbsolute(local.model) || local.model.includes('\0') || local.model.split(/[\\/]/).includes('..')) return null
+      payload.model = local.model
       payload.adapters = local.adapters
     }
     let res: Response

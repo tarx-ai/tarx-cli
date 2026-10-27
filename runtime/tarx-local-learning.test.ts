@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp,mkdir,writeFile,chmod,lstat,readFile} from 'node:fs/promises'
+import {mkdtemp,mkdir,writeFile,chmod,lstat,readFile,rm} from 'node:fs/promises'
+import {spawn} from 'node:child_process'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {randomUUID,createHash} from 'node:crypto'
@@ -9,7 +10,7 @@ import {createFilePairStore,createPairingChallenge,approvePairingChallenge,revok
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
 import {createLoopbackPersonalClient} from './tarx-personal-turn.ts'
-import {baseModelDigest,createLearningController,createSubprocessRunner,denyNetworkArgv,ownerNamespace,type RunnerResult,type RunnerRequest} from './tarx-local-learning.ts'
+import {baseDigestObservations,baseModelDigest,createLearningController,createSubprocessRunner,denyNetworkArgv,ownerNamespace,resetBaseDigestObservations,type RunnerResult,type RunnerRequest} from './tarx-local-learning.ts'
 
 /**
  * Node contract fixtures. The injected runner is not Root's MLX proof.
@@ -21,6 +22,7 @@ const origin = 'https://www.tarx.com'
 const subject = 'tvs_' + 'a'.repeat(32)
 const WIRE = new Set(['ok', 'state', 'configured', 'approved_examples', 'version', 'job_id', 'error'])
 const ADAPTER_BYTES = Buffer.from('fixture-adapter')
+const CONFIG_BYTES = Buffer.from('{"lora_parameters":{"rank":4}}\n')
 
 function assertWire(body: Record<string, unknown>) {
   for (const key of Object.keys(body)) assert.ok(WIRE.has(key), key)
@@ -47,20 +49,29 @@ async function paired(scopes: string[], subjectId = subject, install = 'fixture_
   const base_sha256 = await baseModelDigest(base)
   if (!base_sha256) throw Error('fixture base')
   const adapter_sha256 = createHash('sha256').update(ADAPTER_BYTES).digest('hex')
+  const adapter_config_sha256 = createHash('sha256').update(CONFIG_BYTES).digest('hex')
   const pairs = createFilePairStore(join(dir, 'pairs.json'))
   const ch = await createPairingChallenge({loadCredential: async () => 'tarx_cli_' + 'f'.repeat(64), install_id: install, store: pairs, fetcher: (async () => new Response(JSON.stringify({ok: true, subject_id: subjectId}))) as typeof fetch})
   if (!ch.ok) throw Error('fixture')
   await approvePairingChallenge(ch.challenge, pairs, Date.now(), scopes)
   const captured: {request: RunnerRequest; jsonl: string}[] = []
   let release: ((result: RunnerResult) => void) | undefined
-  let runnerResult: RunnerResult = {ok: true, status: 'trained', adapter_sha256, base_sha256, base_control_passed: false, candidate_control_passed: true}
-  const runner = async (_config: unknown, request: RunnerRequest, jsonl: string) => {
+  let runnerResult: RunnerResult = {ok: true, status: 'trained', adapter_sha256, adapter_config_sha256, base_sha256, base_control_passed: false, candidate_control_passed: true}
+  const runner = async (_config: unknown, request: RunnerRequest, jsonl: string, signal?: AbortSignal) => {
     captured.push({request, jsonl})
-    if (release) await new Promise<RunnerResult>((done) => { release = done })
+    if (release) {
+      await new Promise<void>((done) => {
+        const finish = () => done()
+        signal?.addEventListener('abort', finish, {once: true})
+        release = () => finish()
+      })
+      if (signal?.aborted) return {ok: false, status: 'failed' as const, error: 'interrupted'}
+    }
     await mkdir(request.adapter_path, {recursive: true, mode: 0o700})
     await chmod(request.adapter_path, 0o700)
     await writeFile(join(request.adapter_path, 'adapters.safetensors'), ADAPTER_BYTES, {mode: 0o600})
-    return {...runnerResult, adapter_sha256, base_sha256}
+    await writeFile(join(request.adapter_path, 'adapter_config.json'), CONFIG_BYTES, {mode: 0o600})
+    return {...runnerResult, adapter_sha256, adapter_config_sha256, base_sha256}
   }
   const learning = createLearningController({file: join(dir, 'learning.json'), stateRoot: join(dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: base, sandboxWrap: (argv) => argv}, runner})
   const listener = createPairedSessionListener({host: '127.0.0.1', port: 0, allowedOrigins: new Set([origin]), pairStore: pairs, ownerStore: createFileOwnerStore(join(dir, 'owners.json')), eveClient: () => ({attach: () => ({async *stream() {}})}), readiness: async () => ({config_valid: true, worker_reachable: false, model_responsive: false, tools: [], healthy: false}), learning})
@@ -71,7 +82,7 @@ async function paired(scopes: string[], subjectId = subject, install = 'fixture_
   const post = (body: unknown, hdr: Record<string, string> = {}) => fetch(baseURL + '/personal-learning', {method: 'POST', headers: {origin, 'content-type': 'application/json', authorization: 'Bearer ' + token, ...hdr}, body: JSON.stringify(body)})
   return {
     listener, dir, base, baseURL, post, token, captured, learning, pairs, challenge: ch.challenge,
-    hold: () => { let done: (result: RunnerResult) => void = () => {}; const gate = new Promise<RunnerResult>((resolve) => { done = resolve }); release = (result) => done(result); return gate },
+    hold: () => { let done: () => void = () => {}; const gate = new Promise<void>((resolve) => { done = resolve }); release = () => done(); return gate },
     setRunner: (result: Partial<RunnerResult>) => { runnerResult = {...runnerResult, ...result} },
     revoke: () => revokePairing(createHash('sha256').update(ch.challenge).digest('hex'), pairs),
   }
@@ -121,7 +132,7 @@ test('train returns 202 immediately and a finished duplicate does not run again'
     const cap = f.captured[0]
     assert.match(cap.request.owner, /^[a-f0-9]{64}$/)
     assert.equal(cap.request.adapter_path.endsWith('/versions/' + req), true)
-    assert.equal(cap.request.iterations, 64)
+    assert.equal(cap.request.iterations, 128)
     assert.deepEqual(cap.jsonl.trim().split('\n').map((line) => JSON.parse(line)), [{prompt: 'call me Cedar', response: 'Okay, Cedar.'}])
     const again = await f.post({action: 'train', request_id: req})
     assert.equal(again.status, 200)
@@ -147,7 +158,10 @@ test('a running duplicate stays 202 and a second owner is busy', async () => {
     const second = await f.learning.handle(other, ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})
     assert.equal(second.code, 409)
     assert.equal(f.captured.length, 1)
-  } finally { await f.listener.close() }
+  } finally {
+    await f.post({action: 'pause'}).catch(() => {})
+    await f.listener.close()
+  }
 })
 
 test('candidate requires candidate_control_passed; base_control is diagnostic only', async () => {
@@ -195,21 +209,27 @@ test('a failed candidate retains the previously active version', async () => {
   } finally { await f.listener.close() }
 })
 
-test('restart marks an unfinished job interrupted and does not rerun it', async () => {
+test('a live same-process lease stays training and is not rerun', async () => {
   const f = await paired(['personal_chat', 'personal_learning'])
   try {
     await f.post({action: 'add_example', example_id: randomUUID(), prompt: 'p', response: 'r'})
     f.hold()
     const req = randomUUID()
     assert.equal((await f.post({action: 'train', request_id: req})).status, 202)
+    const ns = ownerNamespace(subject, 'fixture_install')
     const restarted = createLearningController({file: join(f.dir, 'learning.json'), stateRoot: join(f.dir, 'state'), config: {interpreter: '/usr/bin/python3', runnerScript: '/opt/tarx/personal_learning_mlx.py', basePath: f.base, sandboxWrap: (argv) => argv}, runner: async () => { throw Error('rerun') }})
-    const status = await restarted.handle(ownerNamespace(subject, 'fixture_install'), ['personal_chat'], {action: 'status'})
-    assert.equal(status.body.state, 'interrupted')
-    const again = await restarted.handle(ownerNamespace(subject, 'fixture_install'), ['personal_learning'], {action: 'train', request_id: req})
-    assert.equal(again.code, 200)
-    assert.equal(again.body.state, 'interrupted')
+    const status = await restarted.handle(ns, ['personal_chat'], {action: 'status'})
+    assert.equal(status.body.state, 'training')
+    const again = await restarted.handle(ns, ['personal_learning'], {action: 'train', request_id: req})
+    assert.equal(again.code, 202)
+    assert.equal(again.body.state, 'training')
+    const stolen = await restarted.handle(ns, ['personal_learning'], {action: 'train', request_id: randomUUID()})
+    assert.equal(stolen.code, 409)
     assert.equal(f.captured.length, 1)
-  } finally { await f.listener.close() }
+  } finally {
+    await f.post({action: 'pause'}).catch(() => {})
+    await f.listener.close()
+  }
 })
 
 test('pause or revoke during a job discards a late completion', async () => {
@@ -382,11 +402,11 @@ test('darwin trainer launch uses sandbox-exec and refuses a raw interpreter', as
 
 test('active adapter is served from disk across a new controller, and the other owner stays isolated', async () => {
   const f = await paired(['personal_chat', 'personal_learning'])
-  const seen: {body: {adapters?: string; messages: {content: string}[]}}[] = []
+  const seen: {body: {model?: string; adapters?: string; messages: {content: string}[]}}[] = []
   const model = createServer(async (req, res) => {
     let raw = ''
     for await (const chunk of req) raw += chunk
-    seen.push({body: JSON.parse(raw) as {adapters?: string; messages: {content: string}[]}})
+    seen.push({body: JSON.parse(raw) as {model?: string; adapters?: string; messages: {content: string}[]}})
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({choices: [{message: {content: 'fixture reply'}}]}))
   })
@@ -410,6 +430,8 @@ test('active adapter is served from disk across a new controller, and the other 
       const first = await turn(f.token, 'owner A phrase')
       assert.equal(first.status, 200)
       assert.equal(seen[0].body.adapters, adapter)
+      assert.equal(seen[0].body.model, f.base)
+      assert.notEqual(seen[0].body.model, 'fixture')
       assert.equal(JSON.stringify(seen[0].body).includes('call me'), false)
       const otherSubject = 'tvs_' + 'b'.repeat(32)
       const otherChallenge = await createPairingChallenge({loadCredential: async () => 'tarx_cli_' + 'f'.repeat(64), install_id: 'other_install', store: f.pairs, fetcher: (async () => new Response(JSON.stringify({ok: true, subject_id: otherSubject}))) as typeof fetch})
@@ -427,6 +449,12 @@ test('active adapter is served from disk across a new controller, and the other 
       assert.equal(closed.status, 503)
       assert.equal(seen.length, before)
       await chmod(join(adapter, 'adapters.safetensors'), 0o600)
+      await writeFile(join(adapter, 'adapter_config.json'), Buffer.from('{"lora_parameters":{"rank":8}}\n'), {mode: 0o600})
+      const configTamper = seen.length
+      const configClosed = await turn(f.token, 'owner A config tamper')
+      assert.equal(configClosed.status, 503)
+      assert.equal(seen.length, configTamper)
+      await writeFile(join(adapter, 'adapter_config.json'), CONFIG_BYTES, {mode: 0o600})
       const paused = await rebuilt.handle(ns, ['personal_chat', 'personal_learning'], {action: 'pause'})
       assert.equal(paused.body.state, 'candidate')
       const baseTurn = await turn(f.token, 'owner A paused')
@@ -437,4 +465,227 @@ test('active adapter is served from disk across a new controller, and the other 
     await f.listener.close()
     await new Promise<void>((resolve) => model.close(() => resolve()))
   }
+})
+
+test('base digest cache hits on unchanged file identity and misses after tamper', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-digest-'))
+  const base = join(dir, 'base')
+  await mkdir(base)
+  await writeFile(join(base, 'config.json'), '{"model_type":"qwen3"}\n')
+  await writeFile(join(base, 'model.safetensors'), 'fixture-weights')
+  resetBaseDigestObservations()
+  const first = await baseModelDigest(base)
+  const afterFirst = baseDigestObservations().fileReads
+  const second = await baseModelDigest(base)
+  assert.equal(second, first)
+  assert.equal(baseDigestObservations().fileReads, afterFirst)
+  assert.ok(afterFirst >= 2)
+  await writeFile(join(base, 'config.json'), '{"model_type":"qwen3","changed":true}\n')
+  const third = await baseModelDigest(base)
+  assert.notEqual(third, first)
+  assert.ok(baseDigestObservations().fileReads > afterFirst)
+})
+
+test('a second controller cannot steal a live job, and a dead owner is interrupted without a rerun', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-lease-'))
+  const base = join(dir, 'base')
+  await mkdir(base)
+  await writeFile(join(base, 'config.json'), '{}')
+  await writeFile(join(base, 'model.safetensors'), 'fixture')
+  let starts = 0
+  let releaseHang: () => void = () => {}
+  const input = {
+    file: join(dir, 'state.json'),
+    stateRoot: join(dir, 'artifacts'),
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv: string[]) => argv},
+    runner: async () => {
+      starts += 1
+      await new Promise<void>((resolve) => { releaseHang = resolve })
+      return {ok: false as const, status: 'failed' as const, error: 'released'}
+    },
+  }
+  const owner = 'a7'.repeat(32)
+  const scopes = ['personal_chat', 'personal_learning']
+  const first = createLearningController(input)
+  const second = createLearningController(input)
+  const childDir = await mkdtemp(join(tmpdir(), 'tarx-lease-proc-'))
+  const script = join(childDir, 'hold.mts')
+  const moduleUrl = new URL('./tarx-local-learning.ts', import.meta.url).href
+  await writeFile(script, `import {createLearningController} from ${JSON.stringify(moduleUrl)}
+import {mkdir,writeFile} from 'node:fs/promises'
+import {randomUUID} from 'node:crypto'
+setInterval(() => {}, 1000)
+const dir=process.argv[2]
+const base=dir+'/base'
+await mkdir(base)
+await writeFile(base+'/config.json','{}')
+await writeFile(base+'/model.safetensors','fixture')
+const id=randomUUID()
+await writeFile(dir+'/job', id)
+const learning=createLearningController({file:dir+'/state.json',stateRoot:dir+'/artifacts',config:{interpreter:'/usr/bin/python3',runnerScript:'/fixture.py',basePath:base,sandboxWrap:(argv)=>argv},runner:async()=>{await writeFile(dir+'/started','1'); return new Promise(()=>{})}})
+const owner='b8'.repeat(32)
+const scopes=['personal_chat','personal_learning']
+await learning.handle(owner,scopes,{action:'add_example',example_id:randomUUID(),prompt:'synthetic',response:'synthetic'})
+const train=await learning.handle(owner,scopes,{action:'train',request_id:id})
+if(train.code!==202) throw Error('child_train_'+train.code)
+await new Promise(()=>{})
+`)
+  const child = spawn(process.execPath, ['--experimental-strip-types', script, childDir], {stdio: ['ignore', 'pipe', 'pipe']})
+  let childErr = ''
+  child.stderr.on('data', (chunk) => { childErr += chunk.toString('utf8') })
+  try {
+    assert.equal((await first.handle(owner, scopes, {action: 'add_example', example_id: randomUUID(), prompt: 'synthetic', response: 'synthetic'})).code, 200)
+    const started = await first.handle(owner, scopes, {action: 'train', request_id: randomUUID()})
+    assert.equal(started.code, 202)
+    const status = await second.handle(owner, scopes, {action: 'status'})
+    assert.equal(status.body.state, 'training')
+    const stolen = await second.handle(owner, scopes, {action: 'train', request_id: randomUUID()})
+    assert.equal(stolen.code, 409)
+    assert.equal(starts, 1)
+
+    const ready = join(childDir, 'started')
+    for (let i = 0; i < 50; i++) {
+      if (await readFile(ready, 'utf8').catch(() => '') === '1') break
+      if (child.exitCode !== null) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(await readFile(ready, 'utf8').catch(() => ''), '1', childErr.slice(0, 400))
+    assert.equal(child.exitCode, null, childErr.slice(0, 400))
+    let parentStarts = 0
+    const parent = createLearningController({
+      file: join(childDir, 'state.json'),
+      stateRoot: join(childDir, 'artifacts'),
+      config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: join(childDir, 'base'), sandboxWrap: (argv) => argv},
+      runner: async () => { parentStarts += 1; return {ok: false, status: 'failed', error: 'parent_should_not_run'} },
+    })
+    const foreign = 'b8'.repeat(32)
+    const overlap = await parent.handle(foreign, scopes, {action: 'train', request_id: randomUUID()})
+    assert.equal(overlap.code, 409)
+    assert.equal(parentStarts, 0)
+    const job = (await readFile(join(childDir, 'job'), 'utf8')).trim()
+    const exited = new Promise((resolve) => child.once('exit', resolve))
+    child.kill('SIGKILL')
+    await exited
+    const after = await parent.handle(foreign, scopes, {action: 'status'})
+    assert.equal(after.body.state, 'interrupted')
+    const replay = await parent.handle(foreign, scopes, {action: 'train', request_id: job})
+    assert.equal(replay.code, 200)
+    assert.equal(replay.body.state, 'interrupted')
+    assert.equal(parentStarts, 0)
+  } finally {
+    releaseHang()
+    const ownLease = join(dir, 'artifacts', 'training-lease.json')
+    for (let i = 0; i < 50; i++) {
+      if (await readFile(ownLease, 'utf8').then(() => false, () => true)) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolve) => child.once('exit', resolve))
+      child.kill('SIGKILL')
+      await exited
+    }
+    for (const target of [dir, childDir]) {
+      for (let i = 0; i < 5; i++) {
+        try { await rm(target, {recursive: true, force: true}); break }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY' || i === 4) throw error
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+      }
+    }
+  }
+})
+
+test('an uncertain lease fails closed and is left in place', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-lease-uncertain-'))
+  const base = join(dir, 'base')
+  const artifacts = join(dir, 'artifacts')
+  await mkdir(base)
+  await mkdir(artifacts, {mode: 0o700})
+  await writeFile(join(base, 'config.json'), '{}')
+  await writeFile(join(base, 'model.safetensors'), 'fixture')
+  const lease = join(artifacts, 'training-lease.json')
+  const body = JSON.stringify({pid: -1, namespace: '', job_id: '', nonce: 'uncertain'})
+  await writeFile(lease, body, {mode: 0o600})
+  const learning = createLearningController({
+    file: join(dir, 'state.json'),
+    stateRoot: artifacts,
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv) => argv},
+    runner: async () => { throw Error('uncertain_lease_ran') },
+  })
+  try {
+    const blocked = await learning.handle('c9'.repeat(32), ['personal_chat', 'personal_learning'], {action: 'add_example', example_id: randomUUID(), prompt: 'synthetic', response: 'synthetic'})
+    assert.equal(blocked.code, 200)
+    const train = await learning.handle('c9'.repeat(32), ['personal_chat', 'personal_learning'], {action: 'train', request_id: randomUUID()})
+    assert.equal(train.code, 409)
+    assert.equal(await readFile(lease, 'utf8'), body)
+  } finally {
+    await rm(dir, {recursive: true, force: true})
+  }
+})
+
+test('pause aborts the runner but the lease stays until that runner settles', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-lease-pause-'))
+  const base = join(dir, 'base')
+  await mkdir(base)
+  await writeFile(join(base, 'config.json'), '{}')
+  await writeFile(join(base, 'model.safetensors'), 'fixture')
+  let finish: () => void = () => {}
+  let aborted = false
+  const learning = createLearningController({
+    file: join(dir, 'state.json'),
+    stateRoot: join(dir, 'artifacts'),
+    config: {interpreter: '/usr/bin/python3', runnerScript: '/fixture.py', basePath: base, sandboxWrap: (argv) => argv},
+    runner: async (_config, _request, _jsonl, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => {
+        finish = resolve
+        signal?.addEventListener('abort', () => { aborted = true }, {once: true})
+      })
+      return {ok: false, status: 'failed', error: 'interrupted'}
+    },
+  })
+  const lease = join(dir, 'artifacts', 'training-lease.json')
+  const owner = 'd1'.repeat(32)
+  const scopes = ['personal_chat', 'personal_learning']
+  try {
+    assert.equal((await learning.handle(owner, scopes, {action: 'add_example', example_id: randomUUID(), prompt: 'synthetic', response: 'synthetic'})).code, 200)
+    assert.equal((await learning.handle(owner, scopes, {action: 'train', request_id: randomUUID()})).code, 202)
+    assert.equal((await learning.handle(owner, scopes, {action: 'pause'})).code, 200)
+    assert.equal(aborted, true)
+    assert.match(await readFile(lease, 'utf8'), /"pid":/)
+    finish()
+    let gone = false
+    for (let i = 0; i < 50; i++) {
+      if (await readFile(lease, 'utf8').then(() => false, () => true)) { gone = true; break }
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(gone, true)
+  } finally {
+    finish()
+    await rm(dir, {recursive: true, force: true})
+  }
+})
+
+test('venv python keeps its prefix when the interpreter path is a symlink', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tarx-venv-'))
+  const created = await new Promise<number>((resolve) => {
+    const child = spawn('python3', ['-m', 'venv', '--without-pip', join(dir, 'venv')], {stdio: 'ignore'})
+    child.once('exit', (code) => resolve(code ?? 1))
+  })
+  if (created !== 0) return
+  const py = join(dir, 'venv', 'bin', 'python3')
+  const info = await lstat(py).catch(() => lstat(join(dir, 'venv', 'bin', 'python')))
+  const interpreter = info.isSymbolicLink() ? py : join(dir, 'venv', 'bin', 'python')
+  assert.equal((await lstat(interpreter)).isSymbolicLink(), true)
+  const script = join(dir, 'prefix.py')
+  const prefixFile = join(dir, 'prefix.txt')
+  await writeFile(script, `import json,sys\nopen(${JSON.stringify(prefixFile)},'w').write(sys.prefix)\nprint(json.dumps({"ok":False,"status":"failed","error":"venv_prefix"}))\n`)
+  const ns = 'ab'.repeat(32)
+  const job = randomUUID()
+  const state = join(dir, 'state')
+  const request = {action: 'train' as const, base_path: dir, state_root: state, owner: ns, job_id: job, examples_path: join(state, ns, 'examples', job + '.jsonl'), adapter_path: join(state, ns, 'versions', job), iterations: 128}
+  const result = await createSubprocessRunner()({interpreter, runnerScript: script, basePath: dir, sandboxWrap: (argv) => argv, deadlineMs: 8000}, request, '{}\n')
+  assert.equal(result.error, 'venv_prefix')
+  const {realpath} = await import('node:fs/promises')
+  assert.equal(await realpath(await readFile(prefixFile, 'utf8')), await realpath(join(dir, 'venv')))
 })

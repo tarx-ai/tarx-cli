@@ -1,5 +1,5 @@
 /** Operator-owned configuration only; never a browser URL, model or credential. */
-import {access,readFile,stat,realpath} from 'node:fs/promises'
+import {access,lstat,readFile,stat,realpath} from 'node:fs/promises'
 import {constants} from 'node:fs'
 import {homedir} from 'node:os'
 import {join,resolve,relative,isAbsolute} from 'node:path'
@@ -35,10 +35,14 @@ export async function loadPersonalClient(home=homedir(),env:NodeJS.ProcessEnv=pr
 async function trustedInterpreter(value:unknown):Promise<string|undefined>{
  if(typeof value!=='string'||!isAbsolute(value)||/\s|\0/.test(value))return undefined
  try{
-  const linked=await realpath(value)
-  const info=await stat(linked)
-  if(!info.isFile()||(info.mode&0o111)===0)return undefined
-  return linked
+  const info=await lstat(value)
+  if(info.isSymbolicLink()){
+   const linked=await realpath(value)
+   const target=await lstat(linked)
+   if(!target.isFile()||(target.mode&0o111)===0)return undefined
+  }else if(!info.isFile()||(info.mode&0o111)===0)return undefined
+  // Keep the venv path. realpath would drop pyvenv.cfg.
+  return value
  }catch{return undefined}
 }
 
