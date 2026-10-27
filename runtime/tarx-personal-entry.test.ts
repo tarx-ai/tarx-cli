@@ -55,3 +55,17 @@ test('unsafe or broken owner profile and outside-home credential fail closed',as
   await writeFile(profile,JSON.stringify({url:'http://localhost:12',key_file:'/etc/hosts'}));assert.equal(await loadPersonalClient(home,{}),undefined)
  }finally{await rm(home,{recursive:true,force:true})}
 })
+
+test('real child transport bypasses NODE_USE_ENV_PROXY and never sends private body/key to proxy',async()=>{
+ let proxied=0,local=0
+ const proxy=createServer((_q,r)=>{proxied++;r.end('{}')})
+ const model=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;assert.equal(req.headers.authorization,'Bearer LOCAL_FIXTURE_KEY');assert.equal(JSON.parse(raw).messages[0].content,'synthetic private');local++;res.end(JSON.stringify({choices:[{message:{content:'OK'}}]}))})
+ await new Promise<void>(r=>proxy.listen(0,'127.0.0.1',r));await new Promise<void>(r=>model.listen(0,'127.0.0.1',r));const p=proxy.address(),m=model.address();assert.ok(p&&m&&typeof p!=='string'&&typeof m!=='string')
+ try{
+  const {spawn}=await import('node:child_process')
+  const code=`import {createLoopbackPersonalClient} from ${JSON.stringify(new URL('./tarx-personal-turn.ts',import.meta.url).href)};const c=createLoopbackPersonalClient({baseURL:'http://127.0.0.1:${m.port}',model:'fixture',apiKey:'LOCAL_FIXTURE_KEY'});if(await c([{role:'user',content:'synthetic private'}])!=='OK')process.exitCode=1;`
+  const endpoint=`http://127.0.0.1:${p.port}`
+  const child=spawn(process.execPath,['--experimental-strip-types','--input-type=module','-e',code],{env:{...process.env,NODE_USE_ENV_PROXY:'1',HTTP_PROXY:endpoint,HTTPS_PROXY:endpoint,http_proxy:endpoint,https_proxy:endpoint,NO_PROXY:'',no_proxy:''},stdio:'ignore'})
+  const exit=await new Promise<number|null>((resolve,reject)=>{child.on('error',reject);child.on('exit',resolve)});assert.equal(exit,0);assert.equal(local,1);assert.equal(proxied,0)
+ }finally{await new Promise<void>(r=>proxy.close(()=>r()));await new Promise<void>(r=>model.close(()=>r()))}
+})

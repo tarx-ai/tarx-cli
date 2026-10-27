@@ -97,7 +97,7 @@ export function createLoopbackPersonalClient(input: {
     const target = new URL(String(url))
     return new Promise<Response>((resolve, reject) => {
       const req = (target.protocol === 'https:' ? httpsRequest : httpRequest)(target, {
-        method: 'POST', headers: init?.headers as Record<string,string>, signal: init?.signal ?? undefined,
+        method: 'POST', agent: false, headers: init?.headers as Record<string,string>, signal: init?.signal ?? undefined,
       }, res => {
         const chunks: Buffer[] = []; let bytes = 0
         res.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) { req.destroy(); reject(Error('reply_too_large')) } else chunks.push(chunk) })
