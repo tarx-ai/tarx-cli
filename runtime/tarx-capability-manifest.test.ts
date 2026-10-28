@@ -286,3 +286,24 @@ test('HTTP: untrusted origin and revoked pairing are refused', async () => {
     await f.listener.close()
   }
 })
+
+// Review regressions: metadata input is not a safe identifier or readiness attestation.
+test('review: contradictory readiness never marks a capability available', () => {
+  for (const flag of ['config_valid', 'worker_reachable', 'model_responsive'] as const) {
+    const readiness = {config_valid:true, worker_reachable:true, model_responsive:true, healthy:true}
+    readiness[flag] = false
+    const manifest = buildCapabilityManifest({discovered_tools:['read_launch_note'], granted_scopes:['read_launch_note'], readiness, declared:[READ_LAUNCH_NOTE_CAPABILITY]})
+    assert.equal(manifest.runtime.healthy, false)
+    assert.equal(entry(manifest, 'local.read_launch_note')!.status, 'unavailable')
+  }
+})
+test('review: discovery cannot disclose paths or sensitive identifiers and output is bounded', () => {
+  const manifest = buildCapabilityManifest({
+    discovered_tools:['/Users/private/data', 'session_id', 'accessToken', 'someone@example.com', ...Array.from({length:100}, (_,i)=>`tool_${i}`)],
+    granted_scopes:[], readiness:{config_valid:true,worker_reachable:true,model_responsive:true,healthy:true},
+    declared:[], declared_unknown_adapters:[{capability_id:'/Users/private/adapter'}],
+  })
+  assert.equal(manifest.capabilities.length,64)
+  const text=serializeManifest(manifest)
+  for (const value of ['/Users/', 'session_id', 'accessToken', '@']) assert.equal(text.includes(value),false)
+})

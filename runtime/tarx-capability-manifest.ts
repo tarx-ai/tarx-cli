@@ -113,7 +113,11 @@ export type ManifestInput = {
   declared_unknown_adapters?: readonly { capability_id: string; execution_location?: ExecutionLocation }[]
 }
 
-const SENSITIVE_KEY = /\b(path|dir|home|token|secret|key|credential|cookie|authorization|bearer|subject|install|session|password|memory|private|origin)\b/i
+const SENSITIVE_KEY = /(?:^|[^a-z0-9])(path|dir|home|token|secret|key|credential|cookie|authorization|bearer|subject|install|session|password|memory|private|origin)(?:$|[^a-z0-9])/i
+const MAX_CAPABILITIES = 64
+function safeIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/.test(value) && !SENSITIVE_KEY.test(value.replace(/([a-z])([A-Z])/g, '$1_$2'))
+}
 
 /** Reject any declared metadata that would leak secrets or paths through the
  *  schema. Keys and string values are both checked; we fail closed to `unknown`
@@ -150,14 +154,17 @@ function receiptIsSafe(receipt: ReceiptContract): boolean {
  * degrades to the most conservative honest status.
  */
 export function buildCapabilityManifest(input: ManifestInput): CapabilityManifest {
-  const discovered = new Set(input.discovered_tools.map((t) => String(t).trim()).filter(Boolean))
+  // Discovery names are untrusted metadata: never echo paths or credential labels.
+  const discovered = new Set(input.discovered_tools.filter(safeIdentifier).slice(0, MAX_CAPABILITIES))
   const granted = new Set(input.granted_scopes.map((s) => String(s).trim()).filter(Boolean))
-  const healthy = input.readiness.healthy === true
+  const healthy = input.readiness.healthy === true && input.readiness.config_valid === true
+    && input.readiness.worker_reachable === true && input.readiness.model_responsive === true
 
   const capabilities: CapabilityEntry[] = []
   const declaredActions = new Set<string>()
 
-  for (const cap of input.declared) {
+  for (const cap of input.declared.slice(0, MAX_CAPABILITIES)) {
+    if (!safeIdentifier(cap.capability_id) || !safeIdentifier(cap.supported_action)) continue
     declaredActions.add(cap.supported_action)
     // A declared capability with unsafe metadata is demoted to `unknown`
     // rather than risk serializing a path or secret.
@@ -209,6 +216,8 @@ export function buildCapabilityManifest(input: ManifestInput): CapabilityManifes
 
   // Declared-unknown adapters (e.g. cognitive): always `unknown`, no action.
   for (const adapter of input.declared_unknown_adapters ?? []) {
+    if (capabilities.length >= MAX_CAPABILITIES) break
+    if (!safeIdentifier(adapter.capability_id)) continue
     capabilities.push({
       capability_id: adapter.capability_id,
       execution_location: adapter.execution_location ?? 'unknown',
@@ -223,6 +232,7 @@ export function buildCapabilityManifest(input: ManifestInput): CapabilityManifes
   // Discovered-but-undeclared tools: surfaced as `unknown` so a consumer never
   // treats an unrecognized tool as catalog-connected.
   for (const tool of discovered) {
+    if (capabilities.length >= MAX_CAPABILITIES) break
     if (declaredActions.has(tool)) continue
     capabilities.push({
       capability_id: tool,
