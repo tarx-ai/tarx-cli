@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.4.2"
+TARX_VERSION="1.5.0"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -2162,7 +2162,7 @@ try:
             if member.size>2_000_000:raise ValueError('runtime_file_too_large')
             data=source.extractfile(member).read()
             (dest/relative.name).write_bytes(data)
-    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts','tarx-browser-bridge.ts']
+    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts','tarx-browser-bridge.ts','tarx-local-learning.ts','personal_learning_mlx.py']
     if any(not(dest/name).is_file() for name in required):raise ValueError('incomplete_runtime_archive')
     package=json.loads((dest/'package.json').read_text())
     if package.get('dependencies',{}).get('eve')!='0.83.2':raise ValueError('unexpected_runtime_version')

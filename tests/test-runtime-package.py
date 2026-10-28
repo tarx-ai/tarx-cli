@@ -30,7 +30,7 @@ else:shutil.copyfile(os.environ['TEST_RUNTIME_ARCHIVE'],out)
   return subprocess.run(['sh',str(ROOT/'tarx'),'runtime','install'],env={**self.env,**extra},text=True,capture_output=True)
  def test_success_activates_complete_source_and_locked_dependencies(self):
   r=self.run_install();self.assertEqual(r.returncode,0,r.stderr)
-  current=(self.home/'current').resolve();self.assertTrue((current/'tarx-runtime-entry.ts').is_file());self.assertTrue((self.home/'old'/'sentinel').exists())
+  current=(self.home/'current').resolve();self.assertTrue((current/'tarx-runtime-entry.ts').is_file());self.assertTrue((current/'personal_learning_mlx.py').is_file());self.assertTrue((current/'tarx-local-learning.ts').is_file());self.assertTrue((self.home/'old'/'sentinel').exists())
   self.assertIn('--ignore-scripts',(self.base/'npm-args').read_text());self.assertIn('No service, worker or model was started',r.stdout)
  def test_failed_dependency_install_preserves_previous_runtime(self):
   r=self.run_install(FAIL_NPM='1');self.assertNotEqual(r.returncode,0);self.assertEqual((self.home/'current').resolve(),self.home/'old')

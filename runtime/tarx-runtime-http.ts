@@ -4,9 +4,24 @@ import {createSessionListener,type ListenerDeps} from './tarx-eve-listener.ts'
 import type {createBoundedTaskController} from './tarx-bounded-task.ts'
 import {claimPairing,pairingIdentityResolver,pairingTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
 import {validatePersonalTurn,runPersonalTurn,type PersonalClient} from './tarx-personal-turn.ts'
-export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient}){
+import {createLearningController,ownerNamespace,type AdapterResolution} from './tarx-local-learning.ts'
+export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient;learning?:ReturnType<typeof createLearningController>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
   const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
+  if(path==='/personal-learning'){
+   // Owner-isolated local training. Namespace derived server-side from pairing.
+   const origin=typeof req.headers.origin==='string'?req.headers.origin:''
+   if(!deps.allowedOrigins.has(origin))return reply(403,{error:'untrusted_origin'})
+   const identity=await pairingTaskAccess(req,deps.pairStore);if(!identity)return reply(401,{error:'missing_identity'})
+   if(req.method!=='POST')return reply(405,{error:'method_not_allowed'})
+   if(!deps.learning)return reply(503,{error:'not_configured'})
+   if(!/^application\/json(?:;|$)/i.test(String(req.headers['content-type']??'')))return reply(415,{error:'json_required'})
+   let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>262144)return reply(413,{error:'body_too_large'})}
+   let body:any;try{body=JSON.parse(raw)}catch{return reply(400,{error:'invalid_json'})}
+   const ns=ownerNamespace(identity.subject_id,identity.install_id)
+   const result=await deps.learning.handle(ns,identity.task_scopes,body,{stillAuthorized:async()=>Boolean(await pairingTaskAccess(req,deps.pairStore))})
+   return reply(result.code,result.body)
+  }
   if(path==='/personal-turn'){
    // Paired browser -> owned local personal model. Private; never hosted/remote.
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''
@@ -19,7 +34,13 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
    let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>32768)return reply(413,{error:'body_too_large'})}
    let body:any;try{body=JSON.parse(raw)}catch{return reply(400,{error:'invalid_json'})}
    const valid=validatePersonalTurn(body);if(!valid.ok)return reply(400,{error:'invalid_turn'})
-   const result=await runPersonalTurn(deps.personalClient,{messages:valid.messages})
+   let local:{adapters:string;model:string}|undefined
+   if(deps.learning){
+    const resolved:AdapterResolution=await deps.learning.resolveAdapter(ownerNamespace(identity.subject_id,identity.install_id))
+    if(resolved.kind==='closed')return reply(503,{error:'personal_runtime_unavailable'})
+    if(resolved.kind==='adapter')local={adapters:resolved.path,model:resolved.model}
+   }
+   const result=await runPersonalTurn(deps.personalClient,{messages:valid.messages},local)
    if(!result.ok)return reply(result.error==='personal_runtime_unavailable'?503:502,{error:result.error})
    if(!await pairingTaskAccess(req,deps.pairStore))return reply(401,{error:'missing_identity'})
    return reply(200,{role:'assistant',content:result.content})
