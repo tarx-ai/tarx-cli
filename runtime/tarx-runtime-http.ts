@@ -5,6 +5,7 @@ import type {createBoundedTaskController} from './tarx-bounded-task.ts'
 import {claimPairing,pairingIdentityResolver,pairingTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
 import {validatePersonalTurn,runPersonalTurn,type PersonalClient} from './tarx-personal-turn.ts'
 import {createLearningController,ownerNamespace,type AdapterResolution} from './tarx-local-learning.ts'
+import {buildCapabilityManifest,READ_LAUNCH_NOTE_CAPABILITY,COGNITIVE_ADAPTER_UNKNOWN} from './tarx-capability-manifest.ts'
 export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient;learning?:ReturnType<typeof createLearningController>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
   const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
@@ -52,6 +53,33 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
    let discovered:string[]=[];try{discovered=deps.tasks&&deps.taskDiscovery?await deps.taskDiscovery():[]}catch{return reply(503,{error:'task_discovery_unavailable'})}
    const available=discovered.filter(name=>name==='read_launch_note')
    return reply(200,{available_tasks:available,permitted_tasks:available.filter(name=>identity.task_scopes.includes(name))})
+  }
+  if(path==='/capability-manifest'){
+   // Bounded, versioned, read-only capability metadata for channel/web
+   // consumers. Same auth/origin/pairing gate as the other authorized routes;
+   // only already-authorized metadata is exposed. No secrets/paths/private
+   // context. Built from REAL discovery + granted scopes + the injected
+   // readiness probe; an unreachable runtime yields `unavailable`, and the
+   // cognitive adapter stays `unknown` (never probed here).
+   if(req.method!=='GET')return reply(405,{error:'method_not_allowed'})
+   if(!deps.allowedOrigins.has(String(req.headers.origin??'')))return reply(403,{error:'untrusted_origin'})
+   const identity=await pairingTaskAccess(req,deps.pairStore);if(!identity)return reply(401,{error:'missing_identity'})
+   // Discovery is the capability authority; a discovery failure is reported as
+   // an unreachable runtime, not an empty success.
+   let discovered:string[]
+   try{discovered=deps.tasks&&deps.taskDiscovery?await deps.taskDiscovery():[]}catch{return reply(503,{error:'capability_discovery_unavailable'})}
+   // Readiness is a real probe; its failure => runtime treated as unreachable
+   // (nothing inferred healthy from an open port).
+   let readiness
+   try{readiness=await deps.readiness()}catch{readiness={config_valid:false,worker_reachable:false,model_responsive:false,tools:[] as string[],healthy:false}}
+   const manifest=buildCapabilityManifest({
+    discovered_tools:discovered,
+    granted_scopes:identity.task_scopes,
+    readiness:{config_valid:readiness.config_valid,worker_reachable:readiness.worker_reachable,model_responsive:readiness.model_responsive,healthy:readiness.healthy},
+    declared:[READ_LAUNCH_NOTE_CAPABILITY],
+    declared_unknown_adapters:[COGNITIVE_ADAPTER_UNKNOWN],
+   })
+   return reply(200,manifest)
   }
   if(path==='/tasks'||path.startsWith('/tasks/')){
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''
