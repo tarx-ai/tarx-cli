@@ -91,6 +91,24 @@ class RouteLabel(unittest.TestCase):
         self.assertIn('· Unavailable', out)
 
 
+    def test_mixed_case_compute_reports_supercomputer_from_personal_mode(self):
+        for prompt in ('/compute public task', '/COMPUTE public task', '/Compute public task'):
+            with self.subTest(prompt=prompt):
+                ns = load()
+                out, calls = [], []
+                ns['say'] = out.append
+                ns['terminal_ui'] = lambda: False
+                ns['chat_destination'] = lambda: ('personal', 'http://127.0.0.1:17735')
+                def http(method, url, body=None, headers=None, timeout=20):
+                    calls.append(url)
+                    return 200, {'choices': [{'message': {'content': 'done'}, 'finish_reason': 'stop'}]}
+                ns['http'] = http
+                self.assertEqual(ns['send_once'](CLOUD, prompt), 0)
+                self.assertEqual(calls, [ns['DOOR']])
+                self.assertIn('· Supercomputer', out)
+                self.assertNotIn('· This computer', out)
+
+
 class Brand(unittest.TestCase):
     def test_truecolor_tier(self):
         ns = load()

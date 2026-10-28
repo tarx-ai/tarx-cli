@@ -4,7 +4,7 @@
 
 set -e
 
-TARX_VERSION="1.5.1"
+TARX_VERSION="1.5.2"
 
 # ── Platform paths ───────────────────────────────────────────────────
 
@@ -1116,7 +1116,8 @@ def send_once(key, prompt):
     # supercomputer; otherwise it is the selected destination mode. We read
     # this at dispatch time so the post-reply label reflects the real send,
     # and we never relabel earlier turns.
-    is_compute = prompt.strip().split(None, 1)[0:1] == ["/compute"]
+    command = prompt.strip().split(None, 1)
+    is_compute = bool(command) and command[0].lower() == "/compute"
     used_mode = "supercomputer" if is_compute else chat_destination()[0]
     kind, text = reply_for(key, prompt)
     if kind == "expired":
