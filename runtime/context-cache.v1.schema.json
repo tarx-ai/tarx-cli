@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tarx:context-cache:1",
+  "title": "TARX context cache v1; authorization remains server-owned",
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "owner_namespace": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "channel_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "purpose": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "grant_revision": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        }
+      },
+      "required": [
+        "owner_namespace",
+        "workspace_id",
+        "channel_id",
+        "purpose",
+        "grant_revision"
+      ]
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "fact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "kind": {
+          "enum": [
+            "goal",
+            "decision",
+            "constraint",
+            "evidence",
+            "next_action",
+            "summary"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "classification": {
+          "enum": [
+            "private_local",
+            "export_eligible"
+          ]
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "schema_version",
+        "fact_id",
+        "scope",
+        "kind",
+        "revision",
+        "source_version",
+        "classification",
+        "body",
+        "expires_at",
+        "deleted_at"
+      ]
+    },
+    "pack_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "recipient": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "location": {
+              "enum": [
+                "this_computer",
+                "supercomputer"
+              ]
+            },
+            "provider_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "location",
+            "provider_id",
+            "model_id"
+          ]
+        },
+        "policy_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "prompt_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+        },
+        "fact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "uniqueItems": true,
+          "maxItems": 64
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 32768
+        }
+      },
+      "required": [
+        "schema_version",
+        "scope",
+        "recipient",
+        "policy_version",
+        "prompt_version",
+        "fact_ids",
+        "max_bytes"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/fact"
+    },
+    {
+      "$ref": "#/$defs/pack_request"
+    }
+  ],
+  "$comment": "Internal server-normalized envelopes. Owner, grants, provider/model selection and source trust must be derived and enforced server-side; never accept these as browser assertions."
+}
