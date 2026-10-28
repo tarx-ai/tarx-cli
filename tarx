@@ -17,19 +17,65 @@ esac
 TARX_MODELS="${TARX_DATA}/models"
 TARX_LOGS="${TARX_DATA}/logs"
 TARX_PID_DIR="${TARX_DATA}/pids"
-INFERENCE_PORT=11435
-MESH_PORT=11436
-EMBED_PORT=11437
-COGNITIVE_PORT=11438
+INFERENCE_PORT="${TARX_INFERENCE_PORT:-11435}"
+MESH_PORT="${TARX_MESH_PORT:-11436}"
+EMBED_PORT="${TARX_EMBED_PORT:-11437}"
+COGNITIVE_PORT="${TARX_COGNITIVE_PORT:-11438}"
 
 INFERENCE_MODEL="tarx-qwen2.5-7b-deep-Q4_K_M.gguf"
 EMBED_MODEL="nomic-embed-text-v1.5-f16.gguf"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+# Launch a service in the background, record its pid, and report whether the
+# launch itself succeeded. The first arg is the service name (for the pid file
+# and log); the rest is the command + args. A command that cannot be executed
+# (missing/not executable) makes this return non-zero so the caller can report
+# a failed start truthfully instead of assuming success.
+start_bg() {
+  _svc_name="$1"; shift
+  if ! command -v "$1" >/dev/null 2>&1 && [ ! -x "$1" ]; then
+    return 1
+  fi
+  "$@" > "${TARX_LOGS}/${_svc_name}.log" 2>&1 &
+  _bg_pid=$!
+  echo "$_bg_pid" > "$(pid_file "$_svc_name")"
+  # Give an immediately-failing launch a moment to exit, so we can detect it.
+  sleep "${TARX_START_PROBE_SECONDS:-0.2}" 2>/dev/null || sleep 1
+  if kill -0 "$_bg_pid" 2>/dev/null; then
+    return 0
+  fi
+  # Process already exited: treat as a failed launch.
+  rm -f "$(pid_file "$_svc_name")"
+  return 1
+}
+
 log() { printf '%s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 err() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Platform-aware guidance for a missing local inference engine. There is no
+# verified automatic local setup the CLI can perform (the model/update
+# endpoints are not live), so we state the dependency plainly and always keep
+# the browser alternative. No brew on Linux; no invented download URLs.
+llama_install_hint() {
+  case "$_os" in
+    Darwin)
+      printf 'llama-server not found. Install llama.cpp (e.g. "brew install llama.cpp") so local inference can run.'
+      ;;
+    Linux)
+      printf 'llama-server not found. Install llama.cpp from your package manager or https://github.com/ggml-org/llama.cpp so local inference can run.'
+      ;;
+    *)
+      printf 'llama-server not found. Install llama.cpp (see https://github.com/ggml-org/llama.cpp) so local inference can run.'
+      ;;
+  esac
+}
+
+# How to get a first answer without a local engine: the browser agent.
+browser_alternative_hint() {
+  printf 'Or use TARX in your browser at https://tarx.com/agent — no local engine required.'
+}
 
 ensure_dirs() {
   mkdir -p "$TARX_LOGS" "$TARX_PID_DIR" 2>/dev/null || true
@@ -56,6 +102,15 @@ is_running() {
 }
 
 find_llama_server() {
+  # Explicit override for pinned setups and tests. An empty value means
+  # "force not found"; a set path is used only if it is executable.
+  if [ "${TARX_LLAMA_SERVER+set}" = set ]; then
+    if [ -n "$TARX_LLAMA_SERVER" ] && [ -x "$TARX_LLAMA_SERVER" ]; then
+      echo "$TARX_LLAMA_SERVER"
+      return 0
+    fi
+    return 1
+  fi
   # Check common locations
   for _path in \
     /opt/homebrew/bin/llama-server \
@@ -90,48 +145,58 @@ cmd_start() {
   log "Starting TARX services..."
 
   _started=0
+  _already=0
+  # Mandatory inference capability: 1 once inference is running or started.
+  _inference_ok=0
+  _inference_problem=""
 
   # 1. Inference server (port 11435)
   if check_port $INFERENCE_PORT; then
     log "  Inference  (${INFERENCE_PORT}): already running"
+    _already=$(( _already + 1 ))
+    _inference_ok=1
   else
     _llama="$(find_llama_server)" || true
     _model_path="${TARX_MODELS}/${INFERENCE_MODEL}"
 
     if [ -z "$_llama" ]; then
-      warn "llama-server not found — install with: brew install llama.cpp"
+      log "  Inference  (${INFERENCE_PORT}): cannot start — $(llama_install_hint)"
+      _inference_problem="llama-server missing"
     elif [ ! -f "$_model_path" ]; then
-      warn "Inference model not found at ${_model_path}"
-      warn "Download with: tarx update --models"
+      log "  Inference  (${INFERENCE_PORT}): cannot start — inference model not found at ${_model_path}"
+      _inference_problem="model missing"
     else
-      "$_llama" \
+      if start_bg inference "$_llama" \
         --host 127.0.0.1 \
         --port $INFERENCE_PORT \
         --model "$_model_path" \
         --ctx-size 8192 \
         --parallel 2 \
-        --no-warmup \
-        > "${TARX_LOGS}/inference.log" 2>&1 &
-      echo $! > "$(pid_file inference)"
-      log "  Inference  (${INFERENCE_PORT}): starting (pid $!)"
-      _started=$(( _started + 1 ))
+        --no-warmup; then
+        log "  Inference  (${INFERENCE_PORT}): starting (pid $(cat "$(pid_file inference)"))"
+        _started=$(( _started + 1 ))
+        _inference_ok=1
+      else
+        log "  Inference  (${INFERENCE_PORT}): failed to launch — see ${TARX_LOGS}/inference.log"
+        _inference_problem="launch failed"
+      fi
     fi
   fi
 
   # 2. Embedding server (port 11437)
   if check_port $EMBED_PORT; then
     log "  Embeddings (${EMBED_PORT}): already running"
+    _already=$(( _already + 1 ))
   else
     _llama="$(find_llama_server)" || true
     _embed_path="${TARX_MODELS}/${EMBED_MODEL}"
 
     if [ -z "$_llama" ]; then
-      warn "llama-server not found — install with: brew install llama.cpp"
+      log "  Embeddings (${EMBED_PORT}): cannot start — $(llama_install_hint)"
     elif [ ! -f "$_embed_path" ]; then
-      warn "Embedding model not found at ${_embed_path}"
-      warn "Download with: tarx update --models"
+      log "  Embeddings (${EMBED_PORT}): cannot start — embedding model not found at ${_embed_path}"
     else
-      "$_llama" \
+      if start_bg embeddings "$_llama" \
         --host 127.0.0.1 \
         --port $EMBED_PORT \
         --model "$_embed_path" \
@@ -139,38 +204,49 @@ cmd_start() {
         --embeddings \
         --pooling mean \
         --parallel 1 \
-        --no-warmup \
-        > "${TARX_LOGS}/embeddings.log" 2>&1 &
-      echo $! > "$(pid_file embeddings)"
-      log "  Embeddings (${EMBED_PORT}): starting (pid $!)"
-      _started=$(( _started + 1 ))
+        --no-warmup; then
+        log "  Embeddings (${EMBED_PORT}): starting (pid $(cat "$(pid_file embeddings)"))"
+        _started=$(( _started + 1 ))
+      else
+        log "  Embeddings (${EMBED_PORT}): failed to launch — see ${TARX_LOGS}/embeddings.log"
+      fi
     fi
   fi
 
-  # 3. Mesh server (port 11436)
+  # 3. Mesh server (port 11436) — optional
   if check_port $MESH_PORT; then
     log "  Mesh       (${MESH_PORT}): already running"
+    _already=$(( _already + 1 ))
   else
     _mesh="$(find_mesh_binary)" || true
     if [ -z "$_mesh" ]; then
       log "  Mesh       (${MESH_PORT}): binary not found (optional)"
     else
-      TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" "$_mesh" \
-        > "${TARX_LOGS}/mesh.log" 2>&1 &
-      echo $! > "$(pid_file mesh)"
-      log "  Mesh       (${MESH_PORT}): starting (pid $!)"
-      _started=$(( _started + 1 ))
+      if TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" start_bg mesh "$_mesh"; then
+        log "  Mesh       (${MESH_PORT}): starting (pid $(cat "$(pid_file mesh)"))"
+        _started=$(( _started + 1 ))
+      else
+        log "  Mesh       (${MESH_PORT}): failed to launch (optional) — see ${TARX_LOGS}/mesh.log"
+      fi
     fi
   fi
 
+  log ""
   if [ $_started -gt 0 ]; then
-    log ""
     log "Waiting for services..."
     sleep 3
     cmd_status
-  else
-    log ""
+  elif [ $_already -gt 0 ] && [ -z "$_inference_problem" ]; then
     log "All services already running."
+  fi
+
+  # Mandatory inference must be runnable. If it is neither running nor started,
+  # report plainly and exit nonzero — never claim success when nothing runs.
+  if [ $_inference_ok -eq 0 ]; then
+    log ""
+    warn "Inference is not running (${_inference_problem:-unavailable}). TARX cannot answer locally."
+    warn "$(browser_alternative_hint)"
+    exit 1
   fi
 }
 
@@ -1776,7 +1852,7 @@ cmd_doctor() {
   if [ -n "$_llama" ]; then
     printf '  [OK] llama-server: %s\n' "$_llama"
   else
-    log "  [!!] llama-server not found — install with: brew install llama.cpp"
+    log "  [!!] $(llama_install_hint)"
     _issues=$((_issues + 1))
   fi
 
@@ -2259,7 +2335,7 @@ case "$_cmd" in
   spaces)    cmd_spaces "$@" ;;
   update)    cmd_update "$@" ;;
   uninstall) cmd_uninstall ;;
-  version)   cmd_version ;;
+  version|--version|-V)   cmd_version ;;
   tray)      cmd_tray ;;
   doctor)    cmd_doctor ;;
   help|--help|-h) cmd_help ;;
