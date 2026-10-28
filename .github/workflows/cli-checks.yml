@@ -35,6 +35,9 @@ jobs:
           python3 tests/test-terminal-ui.py
           python3 tests/test-conversation.py
           python3 tests/test-chat-destination.py
+      - name: Test composer geometry, route labels, brand and privacy boundaries
+        timeout-minutes: 3
+        run: timeout 120s python3 tests/test-composer-route.py
       - name: Test doctor states
         run: sh tests/test-doctor.sh
       - name: Test truthful startup and aliases

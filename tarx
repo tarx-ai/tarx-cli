@@ -502,6 +502,31 @@ def accent(text, code="36"):
     return text
 
 
+# ── TARX brand blue ──────────────────────────────────────────────────────
+# One shared brand color. True-color when the terminal advertises it, an
+# accessible 256-color fallback otherwise, and plain text under NO_COLOR or a
+# non-interactive terminal. No broad re-theming: this is the single source for
+# the brand accent.
+BRAND_BLUE_HEX = "#38ADFA"
+BRAND_BLUE_RGB = (56, 173, 250)
+# Nearest xterm-256 cube index to #38ADFA (cube levels 0/95/135/175/215/255):
+# r->95(1), g->175(3), b->255(5) => 16 + 36*1 + 6*3 + 5 = 75.
+BRAND_BLUE_256 = 75
+
+
+def brand_code():
+    """SGR foreground code for the brand blue, by terminal color capability."""
+    colorterm = os.environ.get("COLORTERM", "").lower()
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return "38;2;%d;%d;%d" % BRAND_BLUE_RGB
+    return "38;5;%d" % BRAND_BLUE_256
+
+
+def brand(text):
+    """Render text in the brand blue, honoring NO_COLOR and non-tty."""
+    return accent(text, brand_code())
+
+
 def input_frame(text, cursor, columns):
     # Horizontal viewport keeps the editable row inside narrow terminal bounds.
     # Retain the original Unicode/paste content; only its presentation is clipped.
@@ -534,9 +559,56 @@ def render_reply(text):
         return
     # Model output is untrusted terminal data, never terminal control sequences.
     safe = "".join(ch for ch in text if ch.isprintable() or ch in "\n\t")
-    say("\n" + accent("TARX", "1;36"))
+    say("\n" + brand("TARX"))
     say(safe)
     say("")
+
+
+# ── Truthful per-turn route labels ───────────────────────────────────────
+# A route is a processing-location fact, not a privacy guarantee. We never
+# print "Private": we state where a turn is set to run (before dispatch) and
+# where it actually ran (after the reply, from the real send outcome). Three
+# honest values only.
+ROUTE_THIS_COMPUTER = "This computer"
+ROUTE_SUPERCOMPUTER = "Supercomputer"
+ROUTE_UNAVAILABLE = "Unavailable"
+
+# Outcome of the most recent dispatch. Read only to label the turn that just
+# ran; never used to relabel earlier turns.
+LAST_ROUTE = None
+
+
+def route_name(mode):
+    """Selected processing location for a destination mode. Fails closed to
+    Unavailable for anything that cannot actually run locally or be sent."""
+    if mode == "personal":
+        return ROUTE_THIS_COMPUTER
+    if mode == "supercomputer":
+        return ROUTE_SUPERCOMPUTER
+    return ROUTE_UNAVAILABLE
+
+
+def selected_route():
+    """Where the next turn is set to run, before it is dispatched."""
+    mode, _ = chat_destination()
+    return route_name(mode)
+
+
+def actual_route(kind, mode):
+    """Where the turn actually ran, from the real send outcome. A failed or
+    rejected send did not produce a usable reply on its route, so it is
+    Unavailable rather than a false success label."""
+    if kind != "ok":
+        return ROUTE_UNAVAILABLE
+    return route_name(mode)
+
+
+def render_route(kind, mode):
+    """Print the actual route for the turn that just ran. No privacy claim."""
+    global LAST_ROUTE
+    label = actual_route(kind, mode)
+    LAST_ROUTE = label
+    say(accent("· " + label, "2"))
 
 
 def read_message():
@@ -550,18 +622,37 @@ def read_message():
     chars, cursor, pasted = [], 0, False
     width = min(96, __import__("shutil").get_terminal_size((80, 24)).columns - 1)
     mode, _ = chat_destination()
-    label = " PRIVATE · LOCAL " if mode == "personal" else " PRIVATE · BLOCKED " if mode == "personal_misconfigured" else " SUPERCOMPUTER "
+    # Selected processing location for this turn (pending until it runs). This
+    # is a routing fact, not a privacy guarantee, and does not relabel earlier
+    # turns. The actual route is shown after the reply from the send outcome.
+    label = " " + selected_route() + " · pending "
     top = "┌" + label + "─" * max(0, width - len(label) - 2) + "┐"
     bottom = "└" + "─" * (width - 2) + "┘"
     def paint():
         line, caret = input_frame("".join(chars), cursor, width)
-        sys.stdout.write("\r\x1b[2K" + accent(line) + "\r\x1b[%dC" % caret)
+        sys.stdout.write("\r\x1b[2K" + brand(line) + "\r\x1b[%dC" % caret)
         sys.stdout.flush()
-    def finish():
-        sys.stdout.write("\x1b[1B\r\n")
+    def collapse(message):
+        # Erase the three-row editing frame and leave exactly one compact echo
+        # line in its place, so completed turns do not stack empty boxes or
+        # drift down the page. Cursor is on the middle (editable) row here.
+        # Clear middle row, bottom border (one below), and top border (one
+        # above); then return to the frame's top row, column 0.
+        sys.stdout.write("\r\x1b[2K")        # clear editable row
+        sys.stdout.write("\x1b[1B\r\x1b[2K")  # clear bottom border row
+        sys.stdout.write("\x1b[2A\r\x1b[2K")  # up to top border row, clear it
+        preview = " ".join(message.split("\n"))
+        if len(preview) > width - 4:
+            preview = preview[:max(0, width - 5)] + "…"
+        sys.stdout.write(brand("› ") + preview + "\n")
+        sys.stdout.flush()
+    def cancel():
+        # Same frame cleanup for an aborted entry, with no echoed message.
+        sys.stdout.write("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K")
+        sys.stdout.flush()
     try:
         tty.setcbreak(fd)
-        sys.stdout.write("\x1b[?2004h\n" + accent(top) + "\n" + " " * width + "\n" + accent(bottom) + "\x1b[1A\r")
+        sys.stdout.write("\x1b[?2004h" + brand(top) + "\n" + " " * width + "\n" + brand(bottom) + "\x1b[1A\r")
         paint()
         while True:
             ch = decoder.decode(os.read(fd, 1))
@@ -584,10 +675,10 @@ def read_message():
                 paint()
                 continue
             if ch in ("\n", "\r") and not pasted:
-                finish()
+                collapse("".join(chars))
                 return "".join(chars) + "\n"
             if ch == "\x04" and not chars:
-                finish()
+                cancel()
                 return ""
             if ch in ("\x7f", "\b") and not pasted:
                 if cursor:
@@ -601,7 +692,7 @@ def read_message():
             if not pasted:
                 paint()
     except KeyboardInterrupt:
-        finish()
+        cancel()
         sys.stdout.write("Input cancelled.\n")
         return "\n"
     finally:
@@ -731,7 +822,7 @@ def handle_command(text):
         say("Started a separate supercomputer conversation. Prior private context is excluded.")
         return True
     if low in {"/agents", "/agent"}:
-        say("Always On is the agent in this conversation.")
+        say("TARX is the agent in this conversation.")
         say("Specialist execution is not connected to this CLI yet.")
         say("This conversation currently supports text replies.")
         return True
@@ -836,7 +927,7 @@ def say_who(key):
     label = refresh_label(key)
     if label:
         say("You are " + label + ".")
-        say("I am TARX, Always On.")
+        say("I am TARX.")
         return
     say("This computer is connected, but this sign-in did not keep your account name.")
     say("Say /signin once more. I will keep the name from that approval.")
@@ -1010,7 +1101,7 @@ def reply_for(key, prompt):
         model = "tarx/t-supercomputer"
         label = refresh_label(key)
         if label:
-            messages.insert(0, {"role": "system", "content": "You are TARX, Always On. The human signed in on this computer is " + label + ". If they ask who they are, answer with that name. Do not invent a different identity."})
+            messages.insert(0, {"role": "system", "content": "You are TARX. The human signed in on this computer is " + label + ". If they ask who they are, answer with that name. Do not invent a different identity."})
     status, body = http("POST", destination, {
         "model": model, "messages": messages,
         "stream": False, "max_tokens": 768, "temperature": 0,
@@ -1021,6 +1112,12 @@ def reply_for(key, prompt):
     return kind, content
 
 def send_once(key, prompt):
+    # The route actually used: an explicit /compute task always runs on the
+    # supercomputer; otherwise it is the selected destination mode. We read
+    # this at dispatch time so the post-reply label reflects the real send,
+    # and we never relabel earlier turns.
+    is_compute = prompt.strip().split(None, 1)[0:1] == ["/compute"]
+    used_mode = "supercomputer" if is_compute else chat_destination()[0]
     kind, text = reply_for(key, prompt)
     if kind == "expired":
         clear_key()
@@ -1030,6 +1127,7 @@ def send_once(key, prompt):
         say("You're connected. Please send your message again; the previous message was not replayed.")
         return 0
     render_reply(text)
+    render_route(kind, used_mode)
     return 0 if kind == "ok" else 1
 
 def loop():
