@@ -31,3 +31,18 @@ On a phone, localhost refers to that phone, not a Mac. Configuration/readiness i
 ## Context cache (not mounted on /personal-turn)
 
 `tarx-context-cache.ts` stores bounded facts encrypted with a caller-supplied 32-byte key and builds a model-specific quoted pack. Owner namespace stays `ownerNamespace(subject_id, install_id)`. A `supercomputer` pack requires a current server-owned grant for that exact scope, provider, model, and purpose. `private_local` facts stay on `this_computer`. `deliverOwnedPersonalContext` can hand a local pack to the existing loopback `PersonalClient` as quoted user data, never as a system instruction. `/personal-turn` does not call it yet: that route still has no operator key, context file, or server-owned grant record. Source code here is not live persistence or Always On acceptance.
+
+
+### Opt-in owned personal context
+
+The existing `/personal-turn` route can now use the encrypted cache with a fresh explicit `personal_chat,personal_context` pairing approval. Existing chat-only grants do not read context. The browser body remains `{messages}`; owner identity comes from pairing, recipient/model identity from the bound local client. Remote context dispatch is unavailable on this route. Source facts stay data and output uses the existing sanitizer.
+
+Operator configuration is optional: `~/.tarx/state/context-runtime.json` (owner-only0600), with its state directory0700. Example metadata only:
+
+```json
+{"version":1,"key_name":"operator","cache_name":"facts","bindings":[{"enabled":true,"scope":{"owner_namespace":"<server-derived 64-character owner hash>","workspace_id":"work","channel_id":"personal","purpose":"continue","grant_revision":"rev1"},"fact_ids":["goal"],"policy_version":"v1","prompt_version":"v1","max_bytes":2048}]}
+```
+
+The existing operator-supplied32-byte key is hex in `~/.tarx/state/context/operator.key` (0600, parent0700), and the encrypted store is `facts.json` in that directory. The runtime creates no key, imports no history and never accepts file paths, owner or grants from the browser. A missing policy preserves normal no-context chat. A configured but disabled/unbound/unsafe policy fails closed for context-enabled pairings. Policy is read again each turn; removing an owner's binding or setting enabled=false blocks future context-enabled turns. Revoking the pairing blocks dispatch even when revocation occurs during context resolution. These actions cannot erase content already delivered to a model.
+
+Only the fixed personal scope is supported; channel context requires a separate server-authenticated channel binding. Populate approved facts through the cache library/operator path; no browser fact-upload endpoint or founder-memory importer exists. Starting the existing runtime with this code and consenting to the pairing are separate operator actions, not performed by source release. To roll back, revoke the context-enabled pairing and use ordinary chat approval. No new service or remote fallback is installed.

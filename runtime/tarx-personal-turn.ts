@@ -35,7 +35,7 @@ export type PersonalTurnResult =
 /** Server-owned local options. The browser cannot set these. */
 export type PersonalLocalOptions = { adapters?: string; model?: string }
 
-export type PersonalClient = (messages: PersonalTurnMessage[], local?: PersonalLocalOptions) => Promise<string | null>
+export type PersonalClient = ((messages: PersonalTurnMessage[], local?: PersonalLocalOptions) => Promise<string | null>) & { readonly contextModelId?: string }
 
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g
 
@@ -111,7 +111,7 @@ export function createLoopbackPersonalClient(input: {
       req.on('error', reject); req.end(init?.body as string)
     })
   })
-  return async (messages, local) => {
+  const client:PersonalClient = async (messages, local) => {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (input.apiKey) headers.authorization = 'Bearer ' + input.apiKey // stays server-side
     const payload: Record<string, unknown> = { model: input.model, messages, stream: false, max_tokens: 768, temperature: 0 }
@@ -132,4 +132,6 @@ export function createLoopbackPersonalClient(input: {
     const content = body?.choices?.[0]?.message?.content
     return typeof content === 'string' ? content : null
   }
+  Object.defineProperty(client, 'contextModelId', {value: input.model})
+  return client
 }
