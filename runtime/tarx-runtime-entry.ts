@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {createPersonalContextResolver} from './tarx-context-runtime.ts'
 import {createBrowserBridge} from './tarx-browser-bridge.ts'
 import {loadPersonalClient,loadLearningController} from './tarx-personal-config.ts'
 /** Explicit local commands. No model startup or OS service registration.
@@ -45,10 +46,11 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
  if(command==='serve-browser'){const listener=createBrowserBridge({port:Number(options.port??3271)});return {listener,address:await listener.listen()}}
  const personalClient=await loadPersonalClient(testDeps.personalHome??homedir(),testDeps.personalEnv??process.env)
+ const personalContext=createPersonalContextResolver(testDeps.personalHome??homedir())
  const learning=await loadLearningController(testDeps.personalHome??homedir())
  if(command==='serve-personal'){
   const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
-  const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,learning,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
+  const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,personalContext,learning,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
   const address=await listener.listen()
   const browser=createBrowserBridge({port:options.port==='0'?0:3271,corePort:address.port})
   try{const browser_bridge=await browser.listen();return {listener:{close:async()=>{await browser.close();await listener.close()}},address,browser_bridge,personal_configured:Boolean(personalClient)}}
@@ -62,7 +64,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   try{await worker.start()
    const owners=createFileOwnerStore(join(state,'owners.json'))
    const tasks=createBoundedTaskController({file:join(state,'tasks.json'),owners,executor:createEveReadNoteExecutor(worker.client,worker.verify)})
-   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,learning,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
+   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
    const address=await listener.listen()
    return {listener:{close:async()=>{try{await listener.close()}finally{await worker.stop()}}},address,task_submission:true}
   }catch(e){await worker.stop();throw e}
@@ -80,7 +82,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   const {Client}=await import(pathToFileURL(require.resolve('eve/client')).href)
   client=new Client({host:workerURL})
  }
- const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,learning,ownerStore:createFileOwnerStore(join(state,'owners.json')),eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
+ const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:createFileOwnerStore(join(state,'owners.json')),eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
   let reachable=false
   let timeout:ReturnType<typeof setTimeout>|undefined
   try{const h=await Promise.race([client.health(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('health_timeout')),1500)})]);reachable=h?.ok===true&&h?.status==='ready'}catch{}finally{if(timeout)clearTimeout(timeout)}

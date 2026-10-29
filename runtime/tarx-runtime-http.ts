@@ -5,8 +5,10 @@ import type {createBoundedTaskController} from './tarx-bounded-task.ts'
 import {claimPairing,pairingIdentityResolver,pairingTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
 import {validatePersonalTurn,runPersonalTurn,type PersonalClient} from './tarx-personal-turn.ts'
 import {createLearningController,ownerNamespace,type AdapterResolution} from './tarx-local-learning.ts'
+import {deliverOwnedPersonalContext} from './tarx-context-consumer.ts'
+import type {PersonalContextResolver} from './tarx-context-runtime.ts'
 import {buildCapabilityManifest,READ_LAUNCH_NOTE_CAPABILITY,COGNITIVE_ADAPTER_UNKNOWN} from './tarx-capability-manifest.ts'
-export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient;learning?:ReturnType<typeof createLearningController>}){
+export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient;personalContext?:PersonalContextResolver;learning?:ReturnType<typeof createLearningController>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
   const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
   if(path==='/personal-learning'){
@@ -41,7 +43,20 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
     if(resolved.kind==='closed')return reply(503,{error:'personal_runtime_unavailable'})
     if(resolved.kind==='adapter')local={adapters:resolved.path,model:resolved.model}
    }
-   const result=await runPersonalTurn(deps.personalClient,{messages:valid.messages},local)
+   let context:Awaited<ReturnType<PersonalContextResolver>>=null
+   if(deps.personalContext&&identity.task_scopes.includes('personal_context')){
+    let timer:ReturnType<typeof setTimeout>|undefined
+    try{
+     const modelIdentity=local?JSON.stringify([local.model,local.adapters]):deps.personalClient.contextModelId??''
+     context=await Promise.race([deps.personalContext(ownerNamespace(identity.subject_id,identity.install_id),modelIdentity),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('context_timeout')),1000)})])
+    }catch{return reply(503,{error:'personal_context_unavailable'})}
+    finally{if(timer)clearTimeout(timer)}
+    const current=await pairingTaskAccess(req,deps.pairStore)
+    if(!current||!current.task_scopes.includes('personal_context'))return reply(401,{error:'missing_identity'})
+   }
+   const result=context
+    ?await deliverOwnedPersonalContext({client:(messages)=>deps.personalClient!(messages,local),messages:valid.messages,resolution:context})
+    :await runPersonalTurn(deps.personalClient,{messages:valid.messages},local)
    if(!result.ok)return reply(result.error==='personal_runtime_unavailable'?503:502,{error:result.error})
    if(!await pairingTaskAccess(req,deps.pairStore))return reply(401,{error:'missing_identity'})
    return reply(200,{role:'assistant',content:result.content})
