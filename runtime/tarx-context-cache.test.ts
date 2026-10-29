@@ -301,3 +301,16 @@ test('review: contextual consumer preserves the existing response sanitization b
   if(result.ok){assert.equal(result.content.includes('\u0000'),false);assert.equal(result.content.length,8000)}
  } finally {await rm(fx.dir,{recursive:true,force:true})}
 })
+
+test('review: cache identifiers depend on the operator key', async () => {
+ const fx=await fixture()
+ try {
+  const other=createContextCache({file:join(fx.dir,'other-cache.json'),key:OTHER_KEY,now:()=>NOW})
+  const data=fact(fx.owner,'local-fact',LOCAL_BODY,'private_local')
+  await fx.cache.putFact(fx.owner,data);await other.putFact(fx.owner,data)
+  const first=await fx.cache.pack(fx.owner,request(fx.owner,['local-fact']))
+  const second=await other.pack(fx.owner,request(fx.owner,['local-fact']))
+  assert.ok(first.ok && second.ok)
+  if(first.ok && second.ok) assert.notEqual(first.cache_key,second.cache_key)
+ } finally {await rm(fx.dir,{recursive:true,force:true})}
+})

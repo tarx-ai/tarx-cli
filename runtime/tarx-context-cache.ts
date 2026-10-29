@@ -6,7 +6,7 @@
  * open a remote route. The encryption key is supplied by the operator.
  * /personal-turn does not mount this module.
  */
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto'
 import { createLocalJsonStore } from './local-json-store.ts'
 
 const ID = /^[A-Za-z0-9_-]{1,80}$/
@@ -223,8 +223,8 @@ function grantCurrent(grant: GrantRecord, request: PackRequest): boolean {
     && grant.model_id === request.recipient.model_id
 }
 
-function cacheKey(request: PackRequest, fingerprints: string[]): string {
-  return digest(JSON.stringify({
+function cacheKey(request: PackRequest, fingerprints: string[], digestKey: Buffer): string {
+  return createHmac('sha256', digestKey).update(JSON.stringify({
     owner: request.scope.owner_namespace,
     workspace: request.scope.workspace_id,
     channel: request.scope.channel_id,
@@ -238,7 +238,7 @@ function cacheKey(request: PackRequest, fingerprints: string[]): string {
     budget: request.max_bytes,
     requested_facts: [...request.fact_ids].sort(),
     sources: [...fingerprints].sort(),
-  }))
+  })).digest('hex')
 }
 
 function selectFacts(facts: ContextFact[], request: PackRequest, nowMs: number): { chosen: QuotedFact[]; omitted: number; fingerprints: string[] } {
@@ -306,6 +306,7 @@ function decrypt(key: Buffer, seal: Seal): State {
 export function createContextCache(input: { file: string; key: Buffer; now?: () => number }) {
   if (input.key.length !== 32) throw new Error('context_key_required')
   const key = Buffer.from(input.key)
+  const digestKey = Buffer.from(hkdfSync('sha256', key, AAD, Buffer.from('pack-cache-key'), 32))
   const now = input.now ?? (() => Date.now())
   const store = createLocalJsonStore<Seal>(input.file)
   async function update<T>(change: (state: State) => { result: T; write: boolean }): Promise<T> {
@@ -410,7 +411,7 @@ export function createContextCache(input: { file: string; key: Buffer; now?: () 
           const dropped = kept.length !== state.packs.length
           state.packs = kept
           const selected = selectFacts(state.facts, request, nowMs)
-          const keyHex = cacheKey(request, selected.fingerprints)
+          const keyHex = cacheKey(request, selected.fingerprints, digestKey)
           const cached = state.packs.find((item) => item.key === keyHex)
           const fresh = cached && cached.fingerprints.length === selected.fingerprints.length && cached.fingerprints.every((item, index) => item === selected.fingerprints[index])
           if (cached && fresh) return { result: { ok: true as const, cache: 'hit' as const, cache_key: keyHex, packet: cached.packet }, write: dropped }
