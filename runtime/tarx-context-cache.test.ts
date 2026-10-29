@@ -94,7 +94,7 @@ test('packs miss across owner, channel, purpose, and provider and stay encrypted
     assert.equal(local.packet.complete, false)
     const measured = measureQuoted(local.packet.facts)
     assert.equal(local.packet.serialized_bytes, measured.serialized_bytes)
-    assert.equal(local.packet.token_estimate_ceiling, measured.token_estimate_ceiling)
+    assert.equal(local.packet.token_estimate, measured.token_estimate)
     assert.equal(local.cache_key.includes(LOCAL_BODY), false)
 
     const channel = await fx.cache.pack(fx.owner, request(fx.owner, ['local-fact'], { scope: scope(fx.owner, { channel_id: 'channel-b' }) }))
@@ -179,7 +179,7 @@ test('expiry, delete, and source revision invalidate a warm pack', async () => {
       assert.equal(JSON.stringify(revised.packet).includes(LOCAL_BODY), false)
       assert.equal(revised.packet.facts[0]?.body, revisedBody)
       assert.equal(revised.packet.serialized_bytes, revisedQuote.serialized_bytes)
-      assert.equal(revised.packet.token_estimate_ceiling, revisedQuote.token_estimate_ceiling)
+      assert.equal(revised.packet.token_estimate, revisedQuote.token_estimate)
     }
     const prompt = await restored.pack(fx.owner, request(fx.owner, ['local-fact'], { prompt_version: 'prompt-2' }))
     const budget = await restored.pack(fx.owner, request(fx.owner, ['local-fact'], { max_bytes: 2048 }))
@@ -197,7 +197,7 @@ test('expiry, delete, and source revision invalidate a warm pack', async () => {
       assert.equal(tight.packet.facts.length, 0)
       assert.equal(tight.packet.omitted_count, 1)
       assert.equal(tight.packet.serialized_bytes, measureQuoted([]).serialized_bytes)
-      assert.equal(tight.packet.token_estimate_ceiling, 1)
+      assert.equal(tight.packet.token_estimate, 1)
     }
   } finally {
     await rm(fx.dir, { recursive: true, force: true })
@@ -280,4 +280,24 @@ test('the loopback personal client receives only authorized quoted data', async 
   } finally {
     await rm(fx.dir, { recursive: true, force: true })
   }
+})
+
+test('review: differing omitted fact requests cannot reuse a complete cached packet', async () => {
+ const fx=await fixture()
+ try {
+  await fx.cache.putFact(fx.owner,fact(fx.owner,'local-fact',LOCAL_BODY,'private_local'))
+  const first=await fx.cache.pack(fx.owner,request(fx.owner,['local-fact']))
+  const second=await fx.cache.pack(fx.owner,request(fx.owner,['local-fact','missing-fact']))
+  assert.ok(first.ok && second.ok)
+  if(first.ok && second.ok){assert.notEqual(first.cache_key,second.cache_key);assert.equal(first.packet.complete,true);assert.equal(second.packet.complete,false);assert.equal(second.packet.omitted_count,1)}
+ } finally {await rm(fx.dir,{recursive:true,force:true})}
+})
+test('review: contextual consumer preserves the existing response sanitization boundary', async () => {
+ const fx=await fixture()
+ try {
+  const resolution=await fx.cache.pack(fx.owner,request(fx.owner,[]))
+  const result=await deliverOwnedPersonalContext({client:async()=> '\u0000'+'x'.repeat(9000),messages:[{role:'user',content:'hello'}],resolution})
+  assert.ok(result.ok)
+  if(result.ok){assert.equal(result.content.includes('\u0000'),false);assert.equal(result.content.length,8000)}
+ } finally {await rm(fx.dir,{recursive:true,force:true})}
 })

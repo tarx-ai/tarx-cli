@@ -78,7 +78,7 @@ export type ContextPacket = {
   omitted_count: number
   complete: boolean
   serialized_bytes: number
-  token_estimate_ceiling: number
+  token_estimate: number
 }
 
 export type PackResult = { ok: true; cache: 'hit' | 'rebuilt'; cache_key: string; packet: ContextPacket } | { ok: false; error: CacheError }
@@ -206,10 +206,10 @@ function quote(fact: ContextFact): QuotedFact {
   return { fact_id: fact.fact_id, kind: fact.kind, revision: fact.revision, source_version: fact.source_version, body: fact.body }
 }
 
-/** Byte length of the quoted fact array. The ceiling is ceil(bytes / 4), not a provider token count. */
-export function measureQuoted(facts: QuotedFact[]): { serialized_bytes: number; token_estimate_ceiling: number } {
+/** Byte length of the quoted fact array. The estimate is ceil(bytes / 4), not an upper bound or a provider token count. */
+export function measureQuoted(facts: QuotedFact[]): { serialized_bytes: number; token_estimate: number } {
   const serialized_bytes = Buffer.byteLength(JSON.stringify(facts))
-  return { serialized_bytes, token_estimate_ceiling: Math.ceil(serialized_bytes / 4) }
+  return { serialized_bytes, token_estimate: Math.ceil(serialized_bytes / 4) }
 }
 
 function live(fact: ContextFact, nowMs: number): boolean {
@@ -236,6 +236,7 @@ function cacheKey(request: PackRequest, fingerprints: string[]): string {
     policy: request.policy_version,
     prompt: request.prompt_version,
     budget: request.max_bytes,
+    requested_facts: [...request.fact_ids].sort(),
     sources: [...fingerprints].sort(),
   }))
 }
@@ -423,7 +424,7 @@ export function createContextCache(input: { file: string; key: Buffer; now?: () 
             omitted_count: selected.omitted,
             complete: selected.omitted === 0,
             serialized_bytes: measured.serialized_bytes,
-            token_estimate_ceiling: measured.token_estimate_ceiling,
+            token_estimate: measured.token_estimate,
           }
           state.packs = [{ key: keyHex, owner_namespace: request.scope.owner_namespace, scope: request.scope, fingerprints: selected.fingerprints, packet }, ...state.packs.filter((item) => item.key !== keyHex)].slice(0, MAX_PACKS)
           return { result: { ok: true as const, cache: 'rebuilt' as const, cache_key: keyHex, packet }, write: true }
