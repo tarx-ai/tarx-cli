@@ -19,6 +19,7 @@ async function fixture(resolver?:PersonalContextResolver,withContext=true){
  const dir=await mkdtemp(join(tmpdir(),'tarx-context-http-')),pairs=createFilePairStore(join(dir,'pairs.json')),captured:any[]=[]
  const challenge=await createPairingChallenge({loadCredential:async()=> 'tarx_cli_'+'a'.repeat(64),install_id:'fixture_install',store:pairs,fetcher:(async()=>new Response(JSON.stringify({ok:true,subject_id:'tvs_'+'a'.repeat(32)}))) as typeof fetch})
  assert.ok(challenge.ok);if(!challenge.ok)throw Error('fixture')
+ if(withContext)assert.equal(await approvePairingChallenge(challenge.challenge,pairs,Date.now(),'personal_context'),false)
  assert.equal(await approvePairingChallenge(challenge.challenge,pairs,Date.now(),withContext?['personal_chat','personal_context']:['personal_chat']),true)
  const client=createLoopbackPersonalClient({baseURL:'http://127.0.0.1:11463',model:'fixture-model',fetcher:(async(_url:any,init:any)=>{captured.push(JSON.parse(init.body));return new Response(JSON.stringify({choices:[{message:{content:'reply\u0000'}}]}))}) as typeof fetch})
  const server=createPairedSessionListener({host:'127.0.0.1',port:0,allowedOrigins:new Set([origin]),pairStore:pairs,ownerStore:createFileOwnerStore(join(dir,'owners.json')),personalClient:client,personalContext:resolver,eveClient:()=>({attach:()=>({async *stream(){}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false})})
@@ -57,6 +58,7 @@ test('operator loader is optional, owner-bound, reloads disable and rejects unsa
   const first=await resolve(owner,'model-a'),otherModel=await resolve(owner,'model-b');assert.ok(first?.ok&&otherModel?.ok)
   if(first?.ok&&otherModel?.ok){assert.notEqual(first.cache_key,otherModel.cache_key);assert.equal(first.packet.facts[0].body,'OWNED_CONTEXT_CANARY')}
   await assert.rejects(resolve('b'.repeat(64),'model-a'))
+  policy.bindings[0].scope.channel_id='other-channel';await writeFile(path,JSON.stringify(policy));await assert.rejects(resolve(owner,'model-a'));policy.bindings[0].scope.channel_id='personal'
   policy.bindings[0].enabled=false;await writeFile(path,JSON.stringify(policy));await assert.rejects(resolve(owner,'model-a'))
   await chmod(path,0o644);await assert.rejects(resolve(owner,'model-a'))
  }finally{await rm(home,{recursive:true,force:true})}
