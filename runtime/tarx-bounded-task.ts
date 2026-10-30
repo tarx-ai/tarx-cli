@@ -18,7 +18,17 @@ const validRequest=(value:string)=>/^[a-zA-Z0-9_-]{8,80}$/.test(value)
 const sessionPattern=/^wrun_[0-9A-Z]{20,32}$/
 const terminal=(status:Status)=>status==='completed'||status==='failed'
 
-export function createBoundedTaskController(input:{file:string;owners:OwnerStore;executor:ScopedExecutor}){
+/** Bound the dispatch acknowledgement, not the remote execution itself.
+ * A timed-out start remains uncertain and is never automatically replayed. */
+async function withinDispatchDeadline<T>(operation:()=>Promise<T>,timeoutMs:number):Promise<T>{
+ let timer:ReturnType<typeof setTimeout>|undefined
+ try{return await Promise.race([Promise.resolve().then(operation),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('task_dispatch_deadline')),timeoutMs)})])}
+ finally{if(timer)clearTimeout(timer)}
+}
+
+export function createBoundedTaskController(input:{file:string;owners:OwnerStore;executor:ScopedExecutor;dispatchTimeoutMs?:number}){
+ const timeoutMs=input.dispatchTimeoutMs??15_000
+ if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>30_000)throw Error('invalid_dispatch_timeout')
  const store=createLocalJsonStore<TaskRecord>(input.file)
  const key=(id:TaskIdentity,request:string)=>createHash('sha256').update(JSON.stringify([id.subject_id,id.install_id,request])).digest('hex')
  function safe(record:TaskRecord){return {request_id:record.request_id,task:record.task,status:record.status,session_id:record.session_id??null,receipt:record.receipt??null}}
@@ -57,19 +67,25 @@ export function createBoundedTaskController(input:{file:string;owners:OwnerStore
    })
    if(reservation.kind==='busy')return {code:409,body:{error:'task_in_progress'}}
    if(reservation.kind==='existing')return {code:200,body:safe(reservation.record)}
+   let dispatchIntent=false
    try{
-    const session_id=await input.executor.prepare()
+    const session_id=await withinDispatchDeadline(()=>input.executor.prepare(),timeoutMs)
     if(!sessionPattern.test(session_id))throw Error('invalid_session')
     await input.owners.put({session_id,subject_id:identity.subject_id,install_id:identity.install_id,cursor:0})
     await transition(k,{status:'prepared',session_id})
     // Record intent before crossing the execution boundary. Uncertain work is
     // never automatically dispatched again after a crash or lost response.
     await transition(k,{status:'dispatching'})
-    await input.executor.start(session_id,TASK_MESSAGE)
+    dispatchIntent=true
+    await withinDispatchDeadline(()=>input.executor.start(session_id,TASK_MESSAGE),timeoutMs)
     const rec=await transition(k,{status:'running'})
     return {code:202,body:safe(rec)}
    }catch{
-    const rec=await transition(k,{status:'uncertain'});return {code:502,body:{...safe(rec),error:'task_outcome_uncertain'}}
+    // Before dispatch, failure is known: a new explicit request can proceed.
+    // After recording intent, the executor may have accepted work despite a
+    // lost response. Preserve uncertainty and the one-in-flight owner fence.
+    const rec=await transition(k,{status:dispatchIntent?'uncertain':'failed'})
+    return {code:dispatchIntent?502:503,body:{...safe(rec),error:dispatchIntent?'task_outcome_uncertain':'task_preparation_failed'}}
    }
   },
   async read(identity:TaskIdentity,requestId:string):Promise<TaskResponse>{

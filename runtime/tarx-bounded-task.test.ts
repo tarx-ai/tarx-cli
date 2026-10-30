@@ -64,3 +64,44 @@ test('SDK executor requires trusted profile evidence before create and every sen
  verified=true;await executor.start(session,TASK_MESSAGE);assert.equal(sends,1)
  const events=[];for await(const event of executor.events(session))events.push(event);assert.equal(events.length,2)
 })
+
+
+test('failed preparation is terminal and releases the owner for a new explicit request',async()=>{
+ const f=await fixture();let attempts=0,starts=0
+ const executor={profile:TASK_NAME as typeof TASK_NAME,prepare:async()=>{if(++attempts===1)throw Error('private preparation error');return session},start:async()=>{starts++},async *events(){}}
+ const c=createBoundedTaskController({file:f.file,owners:f.owners,executor})
+ const first={request_id:'prepare_fail_01',task:TASK_NAME}
+ const failed=await c.submit(identity,first)
+ assert.equal(failed.code,503);assert.equal(failed.body.status,'failed');assert.equal(failed.body.error,'task_preparation_failed')
+ assert.doesNotMatch(JSON.stringify(failed),/private preparation error/)
+ assert.equal((await c.submit(identity,first)).body.status,'failed');assert.equal(attempts,1)
+ assert.equal((await c.submit(identity,{...first,request_id:'prepare_next_01'})).code,202)
+ assert.equal(starts,1)
+})
+
+test('late preparation cannot dispatch after its acknowledgement deadline',{timeout:2000},async()=>{
+ const f=await fixture();let release!:(id:string)=>void,starts=0,attempts=0
+ const waiting=new Promise<string>(resolve=>{release=resolve})
+ const executor={profile:TASK_NAME as typeof TASK_NAME,prepare:()=>++attempts===1?waiting:Promise.resolve(session),start:async()=>{starts++},async *events(){}}
+ const c=createBoundedTaskController({file:f.file,owners:f.owners,executor,dispatchTimeoutMs:15})
+ const first={request_id:'prepare_late_01',task:TASK_NAME}
+ const timedOut=await c.submit(identity,first)
+ assert.equal(timedOut.code,503);assert.equal(timedOut.body.status,'failed');assert.equal(starts,0)
+ release(session);await new Promise(resolve=>setImmediate(resolve))
+ assert.equal((await c.read(identity,first.request_id)).body.status,'failed');assert.equal(starts,0)
+ assert.equal((await c.submit(identity,{...first,request_id:'prepare_late_02'})).code,202);assert.equal(starts,1)
+})
+
+test('start acknowledgement timeout stays uncertain and prevents replay or overlapping work',{timeout:2000},async()=>{
+ const f=await fixture();let release!:()=>void,starts=0
+ const waiting=new Promise<void>(resolve=>{release=resolve})
+ const executor={profile:TASK_NAME as typeof TASK_NAME,prepare:async()=>session,start:()=>{starts++;return waiting},async *events(){}}
+ const c=createBoundedTaskController({file:f.file,owners:f.owners,executor,dispatchTimeoutMs:15})
+ const first={request_id:'dispatch_late_01',task:TASK_NAME}
+ const timedOut=await c.submit(identity,first)
+ assert.equal(timedOut.code,502);assert.equal(timedOut.body.status,'uncertain')
+ assert.equal((await c.submit(identity,first)).body.status,'uncertain')
+ assert.equal((await c.submit(identity,{...first,request_id:'dispatch_late_02'})).code,409)
+ release();await new Promise(resolve=>setImmediate(resolve))
+ assert.equal((await c.read(identity,first.request_id)).body.status,'uncertain');assert.equal(starts,1)
+})
