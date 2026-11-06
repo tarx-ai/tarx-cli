@@ -27,3 +27,15 @@ deterministic native case does not accept the autonomous planner. This source
 adds no scheduler, persistent daemon, model activation or automatic consent.
 The desktop consent UI, artifact/model integration and autonomous planner
 acceptance remain separate release requirements.
+
+The optional native cursor uses the hash-checked canonical 32px TARX shape, with
+only eyes at this size. A private no-trace adapter session owns it. Rendering is
+acknowledged by the adapter; the worker and parent both end their owned session.
+It is presentation only and neither moves the user's OS pointer nor grants access.
+
+The local planner receives only currently approved native controls with their
+original refs. Browser chrome cannot consume its observation budget. Its compact
+structured choice is parsed strictly and still passes through core policy. The
+local MLX/Qwen client disables thinking for this request only; no model/profile
+or service setting is modified. A model response before any delivered action
+cannot establish completion.

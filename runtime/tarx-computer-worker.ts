@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto'
 import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
+import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient} from './tarx-computer-planner.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number}
 let started=false,serial=0
 let phase='artifacts'
@@ -25,7 +26,7 @@ async function run(job:Job) {
  const {artifacts,scope}=job
  await verifyComputerArtifacts(artifacts);validateNativeScope(scope,job.maxSteps)
  const load=(name:string)=>import(pathToFileURL(join(artifacts.coreDirectory,name)).href)
- const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask},{createLoopbackClient}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js','model.js'].map(load))
+ const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js'].map(load))
  phase='scope'
  let latest:any,actions=0,modelCalls=0
  const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
@@ -42,7 +43,12 @@ async function run(job:Job) {
    if(argv[0]==='list-surfaces'){await this.guard();return super.exec(argv,opts)}
    throw Error('native_command_out_of_scope')
   }
-  async snapshot(app:string,opts:unknown={}) {if(app!==scope.app)throw Error('native_app_out_of_scope');latest=await super.snapshot(app,opts);return latest}
+  async snapshot(app:string,opts:{surface?:string;maxDepth?:number}={}) {
+   if(app!==scope.app)throw Error('native_app_out_of_scope')
+   latest=await super.snapshot(app,{maxDepth:30,...opts})
+   if(scope.mode==='local_model'&&!opts.surface)latest={...latest,tree:scopeNativeObservation(latest.tree,scope.actions)}
+   return latest
+  }
   async act(argv:string[]) {
    const node=latest&&indexRefs(latest.tree).get(argv[1])
    if(argv.length!==2||argv[0]!=='click'||!node||!scope.actions.some(a=>a.command===argv[0]&&a.role===node.role&&a.name===node.name)||actions>=job.maxSteps)throw Error('native_action_out_of_scope')
@@ -50,7 +56,21 @@ async function run(job:Job) {
    const result=await super.exec(argv,{timeoutMs:5000});actions++;return result.data
   }
  }
- const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000})
+ let nativeSession:string|undefined
+ const bootstrap=new AgentDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000})
+ if(artifacts.cursor){
+  const created=await bootstrap.exec(['session','start','--name','TARX','--no-trace'])
+  nativeSession=created.data?.session_id
+  if(typeof nativeSession!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(nativeSession))throw Error('native_session_unavailable')
+  process.send?.({kind:'native_session',session:nativeSession})
+ }
+ try{
+ if(nativeSession){
+  const shown=await bootstrap.exec(['cursor-overlay','enable','--session',nativeSession,'--image',artifacts.cursor!.path,'--pointer-image',artifacts.cursor!.path,'--hotspot','16,16','--pointer-hotspot','16,16','--accent','#38ADFA','--travel-ms','90,320','--tremor','0','--overshoot','0','--no-highlight'])
+  if(shown.data?.rendered!==true)throw Error('native_cursor_unavailable')
+  process.send?.({kind:'native_cursor',rendered:true})
+ }
+ const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000,...(nativeSession?{session:nativeSession}:{})})
  const approve=async(r:any)=>r.app===scope.app&&r.action.command==='click'&&r.risk.category==='settings'&&scope.actions.some(a=>a.command===r.action.command&&a.role===r.targetRole&&a.name===r.targetName)
  let done=false
  if(scope.mode==='deterministic_actuator'){
@@ -67,11 +87,16 @@ async function run(job:Job) {
   }
   done=(await verifyAll(ad,scope.app,scope.success)).passed
  }else {
-  const client=createLoopbackClient({...scope.model,timeoutMs:10000})
-  const model={modelId:client.modelId,endpoint:client.endpoint,async complete(messages:unknown,opts:unknown){if(!await authorize())return null;modelCalls++;return client.complete(messages,opts)}}
-  const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success,hints:job.request.context},{approve})
-  done=result.outcome==='done'&&result.finalCheck?.passed===true
+  const client=createLoopbackPlannerClient(scope.model!)
+  const authorizedClient={modelId:client.modelId,endpoint:client.endpoint,async complete(messages:any,opts:unknown){
+   if(!await authorize())return null
+   return client.complete(messages,opts)
+  }}
+  const model=createScopedComputerPlanner(authorizedClient,scope.actions,job.request.context,()=>modelCalls++)
+  const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
+  done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
  }
  await ad.guard()
  return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode}
+ }finally{if(nativeSession)await bootstrap.exec(['session','end',nativeSession])}
 }

@@ -9,7 +9,7 @@ import {promisify} from 'node:util'
 import type {ComputerExecutor,ComputerOutcome,ComputerSession} from './tarx-computer-task.ts'
 
 export type CheckedFile={path:string;sha256:string}
-export type ComputerArtifacts={coreSource:string;coreDirectory:string;files:Record<string,string>;node:CheckedFile;adapter:CheckedFile}
+export type ComputerArtifacts={coreSource:string;coreDirectory:string;files:Record<string,string>;node:CheckedFile;adapter:CheckedFile;cursor?:CheckedFile}
 export type NativeCheck={kind:'enabled'|'count';role:string;name:string;count?:number}
 export type NativeAction={command:'click';role:string;name:string}
 export type NativeScope={
@@ -19,7 +19,13 @@ export type NativeScope={
 }
 const sha=(b:Buffer)=>createHash('sha256').update(b).digest('hex')
 const digest=(s:unknown)=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s)
+const TARX_CURSOR_SHA256='1ee0717a18e54e525682077e3f9a8128da08aab2b1059a1f4365cea85769133b'
 const exec=promisify(execFile)
+const workerEnv=(home:string,a:ComputerArtifacts)=>({HOME:home,TMPDIR:home,PATH:[dirname(a.adapter.path),dirname(a.node.path),'/usr/bin','/bin'].join(':'),LANG:'en_US.UTF-8'})
+async function endOwnedCursorSession(home:string,a:ComputerArtifacts,session:string) {
+ const {stdout}=await exec(a.adapter.path,['session','end',session],{cwd:home,env:workerEnv(home,a),timeout:600,maxBuffer:8192})
+ if(JSON.parse(stdout).ok!==true)throw Error('native_cursor_exit_unconfirmed')
+}
 /** macOS agent-desktop detaches a command host from the caller's process group.
  * Only discover it through a socket in THIS run's private TMPDIR. Never search
  * or stop the user's shared adapter host, daemon or other application. */
@@ -61,6 +67,12 @@ export async function verifyComputerArtifacts(a:ComputerArtifacts) {
  if(JSON.stringify(actual)!==JSON.stringify(names))throw Error('computer_artifact_inventory_mismatch')
  for(const name of names)await checkedFile({path:join(a.coreDirectory,name),sha256:a.files[name]})
  await checkedFile(a.node);await checkedFile(a.adapter)
+ if(a.cursor){
+  if(a.cursor.sha256!==TARX_CURSOR_SHA256)throw Error('unapproved_native_cursor')
+  await checkedFile(a.cursor)
+  const png=await readFile(a.cursor.path)
+  if(png.length>2*1024*1024||png.length<33||png.subarray(0,8).toString('hex')!=='89504e470d0a1a0a'||png.subarray(12,16).toString()!=='IHDR'||png.readUInt32BE(16)!==32||png.readUInt32BE(20)!==32)throw Error('invalid_native_cursor')
+ }
 }
 function validCheck(c:NativeCheck) {return c&&['enabled','count'].includes(c.kind)&&typeof c.role==='string'&&c.role.length<80&&typeof c.name==='string'&&c.name.length<200&&(c.kind!=='count'||Number.isInteger(c.count)&&c.count!>=0&&c.count!<=10)}
 function validAction(a:NativeAction) {return a&&a.command==='click'&&typeof a.role==='string'&&a.role.length<80&&typeof a.name==='string'&&a.name.length<200}
@@ -75,7 +87,7 @@ export function validateNativeScope(s:NativeScope,maxSteps:number) {
   if(url.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.username||url.password||url.search||url.hash||!['','/','/v1','/v1/','/v1/chat/completions'].includes(url.pathname))throw Error('invalid_native_scope')
  }else throw Error('invalid_native_scope')
 }
-export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession)=>Promise<NativeScope|null>}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
  return {
   async ready(){if(process.platform==='win32')return false;try{await verifyComputerArtifacts(artifacts);return true}catch{return false}},
@@ -88,10 +100,11 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
    // Darwin sockaddr_un is short; the normal per-user TMPDIR can exceed it.
    const home=await mkdtemp(join(await realpath(process.platform==='darwin'?'/tmp':tmpdir()),'tarx-cu-'))
+   let nativeSession:string|undefined
    try {
     return await new Promise<ComputerOutcome>((resolve,reject)=>{
      const child=fork(new URL('./tarx-computer-worker.ts',import.meta.url),[],{execPath:artifacts.node.path,execArgv:['--experimental-strip-types'],detached:true,
-      cwd:home,env:{HOME:home,TMPDIR:home,PATH:[dirname(artifacts.adapter.path),dirname(artifacts.node.path),'/usr/bin','/bin'].join(':'),LANG:'en_US.UTF-8'},stdio:['ignore','ignore','ignore','ipc']})
+      cwd:home,env:workerEnv(home,artifacts),stdio:['ignore','ignore','ignore','ipc']})
      let result:ComputerOutcome|undefined,failure:Error|undefined,failed=false,finished=false,stopping=false,checks=0
      let killTimer:ReturnType<typeof setTimeout>|undefined
      const kill=(signal:NodeJS.Signals)=>{if(child.pid)try{process.kill(-child.pid,signal)}catch(e:any){if(e.code!=='ESRCH')failed=true}}
@@ -110,9 +123,13 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
      child.on('error',()=>{failed=true;stop()})
      child.on('message',message=>{
       if(finished||!message||typeof message!=='object')return
-      const m=message as {kind?:string;id?:number;result?:ComputerOutcome;phase?:string;code?:string}
+      const m=message as {kind?:string;id?:number;result?:ComputerOutcome;phase?:string;code?:string;session?:string;rendered?:boolean}
       if(m.kind==='authorize'&&Number.isInteger(m.id)&&++checks<=32){
        void stillAuthorized().then(ok=>{if(!ok||signal.aborted){stop();return}if(child.connected)child.send({kind:'authorization',id:m.id,allowed:true})},stop)
+      }else if(m.kind==='native_session'&&!nativeSession&&artifacts.cursor&&typeof m.session==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(m.session)){
+       nativeSession=m.session
+      }else if(m.kind==='native_cursor'&&nativeSession&&m.rendered===true){
+       try{input.onCursorState?.(true)}catch{/* Presentation cannot grant execution. */}
       }else if(m.kind==='failure'&&typeof m.phase==='string'&&/^[a-z]{1,20}$/.test(m.phase)&&typeof m.code==='string'&&/^[A-Z_]{1,64}$/.test(m.code)){
        failure=Error('computer_'+m.phase+'_'+m.code);failed=true;stop()
       }else if(m.kind==='result'&&!result){
@@ -133,7 +150,11 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
     })
    }finally{
     // Preserve the private state if host ownership/exit cannot be confirmed.
-    await closeOwnedComputerHosts(home,artifacts.adapter.path)
+    let cleanupError:unknown
+    try{if(nativeSession)await endOwnedCursorSession(home,artifacts,nativeSession)}catch(error){cleanupError=error}
+    try{await closeOwnedComputerHosts(home,artifacts.adapter.path)}catch(error){cleanupError??=error}
+    try{input.onCursorState?.(false)}catch{}
+    if(cleanupError)throw cleanupError
     await rm(home,{recursive:true,force:true})
    }
   },

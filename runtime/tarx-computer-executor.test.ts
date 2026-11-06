@@ -13,12 +13,12 @@ const session:ComputerSession={session_id:request.session_id,subject_id:'tvs_'+'
 const action={command:'click' as const,role:'button',name:'Fixture action'}
 const check={kind:'enabled' as const,role:'button',name:'Fixture result'}
 const scope:NativeScope={app:'Fixture',window:{id:'w-1',pid:123,title_sha256:hash('Fixture')},actions:[action],success:[check],mode:'deterministic_actuator',steps:[{action,expect:[check]}]}
-async function fixture(t:any,hang=false){
+async function fixture(t:any,hang=false,cursor=false){
  const dir=await realpath(await mkdtemp(join(tmpdir(),'tarx-core-executor-test-')));t.after(()=>rm(dir,{recursive:true,force:true}))
  const pidFile=join(dir,'descendant-pid')
  const files:Record<string,string>={
   'package.json':JSON.stringify({type:'module'}),
-  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidFile)},String(c.pid));return new Promise(()=>{})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
+  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidFile)},String(c.pid));return new Promise(()=>{})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
   'refs.js':`export const indexRefs=tree=>new Map([[tree.ref_id,tree]])`,
   'policy.js':`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`,
   'loop.js':`export const verifyAll=async()=>({passed:true});export const runTask=async()=>{throw Error('fixture is not a planner')}`,
@@ -30,6 +30,12 @@ async function fixture(t:any,hang=false){
  for(const name of Object.keys(files))await (await import('node:fs/promises')).rename(join(dir,name),join(coreDir,name))
  const node=await realpath(process.execPath),sha256=hash(await readFile(node))
  const artifacts:ComputerArtifacts={coreSource:core,coreDirectory:coreDir,files:Object.fromEntries(Object.entries(files).map(([n,b])=>[n,hash(b)])),node:{path:node,sha256},adapter:{path:node,sha256}}
+ if(cursor){
+  const adapter=join(dir,'fixture-adapter'),ended=join(dir,'cursor-ended')
+  const source='#!'+node+'\n'+`require('node:fs').writeFileSync(${JSON.stringify(ended)},JSON.stringify(process.argv.slice(2)));process.stdout.write(JSON.stringify({ok:true,data:{}}))`
+  await writeFile(adapter,source,{mode:0o700});artifacts.adapter={path:adapter,sha256:hash(source)}
+  const path=await realpath(new URL('./tarx-cursor.png',import.meta.url));artifacts.cursor={path,sha256:hash(await readFile(path))}
+ }
  return {dir,pidFile,artifacts}
 }
 test('isolated worker rechecks exact artifacts and approved scope; deterministic native fixture is labeled separately',async t=>{
@@ -61,4 +67,16 @@ test('browser/model-like scope substitutions and additional artifact files fail 
   assert.throws(()=>validateNativeScope({...scope,...change} as NativeScope,2))
  await writeFile(join(f.artifacts.coreDirectory,'extra.js'),'export {}')
  await assert.rejects(verifyComputerArtifacts(f.artifacts),/inventory_mismatch/)
+})
+
+test('cursor is session-owned, uses the canonical checked TARX asset and is ended by the parent on cancellation',async t=>{
+ const f=await fixture(t,true,true),abort=new AbortController(),states:boolean[]=[]
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope,onCursorState:shown=>states.push(shown)})
+ const result=executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:abort.signal,stillAuthorized:async()=>!abort.signal.aborted})
+ for(let i=0;i<100;i++){try{await readFile(f.pidFile);break}catch{}await new Promise(r=>setTimeout(r,10))}
+ abort.abort();assert.equal((await result).outcome,'cancelled')
+ assert.deepEqual(states,[true,false])
+ assert.deepEqual(JSON.parse(await readFile(join(f.dir,'cursor-ended'),'utf8')),['session','end','cursor_fixture_session'])
+ const changed=join(f.dir,'changed-cursor.png');await writeFile(changed,'not the TARX asset')
+ await assert.rejects(verifyComputerArtifacts({...f.artifacts,cursor:{path:changed,sha256:hash('not the TARX asset')}}),/unapproved_native_cursor/)
 })
