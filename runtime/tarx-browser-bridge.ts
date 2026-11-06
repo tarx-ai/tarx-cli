@@ -4,12 +4,13 @@
  */
 import {createServer,request as httpRequest,type IncomingMessage,type ServerResponse} from 'node:http'
 import {createHash,randomBytes} from 'node:crypto'
+import {parseComputerRequest} from './tarx-computer-task.ts'
 import {validatePersonalTurn} from './tarx-personal-turn.ts'
 
 const PARENTS=new Set(['https://www.tarx.com','https://tarx.com'])
 const MAX_BODY=270336
 const NONCE_TTL=24*60*60*1000
-type Rpc={id:string;kind:'claim';challenge:string}|{id:string;kind:'personal';bearer:string;messages:unknown}|{id:string;kind:'learning';bearer:string;request:unknown}
+type Rpc={id:string;kind:'claim';challenge:string}|{id:string;kind:'personal';bearer:string;messages:unknown}|{id:string;kind:'learning';bearer:string;request:unknown}|{id:string;kind:'computer';bearer:string;request:{action:'capabilities'|'submit'|'read'|'cancel';task?:unknown;request_id?:string}}
 function rpc(value:unknown):Rpc|null{
  if(!value||typeof value!=='object'||Array.isArray(value))return null
  const row=value as Record<string,unknown>
@@ -22,6 +23,16 @@ function rpc(value:unknown):Rpc|null{
   if(Object.keys(row).some(k=>!['id','kind','bearer','messages'].includes(k))||typeof row.bearer!=='string'||!/^tpc_[a-f0-9]{64}$/.test(row.bearer))return null
   if(!validatePersonalTurn({messages:row.messages}).ok||Buffer.byteLength(JSON.stringify({messages:row.messages}))>32768)return null
   return row as Rpc
+ }
+ if(row.kind==='computer'){
+  if(Object.keys(row).some(k=>!['id','kind','bearer','request'].includes(k))||typeof row.bearer!=='string'||!/^tpc_[a-f0-9]{64}$/.test(row.bearer))return null
+  const request=row.request
+  if(!request||typeof request!=='object'||Array.isArray(request))return null
+  const r=request as Record<string,unknown>
+  if(r.action==='capabilities'&&Object.keys(r).length===1)return row as Rpc
+  if(r.action==='submit'&&Object.keys(r).length===2&&parseComputerRequest(r.task)&&Buffer.byteLength(JSON.stringify(r.task))<=32768)return row as Rpc
+  if((r.action==='read'||r.action==='cancel')&&Object.keys(r).length===2&&typeof r.request_id==='string'&&/^[A-Za-z0-9_-]{8,80}$/.test(r.request_id))return row as Rpc
+  return null
  }
  if(row.kind==='learning'){
   if(Object.keys(row).some(k=>!['id','kind','bearer','request'].includes(k))||typeof row.bearer!=='string'||!/^tpc_[a-f0-9]{64}$/.test(row.bearer))return null
@@ -126,11 +137,14 @@ export function createBrowserBridge(options:{port?:number;corePort?:number}={}){
   let input:Rpc|null
   try{input=rpc(await readBody(req))}catch{return send(res,400,{error:'invalid_request'})}
   if(!input)return send(res,400,{error:'invalid_request'})
-  const payload=input.kind==='claim'?{challenge:input.challenge}:input.kind==='learning'?input.request:{messages:input.messages}
-  const body=JSON.stringify(payload)
+  const computer=input.kind==='computer'?input.request:null
+  const payload=input.kind==='computer'?(input.request.action==='submit'?input.request.task:null):input.kind==='claim'?{challenge:input.challenge}:input.kind==='learning'?input.request:{messages:input.messages}
+  const body=payload===null?'':JSON.stringify(payload)
   const headers:Record<string,string>={'origin':session.parent,'content-type':'application/json','content-length':String(Buffer.byteLength(body))}
-  if(input.kind==='personal'||input.kind==='learning')headers.authorization='Bearer '+input.bearer
-  const upstream=httpRequest({hostname:'127.0.0.1',port:corePort,path:input.kind==='claim'?'/pairing/claim':input.kind==='learning'?'/personal-learning':'/personal-turn',method:'POST',headers,agent:false},response=>{
+  if(input.kind==='personal'||input.kind==='learning'||input.kind==='computer')headers.authorization='Bearer '+input.bearer
+  const upstreamPath=computer?(computer.action==='capabilities'?'/task-capabilities':computer.action==='submit'?'/computer-tasks':'/computer-tasks/'+computer.request_id+(computer.action==='cancel'?'/cancel':'')):input.kind==='claim'?'/pairing/claim':input.kind==='learning'?'/personal-learning':'/personal-turn'
+  const method=computer&&(computer.action==='read'||computer.action==='capabilities')?'GET':'POST'
+  const upstream=httpRequest({hostname:'127.0.0.1',port:corePort,path:upstreamPath,method,headers,agent:false},response=>{
    const chunks:Buffer[]=[];let size=0
    response.on('data',chunk=>{size+=chunk.length;if(size>65536){upstream.destroy();return}chunks.push(Buffer.from(chunk))})
    response.on('end',()=>{try{send(res,response.statusCode??503,JSON.parse(Buffer.concat(chunks).toString('utf8')))}catch{send(res,503,{error:'unreachable'})}})

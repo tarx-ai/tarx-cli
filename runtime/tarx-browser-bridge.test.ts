@@ -17,7 +17,7 @@ function call(port:number,path:string,body?:unknown,headers:Record<string,string
 }
 async function fixture(){
  const seen:any[]=[]
- const core=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;seen.push({path:req.url,headers:req.headers,body:JSON.parse(raw)});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/pairing/claim'?{ok:false,error:'not_approved'}:{role:'assistant',content:'Local fixture'}))})
+ const core=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;seen.push({path:req.url,method:req.method,headers:req.headers,body:raw?JSON.parse(raw):null});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/pairing/claim'?{ok:false,error:'not_approved'}:{role:'assistant',content:'Local fixture'}))})
  await new Promise<void>(r=>core.listen(0,'127.0.0.1',r));const address=core.address();assert.ok(address&&typeof address!=='string')
  const bridge=createBrowserBridge({port:0,corePort:address.port});const a=await bridge.listen()
  const page=await call(a.port,'/bridge?origin='+encodeURIComponent(parent));assert.equal(page.status,200)
@@ -133,5 +133,20 @@ test('Return selects the existing named parent with an empty URL, without closin
   for(const bad of ['_blank','_top','https://evil.example','tarx-return-short'])
    assert.equal((await call(f.port,'/bridge?return='+encodeURIComponent(bad))).status,403)
   assert.equal(f.seen.length,0)
+ }finally{await f.close()}
+})
+
+test('computer RPC is channel-bound data over fixed methods and paths, never caller-selected authority',async()=>{
+ const f=await fixture()
+ const task={request_id:'bridge_computer_001',task:'computer_use',session_id:'wrun_'+'A'.repeat(26),channel_id:'qa-channel',agent_id:'qa-agent',goal:'Private synthetic context'}
+ try{
+  for(const request of [{action:'capabilities'},{action:'submit',task},{action:'read',request_id:task.request_id},{action:'cancel',request_id:task.request_id}])
+   assert.equal((await call(f.port,'/rpc',{id:'computer1',kind:'computer',bearer,request},f.headers)).status,200)
+  assert.deepEqual(f.seen.map(x=>[x.method,x.path]),[['GET','/task-capabilities'],['POST','/computer-tasks'],['GET','/computer-tasks/'+task.request_id],['POST','/computer-tasks/'+task.request_id+'/cancel']])
+  assert.deepEqual(f.seen[1].body,task)
+  for(const row of f.seen){assert.equal(row.headers.authorization,'Bearer '+bearer);assert.equal(row.headers.origin,parent)}
+  for(const request of [{action:'approve'},{action:'submit',task:{...task,approved:true}},{action:'read',request_id:'../pairing/claim'},{action:'cancel',request_id:task.request_id,url:'https://evil.test'},{action:'capabilities',model:'other'}])
+   assert.equal((await call(f.port,'/rpc',{id:'bad',kind:'computer',bearer,request},f.headers)).status,400)
+  assert.equal(f.seen.length,4)
  }finally{await f.close()}
 })
