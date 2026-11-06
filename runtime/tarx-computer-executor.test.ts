@@ -80,3 +80,13 @@ test('cursor is session-owned, uses the canonical checked TARX asset and is ende
  const changed=join(f.dir,'changed-cursor.png');await writeFile(changed,'not the TARX asset')
  await assert.rejects(verifyComputerArtifacts({...f.artifacts,cursor:{path:changed,sha256:hash('not the TARX asset')}}),/unapproved_native_cursor/)
 })
+
+test('an unavailable local model fails before native session/cursor creation and preserves diagnostic outcome',async t=>{
+ const f=await fixture(t,false,true),states:boolean[]=[],outcomes:any[]=[]
+ const localScope:NativeScope={...scope,mode:'local_model',steps:undefined,model:{baseURL:'http://127.0.0.1:1',model:'fixture-unavailable'}}
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,onCursorState:s=>states.push(s),onOutcome:o=>outcomes.push(o)})
+ const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
+ assert.equal(result.outcome,'error');assert.equal(result.planner_status,'unavailable');assert.equal(result.native_actions,0);assert.equal(result.model_calls,0)
+ assert.equal(states.includes(true),false);assert.equal(outcomes.length,1)
+ await assert.rejects(readFile(join(f.dir,'cursor-ended')),/ENOENT/)
+})

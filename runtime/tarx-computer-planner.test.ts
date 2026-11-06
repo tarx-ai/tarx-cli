@@ -55,3 +55,23 @@ test('an offline/denied request does not count as model generation; a received i
  }
  assert.equal(generations,2)
 })
+
+test('planner exposes bounded failure categories without retaining or exposing raw model output',async()=>{
+ const invalid=fixture('private invalid response')
+ await invalid.planner.complete(input);assert.equal(invalid.planner.decisionStatus,'invalid_json')
+ const falseDone=fixture('{"status":"done"}')
+ await falseDone.planner.complete(input);assert.equal(falseDone.planner.decisionStatus,'false_done')
+ assert.doesNotMatch(JSON.stringify(invalid.planner),/private invalid response/)
+})
+
+test('model readiness consumes the complete response and verifies the configured identity; HTTP 200 alone is insufficient',async()=>{
+ const {createServer}=await import('node:http'),{createLoopbackPlannerClient}=await import('./tarx-computer-planner.ts')
+ let mode='incomplete'
+ const server=createServer((_req,res)=>{if(mode==='incomplete'){res.writeHead(200);res.flushHeaders();res.destroy();return}res.end(JSON.stringify({data:[{id:mode==='ready'?'fixture':'other'}]}))})
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+ try{
+  const a=server.address();assert.ok(a&&typeof a!=='string')
+  const client=createLoopbackPlannerClient({baseURL:'http://127.0.0.1:'+a.port,model:'fixture'})
+  assert.equal(await client.ready(),false);mode='wrong';assert.equal(await client.ready(),false);mode='ready';assert.equal(await client.ready(),true)
+ }finally{await new Promise<void>(r=>server.close(()=>r()))}
+})

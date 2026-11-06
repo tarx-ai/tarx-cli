@@ -78,3 +78,16 @@ test('changing native consent bounds aborts an active run instead of inheriting 
  f.setGrant({...f.grant(),max_steps:1})
  assert.equal((await final(f.controller)).body.status,'cancelled')
 })
+
+test('trusted native cleanup is awaited within its capped budget instead of returning before cleanup ends',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-computer-cleanup-budget-'));t.after(()=>rm(dir,{recursive:true,force:true}))
+ const grant:ComputerSession={session_id:request.session_id,subject_id:identity.subject_id,install_id:identity.install_id,channel_id:request.channel_id,agent_id:request.agent_id,intent_sha256:computerIntentHash(request),expires_at:Date.now()+10000,max_steps:2,timeout_ms:5000}
+ let running=false,cleaned=false
+ const executor={shutdownGraceMs:2200,ready:async()=>true,run:async({signal}:any)=>{running=true;await new Promise(r=>signal.addEventListener('abort',r,{once:true}));await new Promise(r=>setTimeout(r,1650));cleaned=true;return completed}}
+ const controller=createComputerTaskController({file:join(dir,'tasks.json'),coreSource:core,authority:{resolve:async()=>grant},executor});t.after(()=>controller.close())
+ await controller.submit(identity,request,async()=>true)
+ for(let i=0;i<30&&!running;i++)await new Promise(r=>setTimeout(r,5))
+ const start=Date.now();await controller.close();assert.ok(Date.now()-start<2500);assert.equal(cleaned,true)
+ assert.equal((await controller.read(identity,request.request_id)).body.status,'cancelled')
+ assert.throws(()=>createComputerTaskController({file:join(dir,'other.json'),coreSource:core,authority:{resolve:async()=>grant},executor:{...executor,shutdownGraceMs:6001}}),/invalid_computer_shutdown_budget/)
+})

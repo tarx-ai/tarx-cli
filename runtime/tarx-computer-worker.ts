@@ -28,7 +28,9 @@ async function run(job:Job) {
  const load=(name:string)=>import(pathToFileURL(join(artifacts.coreDirectory,name)).href)
  const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js'].map(load))
  phase='scope'
- let latest:any,actions=0,modelCalls=0
+ const localClient=scope.mode==='local_model'?createLoopbackPlannerClient(scope.model!):undefined
+ if(localClient&&!await localClient.ready())return {outcome:'error',independent_verified:false,native_actions:0,model_calls:0,core_source:artifacts.coreSource,execution_mode:scope.mode,planner_status:'unavailable'}
+ let latest:any,actions=0,modelCalls=0,plannerStatus:string|undefined
  const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
  const rows=(data:any)=>Array.isArray(data)?data:data?.windows??[]
  class ScopedDesktop extends AgentDesktop {
@@ -87,16 +89,17 @@ async function run(job:Job) {
   }
   done=(await verifyAll(ad,scope.app,scope.success)).passed
  }else {
-  const client=createLoopbackPlannerClient(scope.model!)
+  const client=localClient!
   const authorizedClient={modelId:client.modelId,endpoint:client.endpoint,async complete(messages:any,opts:unknown){
    if(!await authorize())return null
    return client.complete(messages,opts)
   }}
   const model=createScopedComputerPlanner(authorizedClient,scope.actions,job.request.context,()=>modelCalls++)
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
+  plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
  }
  await ad.guard()
- return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode}
+ return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{})}
  }finally{if(nativeSession)await bootstrap.exec(['session','end',nativeSession])}
 }

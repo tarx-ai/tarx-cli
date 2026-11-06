@@ -14,8 +14,11 @@ export type ComputerOutcome = {
  outcome:'done'|'unverified'|'denied'|'error'|'cancelled';independent_verified:boolean
  native_actions:number|null;model_calls:number|null;core_source:string
  execution_mode:'local_model'|'deterministic_actuator'
+ planner_status?:string
 }
 export type ComputerExecutor = {
+ /** Trusted executor cleanup budget; never supplied by a browser request. */
+ shutdownGraceMs?:number
  ready:()=>Promise<boolean>
  run:(input:{request:ComputerRequest;session:ComputerSession;signal:AbortSignal;stillAuthorized:()=>Promise<boolean>})=>Promise<ComputerOutcome>
 }
@@ -56,6 +59,7 @@ function validRecord(r:Record,source:string):boolean {
 
 function validOutcome(r:ComputerOutcome,source:string) {
  return r&&['done','unverified','denied','error','cancelled'].includes(r.outcome)&&typeof r.independent_verified==='boolean'&&
+  (r.planner_status===undefined||['idle','no_controls','requested','unavailable','invalid_json','invalid_action','false_done','blocked','act','done'].includes(r.planner_status))&&
   ['local_model','deterministic_actuator'].includes(r.execution_mode)&&r.core_source===source&&
   [r.native_actions,r.model_calls].every(n=>n===null||Number.isInteger(n)&&n>=0&&n<=50)
 }
@@ -76,6 +80,8 @@ async function abortable<T>(operation:()=>Promise<T>,signal:AbortSignal,graceMs=
 
 export function createComputerTaskController(input:{file:string;authority:ComputerAuthority;executor:ComputerExecutor;coreSource:string;now?:()=>number}) {
  if(!/^[a-f0-9]{40}$/.test(input.coreSource))throw Error('invalid_core_source')
+ const shutdownGraceMs=input.executor.shutdownGraceMs??1500
+ if(!Number.isInteger(shutdownGraceMs)||shutdownGraceMs<0||shutdownGraceMs>6000)throw Error('invalid_computer_shutdown_budget')
  // Shares the existing private task ledger; no parallel database/collection.
  const store=createLocalJsonStore<Record>(input.file)
  const now=input.now??Date.now
@@ -117,7 +123,7 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    await transition(k,'running')
    if(abort.signal.aborted) {await transition(k,'cancelled');return}
    dispatched=true
-   const outcome=await abortable(()=>input.executor.run({request,session,signal:abort.signal,stillAuthorized}),abort.signal,1500)
+   const outcome=await abortable(()=>input.executor.run({request,session,signal:abort.signal,stillAuthorized}),abort.signal,shutdownGraceMs)
    if(abort.signal.aborted||!await stillAuthorized()) {await transition(k,'cancelled');return}
    if(!validOutcome(outcome,input.coreSource)) {await transition(k,'failed');return}
    if(outcome.outcome==='done'&&outcome.independent_verified&&outcome.native_actions!==null&&outcome.model_calls!==null) {

@@ -23,7 +23,7 @@ const TARX_CURSOR_SHA256='1ee0717a18e54e525682077e3f9a8128da08aab2b1059a1f4365ce
 const exec=promisify(execFile)
 const workerEnv=(home:string,a:ComputerArtifacts)=>({HOME:home,TMPDIR:home,PATH:[dirname(a.adapter.path),dirname(a.node.path),'/usr/bin','/bin'].join(':'),LANG:'en_US.UTF-8'})
 async function endOwnedCursorSession(home:string,a:ComputerArtifacts,session:string) {
- const {stdout}=await exec(a.adapter.path,['session','end',session],{cwd:home,env:workerEnv(home,a),timeout:600,maxBuffer:8192})
+ const {stdout}=await exec(a.adapter.path,['session','end',session],{cwd:home,env:workerEnv(home,a),timeout:1000,maxBuffer:8192})
  if(JSON.parse(stdout).ok!==true)throw Error('native_cursor_exit_unconfirmed')
 }
 /** macOS agent-desktop detaches a command host from the caller's process group.
@@ -31,18 +31,21 @@ async function endOwnedCursorSession(home:string,a:ComputerArtifacts,session:str
  * or stop the user's shared adapter host, daemon or other application. */
 export async function closeOwnedComputerHosts(home:string,adapterPath:string) {
  if(process.platform!=='darwin')return
+ const deadline=Date.now()+4500,closedPids=new Set<number>()
+ const remaining=(limit:number)=>{const left=deadline-Date.now();if(left<=0)throw Error('native_host_cleanup_deadline');return Math.min(limit,left)}
  const files=await readdir(home,{recursive:true})
  for(const name of files){
   if(!/^agent-desktop-host-[0-9]+\/[a-f0-9]+\.sock$/.test(name))continue
   const socket=join(home,name),info=await lstat(socket)
   if(!info.isSocket()||info.uid!==process.getuid?.())throw Error('unverified_native_host_socket')
   let pids:string
-  try{pids=(await exec('/usr/sbin/lsof',['-t','--',socket],{timeout:400,maxBuffer:4096})).stdout.trim()}
-  catch(error:any){if(error.code===1)continue;throw Error('native_host_exit_unconfirmed')}
+  try{pids=(await exec('/usr/sbin/lsof',['-t','--',socket],{timeout:remaining(2000),maxBuffer:4096})).stdout.trim()}
+  catch(error:any){if(error.code===1)continue;throw Error('native_host_lookup_unconfirmed')}
   for(const value of new Set(pids.split(/\s+/))){
    if(!/^[1-9][0-9]{0,8}$/.test(value))throw Error('unverified_native_host_pid')
    const pid=Number(value)
-   const row=(await exec('/bin/ps',['-ww','-p',value,'-o','uid=','-o','command='],{timeout:400,maxBuffer:4096})).stdout.trim()
+   if(closedPids.has(pid))continue
+   const row=(await exec('/bin/ps',['-ww','-p',value,'-o','uid=','-o','command='],{timeout:remaining(1000),maxBuffer:4096})).stdout.trim()
    const match=row.match(/^([0-9]+)\s+(.*?)$/)
    if(!match||match[2]!==adapterPath||Number(match[1])!==process.getuid?.())throw Error('unverified_native_host_identity')
    const alive=()=>{try{process.kill(pid,0);return true}catch(e:any){if(e.code==='ESRCH')return false;throw e}}
@@ -51,6 +54,7 @@ export async function closeOwnedComputerHosts(home:string,adapterPath:string) {
    if(alive())process.kill(pid,'SIGKILL')
    for(let i=0;i<10&&alive();i++)await new Promise(r=>setTimeout(r,20))
    if(alive())throw Error('native_host_exit_unconfirmed')
+   closedPids.add(pid)
   }
  }
 }
@@ -87,9 +91,10 @@ export function validateNativeScope(s:NativeScope,maxSteps:number) {
   if(url.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.username||url.password||url.search||url.hash||!['','/','/v1','/v1/','/v1/chat/completions'].includes(url.pathname))throw Error('invalid_native_scope')
  }else throw Error('invalid_native_scope')
 }
-export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
  return {
+  shutdownGraceMs:6000,
   async ready(){if(process.platform==='win32')return false;try{await verifyComputerArtifacts(artifacts);return true}catch{return false}},
   async run({request,session,signal,stillAuthorized}) {
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
@@ -136,6 +141,7 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
        // Strictly bounded metadata; core/model/native output never crosses IPC.
        if(JSON.stringify(message).length>1024){failed=true;stop();return}
        result=m.result
+       if(result)try{input.onOutcome?.(result)}catch{/* Diagnostics cannot grant execution or complete a task. */}
       }else {failed=true;stop()}
      })
      child.on('close',(code)=>{
