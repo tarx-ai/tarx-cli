@@ -5,7 +5,7 @@ import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient} from './tarx-computer-planner.ts'
-type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number}
+type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean}
 let started=false,serial=0
 let phase='artifacts'
 const pending=new Map<number,(allowed:boolean)=>void>()
@@ -28,8 +28,6 @@ async function run(job:Job) {
  const load=(name:string)=>import(pathToFileURL(join(artifacts.coreDirectory,name)).href)
  const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js'].map(load))
  phase='scope'
- const localClient=scope.mode==='local_model'?createLoopbackPlannerClient(scope.model!):undefined
- if(localClient&&!await localClient.ready())return {outcome:'error',independent_verified:false,native_actions:0,model_calls:0,core_source:artifacts.coreSource,execution_mode:scope.mode,planner_status:'unavailable'}
  let latest:any,actions=0,modelCalls=0,plannerStatus:string|undefined
  const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
  const rows=(data:any)=>Array.isArray(data)?data:data?.windows??[]
@@ -52,12 +50,22 @@ async function run(job:Job) {
    return latest
   }
   async act(argv:string[]) {
+   if(job.observe===true)throw Error('native_observation_is_read_only')
    const node=latest&&indexRefs(latest.tree).get(argv[1])
    if(argv.length!==2||argv[0]!=='click'||!node||!scope.actions.some(a=>a.command===argv[0]&&a.role===node.role&&a.name===node.name)||actions>=job.maxSteps)throw Error('native_action_out_of_scope')
    await this.guard();latest=undefined;phase='action'
    const result=await super.exec(argv,{timeoutMs:5000});actions++;return result.data
   }
  }
+ if(job.observe===true){
+  const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000})
+  phase='observation'
+  const passed=(await verifyAll(ad,scope.app,scope.success)).passed
+  await ad.guard()
+  return {outcome:passed?'done':'unverified',independent_verified:passed,native_actions:0,model_calls:0,core_source:artifacts.coreSource,execution_mode:scope.mode}
+ }
+ const localClient=scope.mode==='local_model'?createLoopbackPlannerClient(scope.model!):undefined
+ if(localClient&&!await localClient.ready())return {outcome:'error',independent_verified:false,native_actions:0,model_calls:0,core_source:artifacts.coreSource,execution_mode:scope.mode,planner_status:'unavailable'}
  let nativeSession:string|undefined
  const bootstrap=new AgentDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000})
  if(artifacts.cursor){

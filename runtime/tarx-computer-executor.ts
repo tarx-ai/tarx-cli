@@ -6,7 +6,7 @@ import {lstat,readFile,readdir,realpath,mkdtemp,rm} from 'node:fs/promises'
 import {isAbsolute,join,dirname} from 'node:path'
 import {tmpdir} from 'node:os'
 import {promisify} from 'node:util'
-import type {ComputerExecutor,ComputerOutcome,ComputerSession} from './tarx-computer-task.ts'
+import type {ComputerExecutor,ComputerOutcome,ComputerRequest,ComputerRun,ComputerSession} from './tarx-computer-task.ts'
 
 export type CheckedFile={path:string;sha256:string}
 export type ComputerArtifacts={coreSource:string;coreDirectory:string;files:Record<string,string>;node:CheckedFile;adapter:CheckedFile;cursor?:CheckedFile}
@@ -91,15 +91,12 @@ export function validateNativeScope(s:NativeScope,maxSteps:number) {
   if(url.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.username||url.password||url.search||url.hash||!['','/','/v1','/v1/','/v1/chat/completions'].includes(url.pathname))throw Error('invalid_native_scope')
  }else throw Error('invalid_native_scope')
 }
-export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
- return {
-  shutdownGraceMs:6000,
-  async ready(){if(process.platform==='win32')return false;try{await verifyComputerArtifacts(artifacts);return true}catch{return false}},
-  async run({request,session,signal,stillAuthorized}) {
+ async function launch(observe:boolean,{request,session,signal,stillAuthorized}:ComputerRun):Promise<ComputerOutcome> {
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
    await verifyComputerArtifacts(artifacts)
-   const resolved=await input.resolveScope(session)
+   const resolved=await input.resolveScope(session,request)
    if(!resolved)throw Error('native_scope_required')
    const scope=structuredClone(resolved);validateNativeScope(scope,session.max_steps)
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
@@ -152,7 +149,7 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
       finish()
      })
      if(signal.aborted)stop()
-     else child.send({kind:'start',artifacts,scope,request:{goal:request.goal,context:request.context},maxSteps:session.max_steps},error=>{if(error){failed=true;stop()}})
+     else child.send({kind:'start',observe,artifacts,scope,request:{goal:request.goal,context:request.context},maxSteps:session.max_steps},error=>{if(error){failed=true;stop()}})
     })
    }finally{
     // Preserve the private state if host ownership/exit cannot be confirmed.
@@ -163,6 +160,12 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
     if(cleanupError)throw cleanupError
     await rm(home,{recursive:true,force:true})
    }
-  },
+ }
+ return {
+  shutdownGraceMs:6000,
+  async ready(){if(process.platform==='win32')return false;try{await verifyComputerArtifacts(artifacts);return true}catch{return false}},
+  run:(params:ComputerRun)=>launch(false,params),
+  /** Read-only recovery. Verifies the consented window and does not click. */
+  observe:(params:ComputerRun)=>launch(true,params),
  }
 }

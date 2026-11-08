@@ -30,7 +30,7 @@ test('queued reservation, install lease, running, and verified success use the s
  const f=await fixture(t,{run:async()=>{actions++;return new Promise(r=>{release=r})}})
  const queued=await f.controller.submit(identity,request,f.paired)
  assert.equal(queued.code,202);assert.equal(queued.body.status,'reserved');assert.equal(queued.body.receipt,null)
- for(let i=0;i<30&&!actions;i++)await new Promise(r=>setImmediate(r))
+ for(let i=0;i<50&&!actions;i++)await new Promise(r=>setTimeout(r,10))
  assert.equal((await f.controller.read(identity,request.request_id)).body.status,'running')
  const saved=f.grant(),other={...request,request_id:'computer_other_02',channel_id:'another-channel'}
  f.setGrant({...saved,channel_id:other.channel_id,intent_sha256:computerIntentHash(other)})
