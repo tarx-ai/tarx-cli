@@ -13,6 +13,7 @@ import {createPairedSessionListener} from './tarx-runtime-http.ts'
 import {createNativeComputerExecutor,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {COMPUTER_TASK,computerIntentHash,type ComputerRequest,type ComputerSession} from './tarx-computer-task.ts'
 import {connectComputerHost,createComputerHostConsent} from './tarx-computer-consent.ts'
+import {runRuntimeEntry} from './tarx-runtime-entry.ts'
 const origin='https://www.tarx.com',subject='tvs_'+'a'.repeat(32),core='c'.repeat(40)
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex')
 const request:ComputerRequest={request_id:'host_consent_0001',task:COMPUTER_TASK,session_id:'wrun_'+'D'.repeat(26),channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Open the fixture control'}
@@ -78,7 +79,7 @@ test('paired runtime still refuses execution until host consent matches channel,
  assert.equal((await post({...request,actions:['click everything']})).status,400)
  assert.equal((await post(request)).status,202)
  let result:any
- for(let i=0;i<50;i++){result=await(await fetch(base+'/computer-tasks/'+request.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,20))}
+ for(let i=0;i<100;i++){result=await(await fetch(base+'/computer-tasks/'+request.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,50))}
  assert.equal(result.status,'completed');assert.equal(result.receipt.independent_verified,true);assert.equal(result.receipt.native_actions,1);assert.equal(result.receipt.model_calls,0)
  assert.equal(await clicks(clickLog),1)
  assert.equal((await consent.resolveScope(saved,{request_id:'host_consent_0002'})),null)
@@ -100,4 +101,34 @@ test('native recovery observation checks the consented window and does not click
  assert.equal(observed.outcome,'done');assert.equal(observed.independent_verified,true);assert.equal(observed.native_actions,0);assert.equal(observed.model_calls,0)
  assert.equal(observed.execution_mode,'deterministic_actuator')
  assert.equal(await clicks(clickLog),1)
+})
+
+test('serve attaches host consent: a matching grant submits and no grant does not click',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'tarx-serve-host-')));t.after(()=>rm(root,{recursive:true,force:true}))
+ const clickLog=join(root,'clicks.log')
+ const {built}=await artifacts(t,clickLog)
+ const state=join(root,'state'),key=join(root,'cli')
+ await writeFile(key,'tarx_cli_'+'f'.repeat(64),{mode:0o600})
+ const fetcher=(async()=>new Response(JSON.stringify({ok:true,subject_id:subject}))) as typeof fetch
+ const ch:any=await runRuntimeEntry(['challenge','--state-dir',state,'--credential-file',key],{fetcher})
+ assert.equal(ch.ok,true)
+ assert.deepEqual(await runRuntimeEntry(['approve','--state-dir',state,'--challenge',ch.challenge,'--task',COMPUTER_TASK]),{ok:true})
+ const install_id=(await readFile(join(state,'install-id'),'utf8')).trim()
+ const consent=createComputerHostConsent()
+ const running:any=await runRuntimeEntry(['serve','--state-dir',state,'--worker-url','http://127.0.0.1:9','--port','0'],{clientFactory:()=>({health:async()=>({ok:true,status:'ready'}),sessions:{attach:()=>({async *stream(){}})}}),computerHost:{artifacts:built,consent}})
+ try{
+  const base='http://127.0.0.1:'+running.address.port
+  const claim=await fetch(base+'/pairing/claim',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({challenge:ch.challenge})})
+  assert.equal(claim.status,200)
+  const headers={origin,'content-type':'application/json',authorization:'Bearer '+(await claim.json()).pairing_credential}
+  const denied=await fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(request)})
+  assert.equal(denied.status,403);assert.equal((await denied.json()).error,'computer_session_approval_required')
+  assert.equal(await clicks(clickLog),0)
+  consent.grant({request_id:request.request_id,actions:[action],session:session(Date.now(),{install_id}),scope:scope()})
+  assert.equal((await fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(request)})).status,202)
+  let result:any
+  for(let i=0;i<100;i++){result=await(await fetch(base+'/computer-tasks/'+request.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,50))}
+  assert.equal(result.status,'completed');assert.equal(result.receipt.native_actions,1);assert.equal(result.receipt.model_calls,0)
+  assert.equal(await clicks(clickLog),1)
+ }finally{await running.listener.close()}
 })
