@@ -1,7 +1,9 @@
-/** Host-supplied computer consent. The caller provides the session id.
- * This module never mints one. Pairing is not a grant. */
-import {createComputerTaskController,computerIntentHash,COMPUTER_TASK,type ComputerAuthority,type ComputerSession,type ComputerSubmission} from './tarx-computer-task.ts'
-import {createNativeComputerExecutor,validateNativeScope,type ComputerArtifacts,type NativeAction,type NativeScope} from './tarx-computer-executor.ts'
+/** Host computer consent. grant stores a session. issueNativeHostGrant creates
+ * one only after the native artifacts verify, then stores it here. Pairing is
+ * not a grant. A runtime that cannot verify those artifacts does not issue. */
+import {randomBytes} from 'node:crypto'
+import {createComputerTaskController,computerIntentHash,COMPUTER_TASK,type ComputerAuthority,type ComputerRequest,type ComputerSession,type ComputerSubmission} from './tarx-computer-task.ts'
+import {createNativeComputerExecutor,validateNativeScope,verifyComputerArtifacts,type ComputerArtifacts,type NativeAction,type NativeScope} from './tarx-computer-executor.ts'
 const opaque=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)
 const agentOk=(s:unknown)=>typeof s==='string'&&(String(s).includes(':')?/^channel-agent:[A-Za-z0-9-]{1,128}$/.test(String(s)):opaque(s))
 export type ComputerHostGrant={request_id:string;actions:NativeAction[];session:ComputerSession;scope:NativeScope}
@@ -38,6 +40,34 @@ export function createComputerHostConsent(now:()=>number=Date.now){
    return structuredClone(grant.scope)
   },
  }
+}
+const hostAlphabet='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+function newHostSessionId(){
+ let suffix=''
+ for(const byte of randomBytes(26))suffix+=hostAlphabet[byte%36]
+ return 'wrun_'+suffix
+}
+export type NativeHostGrant={
+ artifacts:ComputerArtifacts
+ consent:ReturnType<typeof createComputerHostConsent>
+ request:{request_id:string;channel_id:string;agent_id:string;goal:string;context?:string}
+ subject_id:string
+ install_id:string
+ actions:NativeAction[]
+ scope:NativeScope
+ expires_at:number
+ max_steps:number
+ timeout_ms:number
+}
+/** User consent on a native host. The session id is random. It is not derived
+ * from a machine install, user, or pairing credential. */
+export async function issueNativeHostGrant(input:NativeHostGrant):Promise<ComputerSession|null>{
+ try{await verifyComputerArtifacts(input.artifacts)}catch{return null}
+ const session_id=newHostSessionId()
+ const request:ComputerRequest={task:COMPUTER_TASK,session_id,request_id:input.request.request_id,channel_id:input.request.channel_id,agent_id:input.request.agent_id,goal:input.request.goal,context:input.request.context}
+ const session:ComputerSession={session_id,subject_id:input.subject_id,install_id:input.install_id,channel_id:request.channel_id,agent_id:request.agent_id,intent_sha256:computerIntentHash(request),expires_at:input.expires_at,max_steps:input.max_steps,timeout_ms:input.timeout_ms}
+ input.consent.grant({request_id:request.request_id,actions:input.actions,session,scope:input.scope})
+ return input.consent.authority.resolve(session_id)
 }
 export function connectComputerHost(input:{file:string;coreSource:string;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}){
  return createComputerTaskController({file:input.file,coreSource:input.coreSource,authority:input.consent.authority,executor:createNativeComputerExecutor({artifacts:input.artifacts,resolveScope:(session,request)=>input.consent.resolveScope(session,request)})})

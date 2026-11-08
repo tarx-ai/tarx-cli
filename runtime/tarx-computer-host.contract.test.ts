@@ -12,7 +12,7 @@ import {createFileOwnerStore} from './tarx-eve-listener.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
 import {createNativeComputerExecutor,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {COMPUTER_TASK,computerIntentHash,type ComputerRequest,type ComputerSession} from './tarx-computer-task.ts'
-import {connectComputerHost,createComputerHostConsent} from './tarx-computer-consent.ts'
+import {connectComputerHost,createComputerHostConsent,issueNativeHostGrant} from './tarx-computer-consent.ts'
 import {runRuntimeEntry} from './tarx-runtime-entry.ts'
 const origin='https://www.tarx.com',subject='tvs_'+'a'.repeat(32),core='c'.repeat(40)
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex')
@@ -168,4 +168,34 @@ test('a null session id binds the stored host session for the same channel, agen
  for(let i=0;i<100;i++){result=await(await fetch(base+'/computer-tasks/'+open.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,50))}
  assert.equal(result.status,'completed');assert.equal(result.receipt.session_id,open.session_id);assert.equal(result.receipt.native_actions,1);assert.equal(result.receipt.model_calls,0)
  assert.equal(await clicks(clickLog),1)
+})
+
+test('native host grant issues a bound session; pairing and missing artifacts do not',async t=>{
+ const {built}=await artifacts(t,join(tmpdir(),'tarx-issue-unused'))
+ const consent=createComputerHostConsent()
+ const asked={request_id:'host_issue_00001',channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Open the fixture control'}
+ const expires_at=Date.now()+60000
+ const scratch=await mkdtemp(join(tmpdir(),'tarx-issue-pair-'));t.after(()=>rm(scratch,{recursive:true,force:true}))
+ const pairs=createFilePairStore(join(scratch,'pairs.json'))
+ const challenge=await createPairingChallenge({loadCredential:async()=>'tarx_cli_'+'e'.repeat(64),install_id:'fixture_install',store:pairs,fetcher:async()=>new Response(JSON.stringify({ok:true,subject_id:subject}))})
+ assert.ok(challenge.ok);if(!challenge.ok)throw Error('fixture pairing')
+ assert.equal(await approvePairingChallenge(challenge.challenge,pairs,Date.now(),COMPUTER_TASK),true)
+ assert.equal(await consent.authority.bind({task:COMPUTER_TASK,...asked}),null)
+ const broken={...built,files:{...built.files,'adapter.js':'0'.repeat(64)}}
+ assert.equal(await issueNativeHostGrant({artifacts:broken,consent,request:asked,subject_id:subject,install_id:'fixture_install',actions:[action],scope:scope(),expires_at,max_steps:2,timeout_ms:4000}),null)
+ assert.equal(await consent.authority.bind({task:COMPUTER_TASK,...asked}),null)
+ const issued=await issueNativeHostGrant({artifacts:built,consent,request:asked,subject_id:subject,install_id:'fixture_install',actions:[action],scope:scope(),expires_at,max_steps:2,timeout_ms:4000})
+ assert.ok(issued)
+ assert.match(issued.session_id,/^wrun_[0-9A-Z]{26}$/)
+ assert.equal(issued.channel_id,asked.channel_id)
+ assert.equal(issued.agent_id,asked.agent_id)
+ assert.equal(issued.subject_id,subject)
+ assert.equal(issued.install_id,'fixture_install')
+ assert.equal(issued.expires_at,expires_at)
+ assert.equal(issued.intent_sha256,computerIntentHash({task:COMPUTER_TASK,session_id:issued.session_id,...asked}))
+ const stored=await consent.authority.resolve(issued.session_id)
+ assert.equal(stored?.session_id,issued.session_id)
+ assert.equal((await consent.authority.bind({task:COMPUTER_TASK,...asked}))?.session_id,issued.session_id)
+ assert.equal(await consent.authority.bind({task:COMPUTER_TASK,...asked,channel_id:'other-channel'}),null)
+ assert.deepEqual((await consent.resolveScope(issued,{request_id:asked.request_id}))?.actions,[action])
 })
