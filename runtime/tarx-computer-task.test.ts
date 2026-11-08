@@ -99,4 +99,6 @@ test('channel-agent product ids parse and a second colon does not',()=>{
  assert.equal(parseComputerRequest({...base,agent_id:'channel-agent:qa:pass'}),null)
  assert.equal(parseComputerRequest({...base,agent_id:'channel-agent:'}),null)
  assert.equal(parseComputerRequest({...base,agent_id:'other-agent:qa-pass'}),null)
+ assert.equal(parseComputerRequest({...base,session_id:null})?.session_id,undefined)
+ assert.equal(parseComputerRequest({...base,session_id:''}),null)
 })

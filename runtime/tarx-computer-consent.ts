@@ -1,6 +1,6 @@
 /** Host-supplied computer consent. The caller provides the session id.
  * This module never mints one. Pairing is not a grant. */
-import {createComputerTaskController,type ComputerAuthority,type ComputerSession} from './tarx-computer-task.ts'
+import {createComputerTaskController,computerIntentHash,COMPUTER_TASK,type ComputerAuthority,type ComputerSession,type ComputerSubmission} from './tarx-computer-task.ts'
 import {createNativeComputerExecutor,validateNativeScope,type ComputerArtifacts,type NativeAction,type NativeScope} from './tarx-computer-executor.ts'
 const opaque=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)
 const agentOk=(s:unknown)=>typeof s==='string'&&(String(s).includes(':')?/^channel-agent:[A-Za-z0-9-]{1,128}$/.test(String(s)):opaque(s))
@@ -20,7 +20,16 @@ export function createComputerHostConsent(now:()=>number=Date.now){
    grants.set(session.session_id,structuredClone(value))
   },
   revoke(sessionId:string){grants.delete(sessionId)},
-  authority:{async resolve(sessionId:string){const grant=live(sessionId);return grant?structuredClone(grant.session):null}} satisfies ComputerAuthority,
+  authority:{
+   async resolve(sessionId:string){const grant=live(sessionId);return grant?structuredClone(grant.session):null},
+   async bind(request:ComputerSubmission){
+    const matches=[...grants.values()].filter(grant=>live(grant.session.session_id)&&grant.request_id===request.request_id&&grant.session.channel_id===request.channel_id&&grant.session.agent_id===request.agent_id)
+    if(matches.length!==1)return null
+    const grant=matches[0]!
+    if(computerIntentHash({...request,task:COMPUTER_TASK,session_id:grant.session.session_id})!==grant.session.intent_sha256)return null
+    return structuredClone(grant.session)
+   },
+  } satisfies ComputerAuthority,
   async resolveScope(session:ComputerSession,request?:{request_id?:string}){
    const grant=live(session.session_id)
    if(!grant||grant.request_id!==(request?.request_id??grant.request_id)||grant.session.channel_id!==session.channel_id||grant.session.agent_id!==session.agent_id||

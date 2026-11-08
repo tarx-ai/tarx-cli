@@ -25,9 +25,12 @@ export type ComputerExecutor = {
  /** Fresh observation after a crash. Must not repeat a delivered action. */
  observe?:(input:ComputerRun)=>Promise<ComputerOutcome>
 }
+export type ComputerSubmission = Omit<ComputerRequest,'session_id'> & {session_id?:string}
 export type ComputerAuthority = {
  // Supplied only by the trusted native host after its explicit session approval.
  resolve:(sessionId:string)=>Promise<ComputerSession|null>
+ /** Find the host grant for this channel, agent, and request. Never mints a session. */
+ bind?:(request:ComputerSubmission)=>Promise<ComputerSession|null>
 }
 type Status='reserved'|'running'|'completed'|'failed'|'cancelling'|'cancelled'|'uncertain'
 type Record = {task:typeof COMPUTER_TASK;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;status:Status;receipt?:{
@@ -40,13 +43,17 @@ const sessionId=(s:unknown)=>typeof s==='string'&&/^wrun_[0-9A-Z]{20,32}$/.test(
 const requestId=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9_-]{8,80}$/.test(s)
 const terminal=(s:Status)=>['completed','failed','cancelled'].includes(s)
 const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
-export function parseComputerRequest(value:unknown):ComputerRequest|null {
+export function parseComputerRequest(value:unknown):ComputerSubmission|null {
  if(!value||typeof value!=='object'||Array.isArray(value))return null
- const r=value as ComputerRequest
+ const r=value as {[key:string]:unknown}
  if(Object.keys(r).some(k=>!['request_id','task','session_id','channel_id','agent_id','goal','context'].includes(k))||
-   r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!agentId(r.agent_id)||
-   typeof r.goal!=='string'||!r.goal.trim()||r.goal.length>2000||r.context!==undefined&&(typeof r.context!=='string'||r.context.length>4000))return null
- return {...r}
+   r.task!==COMPUTER_TASK||!requestId(r.request_id)||!opaque(r.channel_id)||!agentId(r.agent_id)||
+   typeof r.goal!=='string'||!r.goal.trim()||r.goal.length>2000||r.context!==undefined&&(typeof r.context!=='string'||r.context.length>4000)||
+   r.session_id!=null&&!sessionId(r.session_id))return null
+ const parsed:ComputerSubmission={request_id:r.request_id as string,task:COMPUTER_TASK,channel_id:r.channel_id as string,agent_id:r.agent_id as string,goal:r.goal as string}
+ if(typeof r.context==='string')parsed.context=r.context
+ if(typeof r.session_id==='string'&&sessionId(r.session_id))parsed.session_id=r.session_id
+ return parsed
 }
 export function computerIntentHash(r:ComputerRequest) {return hash([r.request_id,r.session_id,r.channel_id,r.agent_id,r.goal,r.context??''])}
 function validRecord(r:Record,source:string):boolean {
@@ -94,6 +101,15 @@ export function createComputerTaskController(input:{file:string;authority:Comput
  const settling=new Set<string>()
  const key=(id:TaskIdentity,request:string)=>'computer:'+hash([id.subject_id,id.install_id,request])
  const safe=(r:Record)=>{if(!validRecord(r,input.coreSource))throw Error('invalid_computer_record');return {task:r.task,request_id:r.request_id,session_id:r.session_id,channel_id:r.channel_id,agent_id:r.agent_id,status:r.status,receipt:r.receipt??null}}
+ async function bindRequest(parsed:ComputerSubmission):Promise<ComputerRequest|null> {
+  if(parsed.session_id)return parsed as ComputerRequest
+  if(!input.authority.bind)return null
+  const bound=await bounded(()=>input.authority.bind!(parsed),1000).catch(()=>null)
+  if(!bound||bound.channel_id!==parsed.channel_id||bound.agent_id!==parsed.agent_id||!sessionId(bound.session_id))return null
+  const request:ComputerRequest={...parsed,session_id:bound.session_id}
+  if(bound.intent_sha256!==computerIntentHash(request))return null
+  return request
+ }
  async function authorized(id:TaskIdentity,r:ComputerRequest,paired:()=>Promise<boolean>) {
   if(closed||!id.task_scopes.includes(COMPUTER_TASK)||!await bounded(paired,1000).catch(()=>false))return null
   const s=await bounded(()=>input.authority.resolve(r.session_id),1000).catch(()=>null)
@@ -187,8 +203,9 @@ export function createComputerTaskController(input:{file:string;authority:Comput
   async available(){return !closed&&await bounded(()=>input.executor.ready(),1000).catch(()=>false)},
   async submit(id:TaskIdentity,body:unknown,paired:()=>Promise<boolean>):Promise<Reply> {
    if(closed)return {code:503,body:{error:'computer_runtime_unavailable'}}
-   const request=parseComputerRequest(body);if(!request)return {code:400,body:{error:'invalid_computer_task'}}
+   const parsed=parseComputerRequest(body);if(!parsed)return {code:400,body:{error:'invalid_computer_task'}}
    if(!id.task_scopes.includes(COMPUTER_TASK)||!await bounded(paired,1000).catch(()=>false))return {code:403,body:{error:'computer_session_approval_required'}}
+   const request=await bindRequest(parsed);if(!request)return {code:403,body:{error:'computer_session_approval_required'}}
    const kExisting=key(id,request.request_id)
    const existing=await store.get(kExisting)
    if(existing){

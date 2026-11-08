@@ -132,3 +132,40 @@ test('serve attaches host consent: a matching grant submits and no grant does no
   assert.equal(await clicks(clickLog),1)
  }finally{await running.listener.close()}
 })
+
+test('a null session id binds the stored host session for the same channel, agent, and request',async t=>{
+ const scratch=await realpath(await mkdtemp(join(tmpdir(),'tarx-null-session-')));t.after(()=>rm(scratch,{recursive:true,force:true}))
+ const clickLog=join(scratch,'clicks.log')
+ const {built}=await artifacts(t,clickLog)
+ const open:ComputerRequest={...request,request_id:'host_consent_null1'}
+ const consent=createComputerHostConsent()
+ const pairs=createFilePairStore(join(scratch,'pairs.json')),owners=createFileOwnerStore(join(scratch,'owners.json'))
+ const challenge=await createPairingChallenge({loadCredential:async()=>'tarx_cli_'+'f'.repeat(64),install_id:'fixture_install',store:pairs,fetcher:async()=>new Response(JSON.stringify({ok:true,subject_id:subject}))})
+ assert.ok(challenge.ok);if(!challenge.ok)throw Error('fixture pairing')
+ assert.equal(await approvePairingChallenge(challenge.challenge,pairs,Date.now(),COMPUTER_TASK),true)
+ const tasks=connectComputerHost({file:join(scratch,'tasks.json'),coreSource:core,artifacts:built,consent})
+ const server=createPairedSessionListener({host:'127.0.0.1',port:0,allowedOrigins:new Set([origin]),pairStore:pairs,ownerStore:owners,computerTasks:tasks,eveClient:()=>({attach:()=>({async *stream(){}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false})})
+ const {port}=await server.listen();const base='http://127.0.0.1:'+port
+ t.after(async()=>{await tasks.close();await server.close()})
+ const claim=await fetch(base+'/pairing/claim',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({challenge:challenge.challenge})})
+ assert.equal(claim.status,200)
+ const headers={origin,'content-type':'application/json',authorization:'Bearer '+(await claim.json()).pairing_credential}
+ const body={...open,session_id:null}
+ const post=()=>fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(body)})
+ assert.equal((await post()).status,403)
+ assert.equal(await clicks(clickLog),0)
+ const foreign={...open,channel_id:'other-channel'}
+ consent.grant({request_id:foreign.request_id,actions:[action],session:{...session(Date.now()),channel_id:foreign.channel_id,intent_sha256:computerIntentHash(foreign)},scope:scope()})
+ assert.equal((await post()).status,403)
+ assert.equal(await clicks(clickLog),0)
+ consent.revoke(open.session_id)
+ consent.grant({request_id:open.request_id,actions:[action],session:session(Date.now(),{intent_sha256:computerIntentHash(open)}),scope:scope()})
+ const accepted=await post()
+ assert.equal(accepted.status,202)
+ const reserved=await accepted.json()
+ assert.equal(reserved.session_id,open.session_id)
+ let result:any
+ for(let i=0;i<100;i++){result=await(await fetch(base+'/computer-tasks/'+open.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,50))}
+ assert.equal(result.status,'completed');assert.equal(result.receipt.session_id,open.session_id);assert.equal(result.receipt.native_actions,1);assert.equal(result.receipt.model_calls,0)
+ assert.equal(await clicks(clickLog),1)
+})
