@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {mkdtemp,readFile,rm} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {createComputerTaskController,computerIntentHash,COMPUTER_TASK,type ComputerRequest,type ComputerSession,type ComputerOutcome} from './tarx-computer-task.ts'
+import {createComputerTaskController,computerIntentHash,parseComputerRequest,COMPUTER_TASK,type ComputerRequest,type ComputerSession,type ComputerOutcome} from './tarx-computer-task.ts'
 const identity={subject_id:'tvs_'+'a'.repeat(32),install_id:'fixture_install',task_scopes:[COMPUTER_TASK]}
 const request:ComputerRequest={request_id:'computer_request_01',task:COMPUTER_TASK,session_id:'wrun_'+'B'.repeat(26),channel_id:'channel-fixture',agent_id:'agent-fixture',goal:'Private synthetic goal',context:'Private synthetic channel context'}
 const core='a'.repeat(40)
@@ -90,4 +90,13 @@ test('trusted native cleanup is awaited within its capped budget instead of retu
  const start=Date.now();await controller.close();assert.ok(Date.now()-start<2500);assert.equal(cleaned,true)
  assert.equal((await controller.read(identity,request.request_id)).body.status,'cancelled')
  assert.throws(()=>createComputerTaskController({file:join(dir,'other.json'),coreSource:core,authority:{resolve:async()=>grant},executor:{...executor,shutdownGraceMs:6001}}),/invalid_computer_shutdown_budget/)
+})
+
+test('channel-agent product ids parse and a second colon does not',()=>{
+ const base={request_id:request.request_id,task:request.task,session_id:request.session_id,channel_id:request.channel_id,goal:request.goal}
+ assert.equal(parseComputerRequest({...base,agent_id:'channel-agent:qa-pass'})?.agent_id,'channel-agent:qa-pass')
+ assert.equal(parseComputerRequest({...base,agent_id:'agent-fixture'})?.agent_id,'agent-fixture')
+ assert.equal(parseComputerRequest({...base,agent_id:'channel-agent:qa:pass'}),null)
+ assert.equal(parseComputerRequest({...base,agent_id:'channel-agent:'}),null)
+ assert.equal(parseComputerRequest({...base,agent_id:'other-agent:qa-pass'}),null)
 })

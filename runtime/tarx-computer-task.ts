@@ -32,6 +32,7 @@ type Record = {task:typeof COMPUTER_TASK;request_id:string;session_id:string;cha
 }}
 type Reply={code:number;body:{error?:string;request_id?:string;session_id?:string;channel_id?:string;agent_id?:string;task?:typeof COMPUTER_TASK;status?:Status;receipt?:Record['receipt']|null}}
 const opaque=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)
+const agentId=(s:unknown)=>typeof s==='string'&&(s.includes(':')?/^channel-agent:[A-Za-z0-9-]{1,128}$/.test(s):opaque(s))
 const sessionId=(s:unknown)=>typeof s==='string'&&/^wrun_[0-9A-Z]{20,32}$/.test(s)
 const requestId=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9_-]{8,80}$/.test(s)
 const terminal=(s:Status)=>['completed','failed','cancelled'].includes(s)
@@ -40,13 +41,13 @@ export function parseComputerRequest(value:unknown):ComputerRequest|null {
  if(!value||typeof value!=='object'||Array.isArray(value))return null
  const r=value as ComputerRequest
  if(Object.keys(r).some(k=>!['request_id','task','session_id','channel_id','agent_id','goal','context'].includes(k))||
-   r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!opaque(r.agent_id)||
+   r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!agentId(r.agent_id)||
    typeof r.goal!=='string'||!r.goal.trim()||r.goal.length>2000||r.context!==undefined&&(typeof r.context!=='string'||r.context.length>4000))return null
  return {...r}
 }
 export function computerIntentHash(r:ComputerRequest) {return hash([r.request_id,r.session_id,r.channel_id,r.agent_id,r.goal,r.context??''])}
 function validRecord(r:Record,source:string):boolean {
- if(!r||r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!opaque(r.agent_id)||
+ if(!r||r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!agentId(r.agent_id)||
   typeof r.subject_id!=='string'||!/^tvs_[a-f0-9]{32}$/.test(r.subject_id)||!opaque(r.install_id)||!/^[a-f0-9]{64}$/.test(r.intent_sha256)||
   !['reserved','running','completed','failed','cancelling','cancelled','uncertain'].includes(r.status))return false
  const receipt=r.receipt
