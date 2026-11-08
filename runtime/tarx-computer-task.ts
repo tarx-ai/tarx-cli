@@ -16,11 +16,14 @@ export type ComputerOutcome = {
  execution_mode:'local_model'|'deterministic_actuator'
  planner_status?:string
 }
+export type ComputerRun = {request:ComputerRequest;session:ComputerSession;signal:AbortSignal;stillAuthorized:()=>Promise<boolean>}
 export type ComputerExecutor = {
  /** Trusted executor cleanup budget; never supplied by a browser request. */
  shutdownGraceMs?:number
  ready:()=>Promise<boolean>
- run:(input:{request:ComputerRequest;session:ComputerSession;signal:AbortSignal;stillAuthorized:()=>Promise<boolean>})=>Promise<ComputerOutcome>
+ run:(input:ComputerRun)=>Promise<ComputerOutcome>
+ /** Fresh observation after a crash. Must not repeat a delivered action. */
+ observe?:(input:ComputerRun)=>Promise<ComputerOutcome>
 }
 export type ComputerAuthority = {
  // Supplied only by the trusted native host after its explicit session approval.
@@ -87,7 +90,8 @@ export function createComputerTaskController(input:{file:string;authority:Comput
  const store=createLocalJsonStore<Record>(input.file)
  const now=input.now??Date.now
  let closed=false
- const active=new Map<string,{abort:AbortController;finished:Promise<void>}>
+ const active=new Map<string,{abort:AbortController;finished:Promise<void>}>()
+ const settling=new Set<string>()
  const key=(id:TaskIdentity,request:string)=>'computer:'+hash([id.subject_id,id.install_id,request])
  const safe=(r:Record)=>{if(!validRecord(r,input.coreSource))throw Error('invalid_computer_record');return {task:r.task,request_id:r.request_id,session_id:r.session_id,channel_id:r.channel_id,agent_id:r.agent_id,status:r.status,receipt:r.receipt??null}}
  async function authorized(id:TaskIdentity,r:ComputerRequest,paired:()=>Promise<boolean>) {
@@ -98,19 +102,34 @@ export function createComputerTaskController(input:{file:string;authority:Comput
     !Number.isInteger(s.max_steps)||s.max_steps<1||s.max_steps>8||!Number.isInteger(s.timeout_ms)||s.timeout_ms<1||s.timeout_ms>45000)return null
   return s
  }
- async function transition(k:string,status:Status,receipt?:Record['receipt']) {
+ async function transition(k:string,status:Status,receipt?:Record['receipt'],signal?:AbortSignal) {
   return store.transact(all=>{
    const r=all[k];if(!r)throw Error('unknown_computer_task')
    if(terminal(r.status))return {result:r}
-   all[k]={...r,status,...(receipt?{receipt}:{})};return {result:all[k],write:true}
+   const next:Status=status==='completed'&&(signal?.aborted||r.status==='cancelling')?'cancelled':status
+   const saved=next==='completed'?receipt:undefined
+   all[k]={...r,status:next,...(saved?{receipt:saved}:{})}
+   if(next!=='completed')delete all[k].receipt
+   return {result:all[k],write:true}
   })
+ }
+ function sameGrant(current:ComputerSession,session:ComputerSession) {
+  return current.expires_at===session.expires_at&&current.max_steps===session.max_steps&&current.timeout_ms===session.timeout_ms
+ }
+ async function settle(k:string,request:ComputerRequest,outcome:ComputerOutcome,signal:AbortSignal,still:()=>Promise<boolean>) {
+  if(signal.aborted||!await still()){await transition(k,'cancelled');return}
+  if(!validOutcome(outcome,input.coreSource)){await transition(k,'failed');return}
+  if(outcome.outcome==='done'&&outcome.independent_verified&&outcome.native_actions!==null&&outcome.model_calls!==null) {
+   await transition(k,'completed',{kind:'computer_use',session_id:request.session_id,channel_id:request.channel_id,agent_id:request.agent_id,
+    independent_verified:true,native_actions:outcome.native_actions,model_calls:outcome.model_calls,core_source:outcome.core_source,execution_mode:outcome.execution_mode,billing_truth:'not_a_charge'},signal)
+  } else await transition(k,outcome.outcome==='cancelled'?'cancelled':'failed')
  }
  async function execute(k:string,id:TaskIdentity,request:ComputerRequest,session:ComputerSession,paired:()=>Promise<boolean>,abort:AbortController) {
   let checking=false
   const stillAuthorized=async()=>{
    if(abort.signal.aborted)return false
    const current=await authorized(id,request,paired)
-   return Boolean(current&&current.expires_at===session.expires_at&&current.max_steps===session.max_steps&&current.timeout_ms===session.timeout_ms)
+   return Boolean(current&&sameGrant(current,session))
   }
   const watch=setInterval(()=>{
    if(checking||abort.signal.aborted)return
@@ -125,14 +144,44 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    if(abort.signal.aborted) {await transition(k,'cancelled');return}
    dispatched=true
    const outcome=await abortable(()=>input.executor.run({request,session,signal:abort.signal,stillAuthorized}),abort.signal,shutdownGraceMs)
-   if(abort.signal.aborted||!await stillAuthorized()) {await transition(k,'cancelled');return}
-   if(!validOutcome(outcome,input.coreSource)) {await transition(k,'failed');return}
-   if(outcome.outcome==='done'&&outcome.independent_verified&&outcome.native_actions!==null&&outcome.model_calls!==null) {
-    await transition(k,'completed',{kind:'computer_use',session_id:request.session_id,channel_id:request.channel_id,agent_id:request.agent_id,
-      independent_verified:true,native_actions:outcome.native_actions,model_calls:outcome.model_calls,core_source:outcome.core_source,execution_mode:outcome.execution_mode,billing_truth:'not_a_charge'})
-   } else await transition(k,outcome.outcome==='cancelled'?'cancelled':'failed')
-  } catch {await transition(k,dispatched?'uncertain':abort.signal.aborted?'cancelled':'failed').catch(()=>{})}
-  finally {clearTimeout(deadline);clearInterval(watch);active.delete(k)}
+   await settle(k,request,outcome,abort.signal,stillAuthorized)
+  } catch {
+   settling.add(k)
+   try{await transition(k,dispatched?'uncertain':abort.signal.aborted?'cancelled':'failed').catch(()=>{})}
+   finally{settling.delete(k)}
+  } finally {clearTimeout(deadline);clearInterval(watch);active.delete(k)}
+ }
+ async function recover(k:string,id:TaskIdentity,request:ComputerRequest,paired:()=>Promise<boolean>):Promise<Reply> {
+  if(active.has(k)||settling.has(k)){const r=await store.get(k);return {code:200,body:safe(r!)}}
+  const abort=new AbortController()
+  let release=()=>{}
+  const finished=new Promise<void>(resolve=>{release=resolve})
+  active.set(k,{abort,finished})
+  try {
+   const current=await store.get(k)
+   if(!current)return {code:404,body:{error:'unknown_computer_task'}}
+   if(terminal(current.status))return {code:200,body:safe(current)}
+   if(current.status==='cancelling'){await transition(k,'cancelled');const r=await store.get(k);return {code:200,body:safe(r!)}}
+   const session=await authorized(id,request,paired)
+   if(!session){await transition(k,'cancelled');const r=await store.get(k);return {code:403,body:{...safe(r!),error:'computer_session_approval_required'}}}
+   if(!input.executor.observe)return {code:200,body:safe(current)}
+   const still=async()=>{
+    if(abort.signal.aborted)return false
+    const live=await authorized(id,request,paired)
+    return Boolean(live&&sameGrant(live,session))
+   }
+   const timer=setTimeout(()=>abort.abort(),Math.min(session.timeout_ms,Math.max(1,session.expires_at-now())))
+   try {
+    if(!await still())await transition(k,'cancelled')
+    else {
+     const outcome=await abortable(()=>input.executor.observe!({request,session,signal:abort.signal,stillAuthorized:still}),abort.signal)
+     await settle(k,request,outcome,abort.signal,still)
+    }
+   } catch {await transition(k,abort.signal.aborted?'cancelled':'uncertain').catch(()=>{})}
+   finally {clearTimeout(timer)}
+   const r=await store.get(k)
+   return {code:200,body:safe(r!)}
+  } finally {active.delete(k);release()}
  }
  return {
   async available(){return !closed&&await bounded(()=>input.executor.ready(),1000).catch(()=>false)},
@@ -140,8 +189,14 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    if(closed)return {code:503,body:{error:'computer_runtime_unavailable'}}
    const request=parseComputerRequest(body);if(!request)return {code:400,body:{error:'invalid_computer_task'}}
    if(!id.task_scopes.includes(COMPUTER_TASK)||!await bounded(paired,1000).catch(()=>false))return {code:403,body:{error:'computer_session_approval_required'}}
-   const existing=await store.get(key(id,request.request_id))
-   if(existing)return existing.intent_sha256===computerIntentHash(request)?{code:200,body:safe(existing)}:{code:409,body:{error:'request_conflict'}}
+   const kExisting=key(id,request.request_id)
+   const existing=await store.get(kExisting)
+   if(existing){
+    if(existing.intent_sha256!==computerIntentHash(request))return {code:409,body:{error:'request_conflict'}}
+    if(terminal(existing.status)||active.has(kExisting)||settling.has(kExisting))return {code:200,body:safe(existing)}
+    if(existing.status==='cancelling'){await transition(kExisting,'cancelled');const r=await store.get(kExisting);return {code:200,body:safe(r!)}}
+    return recover(kExisting,id,request,paired)
+   }
    const session=await authorized(id,request,paired)
    if(!session)return {code:403,body:{error:'computer_session_approval_required'}}
    if(!await bounded(()=>input.executor.ready(),1000).catch(()=>false))return {code:503,body:{error:'computer_runtime_unavailable'}}
