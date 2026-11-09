@@ -32,6 +32,13 @@ else:shutil.copyfile(os.environ['TEST_RUNTIME_ARCHIVE'],out)
   r=self.run_install();self.assertEqual(r.returncode,0,r.stderr)
   current=(self.home/'current').resolve();self.assertTrue((current/'tarx-runtime-entry.ts').is_file());self.assertTrue((current/'personal_learning_mlx.py').is_file());self.assertTrue((current/'tarx-local-learning.ts').is_file());self.assertTrue((self.home/'old'/'sentinel').exists())
   self.assertIn('--ignore-scripts',(self.base/'npm-args').read_text());self.assertIn('No service, worker or model was started',r.stdout)
+  for name in ['tarx-computer-task.ts','tarx-computer-executor.ts','tarx-computer-worker.ts']:
+   self.assertTrue((current/name).is_file())
+ def test_incomplete_computer_source_preserves_previous_runtime(self):
+  with tarfile.open(self.archive,'w:gz') as t:
+   for p in (ROOT/'runtime').iterdir():
+    if p.is_file() and p.name!='tarx-computer-worker.ts':t.add(p,arcname=f'tarx-cli-{SHA}/runtime/{p.name}')
+  r=self.run_install();self.assertNotEqual(r.returncode,0);self.assertEqual((self.home/'current').resolve(),self.home/'old');self.assertFalse((self.base/'npm-args').exists())
  def test_failed_dependency_install_preserves_previous_runtime(self):
   r=self.run_install(FAIL_NPM='1');self.assertNotEqual(r.returncode,0);self.assertEqual((self.home/'current').resolve(),self.home/'old')
  def test_failed_download_preserves_previous_runtime(self):

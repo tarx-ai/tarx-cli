@@ -100,7 +100,7 @@ export async function createPairingChallenge(input: {
  *  explicit combination, e.g. ['personal_chat','personal_learning']. */
 export async function approvePairingChallenge(challenge: string, store: PairStore, now = Date.now(), taskScope?: string | string[]): Promise<boolean> {
   const requested = taskScope == null ? [] : Array.isArray(taskScope) ? taskScope : [taskScope]
-  const allowed = new Set(['read_launch_note', 'personal_chat', 'personal_learning', 'personal_context'])
+  const allowed = new Set(['read_launch_note', 'personal_chat', 'personal_learning', 'personal_context', 'computer_use'])
   if (requested.some(s => !allowed.has(s))) return false
   // personal_learning is only grantable alongside personal_chat (mutations need
   // the fresh combined grant; a read-only/chat-only pair can never train).
