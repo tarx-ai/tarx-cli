@@ -67,7 +67,7 @@ function bridgeClient(config:{parent:string;nonce:string;returnName?:string}){
    const m=e.data
    if(!m||typeof m!=='object'||typeof m.id!=='string')return
    if(m.kind==='abort'){active.get(m.id)?.abort();return}
-   if((m.kind!=='claim'&&m.kind!=='personal'&&m.kind!=='learning')||active.has(m.id)||active.size>=2)return
+   if((m.kind!=='claim'&&m.kind!=='personal'&&m.kind!=='learning'&&m.kind!=='computer')||active.has(m.id)||active.size>=2)return
    const controller=new AbortController();active.set(m.id,controller)
    try{
     const response=await fetch('/rpc',{method:'POST',credentials:'omit',cache:'no-store',redirect:'error',
