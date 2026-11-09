@@ -75,3 +75,45 @@ test('model readiness consumes the complete response and verifies the configured
   assert.equal(await client.ready(),false);mode='wrong';assert.equal(await client.ready(),false);mode='ready';assert.equal(await client.ready(),true)
  }finally{await new Promise<void>(r=>server.close(()=>r()))}
 })
+
+test('a shortened display label keeps the fresh native handle for its full approved name',async()=>{
+ const name='Open the browser for the approved channel and inspect its current task result'
+ const shown=name.slice(0,60)+'…'
+ const text='[5] button '+JSON.stringify(shown)+' {Press}'
+ let sent:any
+ const planner=createScopedComputerPlanner({modelId:'fixture',endpoint:'http://127.0.0.1:1',complete:async(messages,opts)=>{
+  sent={messages,opts};return '{"status":"act","action":{"command":"click","target":5},"expect":{"kind":"none"}}'
+ }},[{command:'click',role:'button',name}],undefined,undefined,()=>({text,controls:[{handle:5,role:'button',name}]}))
+ const decision=JSON.parse((await planner.complete([{role:'user',content:'Goal: open the browser\nHistory:\n(none)\nObservation:\n'+text}]))!)
+ assert.equal(decision.status,'act');assert.equal(decision.action.target,5)
+ assert.deepEqual(sent.opts.jsonSchema.properties.action.properties.target.enum,[5])
+ assert.match(sent.messages[1].content,new RegExp(name))
+})
+
+test('display-name collisions do not grant access to a different full native name',async()=>{
+ const prefix='Open the browser for the approved channel and inspect its current task '
+ const approved=prefix+'result',other=prefix+'private settings'
+ const text='[1] button '+JSON.stringify(prefix.slice(0,60)+'…')+'\n[2] button '+JSON.stringify(prefix.slice(0,60)+'…')
+ let sent:any
+ const planner=createScopedComputerPlanner({modelId:'fixture',endpoint:'http://127.0.0.1:1',complete:async(messages,opts)=>{
+  sent={messages,opts};return '{"status":"act","action":{"command":"click","target":2},"expect":{"kind":"none"}}'
+ }},[{command:'click',role:'button',name:approved}],undefined,undefined,()=>({text,controls:[{handle:1,role:'button',name:approved},{handle:2,role:'button',name:other}]}))
+ assert.equal(await planner.complete([{role:'user',content:'Goal: open\nObservation:\n'+text}]),null)
+ assert.deepEqual(sent.opts.jsonSchema.properties.action.properties.target.enum,[1])
+ assert.doesNotMatch(sent.messages[1].content,/private settings/)
+})
+
+test('stale observation text and previous-frame handles fail closed',async()=>{
+ let calls=0,handle=7
+ const text=()=>`[${handle}] button "Allowed control"`
+ const planner=createScopedComputerPlanner({modelId:'fixture',endpoint:'http://127.0.0.1:1',complete:async()=>{
+  calls++;return '{"status":"act","action":{"command":"click","target":7},"expect":{"kind":"none"}}'
+ }},actions,undefined,undefined,()=>({text:text(),controls:[{handle,role:'button',name:'Allowed control'}]}))
+ const old=[{role:'user',content:'Goal: open\nObservation:\n'+text()}]
+ assert.equal(JSON.parse((await planner.complete(old))!).action.target,7)
+ handle=9
+ assert.equal(await planner.complete(old),null)
+ assert.equal(calls,1,'stale frames must not reach the provider')
+ assert.equal(await planner.complete([{role:'user',content:'Goal: open\nObservation:\n'+text()}]),null)
+ assert.equal(calls,2,'an old target is rejected even if a provider returns it for a fresh frame')
+})

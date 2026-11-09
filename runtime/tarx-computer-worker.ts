@@ -28,7 +28,7 @@ async function run(job:Job) {
  const load=(name:string)=>import(pathToFileURL(join(artifacts.coreDirectory,name)).href)
  const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js'].map(load))
  phase='scope'
- let latest:any,actions=0,modelCalls=0,plannerStatus:string|undefined
+ let latest:any,latestSurface:string|undefined,actions=0,modelCalls=0,plannerStatus:string|undefined
  const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
  const rows=(data:any)=>Array.isArray(data)?data:data?.windows??[]
  class ScopedDesktop extends AgentDesktop {
@@ -46,6 +46,7 @@ async function run(job:Job) {
   async snapshot(app:string,opts:{surface?:string;maxDepth?:number}={}) {
    if(app!==scope.app)throw Error('native_app_out_of_scope')
    latest=await super.snapshot(app,{maxDepth:30,...opts})
+   latestSurface=opts.surface
    if(scope.mode==='local_model'&&!opts.surface)latest={...latest,tree:scopeNativeObservation(latest.tree,scope.actions)}
    return latest
   }
@@ -102,7 +103,19 @@ async function run(job:Job) {
    if(!await authorize())return null
    return client.complete(messages,opts)
   }}
-  const model=createScopedComputerPlanner(authorizedClient,scope.actions,job.request.context,()=>modelCalls++)
+  const {renderObservation}=await load('observe.js')
+  const model=createScopedComputerPlanner(authorizedClient,scope.actions,job.request.context,()=>modelCalls++,()=>{
+   if(!latest)return null
+   const rendered=renderObservation(latest),nodes=indexRefs(latest.tree)
+   // Use the same checked renderer and snapshot as the core loop. Its menu
+   // advisory changes presentation only; handles still resolve to fresh refs.
+   const text=(latestSurface==='menu'?'(a menu is open; only its items are shown. press escape to close it)\n':'')+rendered.text
+   const controls=[...rendered.handles].map(([handle,ref])=>{
+    const node=nodes.get(ref)
+    return {handle,role:node?.role??'',name:node?.name??''}
+   })
+   return {text,controls}
+  })
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
   plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
