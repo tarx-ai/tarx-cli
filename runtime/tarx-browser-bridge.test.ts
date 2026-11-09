@@ -150,3 +150,31 @@ test('computer RPC is channel-bound data over fixed methods and paths, never cal
   assert.equal(f.seen.length,4)
  }finally{await f.close()}
 })
+
+test('actual browser MessagePort relays computer requests through the validated HTTP boundary',async()=>{
+ const f=await fixture()
+ try{
+  const source=f.page.text.match(/<script>([\s\S]*)<\/script>/)?.[1];assert.ok(source)
+  let connect:any;const replies:any[]=[]
+  const owner={postMessage(){}}
+  const port:any={onmessage:null,start(){},close(){},postMessage:(reply:any)=>replies.push(reply)}
+  new Script(source).runInContext(createContext({window:{opener:owner,addEventListener:(_name:string,fn:any)=>connect=fn},
+   document:{getElementById:()=>null},Map,AbortController,
+   fetch:async(url:string,init:any)=>{
+    assert.equal(url,'/rpc');assert.equal(init.signal.aborted,false)
+    const response=await call(f.port,url,JSON.parse(init.body),{...init.headers,origin:f.headers.origin})
+    return {status:response.status,text:async()=>response.text}
+   }}))
+  connect({origin:parent,source:owner,data:{type:'tarx.local-bridge.connect',version:1},ports:[port]})
+  const task={request_id:'bridge_port_0001',task:'computer_use',session_id:null,channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Synthetic fixture only'}
+  const requests=[{action:'capabilities'},{action:'submit',task},{action:'read',request_id:task.request_id},{action:'cancel',request_id:task.request_id}]
+  for(const [i,request]of requests.entries())await port.onmessage({data:{id:'port_'+i,kind:'computer',bearer,request}})
+  assert.equal(f.seen.length,4,'computer messages must reach the existing validated relay')
+  assert.deepEqual(replies.map(reply=>[reply.id,reply.status]),requests.map((_,i)=>['port_'+i,200]))
+  assert.deepEqual(f.seen.map(row=>[row.method,row.path]),[['GET','/task-capabilities'],['POST','/computer-tasks'],['GET','/computer-tasks/'+task.request_id],['POST','/computer-tasks/'+task.request_id+'/cancel']])
+  await port.onmessage({data:{id:'rejected',kind:'computer',bearer,request:{action:'approve'}}})
+  assert.equal(replies.at(-1).status,400);assert.equal(f.seen.length,4)
+  await port.onmessage({data:{id:'unknown',kind:'shell',bearer,request:{action:'run'}}})
+  assert.equal(replies.length,5);assert.equal(f.seen.length,4)
+ }finally{await f.close()}
+})
