@@ -115,7 +115,7 @@ async function run(job:Job) {
     return {handle,role:node?.role??'',name:node?.name??''}
    })
    return {text,controls}
-  })
+  },()=>actions)
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
   plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
