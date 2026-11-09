@@ -53,7 +53,11 @@ export function scopeNativeObservation(tree:NativeNode,actions:Action[]):NativeN
  return prune(tree)??{}
 }
 export type PlannerObservation={text:string;controls:Array<{handle:number;role:string;name:string}>}
-export function createScopedComputerPlanner(client:Client,actions:Action[],context?:string,onGeneration?:()=>void,readObservation?:()=>PlannerObservation|null) {
+function hasDeliveredActions(read?:()=>number):boolean {
+ if(!read)return false
+ try{const count=read();return Number.isSafeInteger(count)&&count>0}catch{return false}
+}
+export function createScopedComputerPlanner(client:Client,actions:Action[],context?:string,onGeneration?:()=>void,readObservation?:()=>PlannerObservation|null,readDeliveredActions?:()=>number) {
  let decisionStatus='idle'
  return {modelId:client.modelId,endpoint:client.endpoint,get decisionStatus(){return decisionStatus},async complete(messages:Message[]) {
   const observation=messages.at(-1)?.content??''
@@ -101,8 +105,9 @@ export function createScopedComputerPlanner(client:Client,actions:Action[],conte
   if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!['status','action','expect'].includes(k)))return null
   if(value.status==='done'||value.status==='blocked') {
    if(Object.keys(value).length!==1)return null
-   // A producer cannot claim completion before even one delivered action.
-   decisionStatus=value.status==='done'&&!/click delivered;/.test(prefix)?'false_done':value.status
+   // Goal/history text cannot attest delivery. The worker owns this counter;
+   // completion still requires the core's independent final verification.
+   decisionStatus=value.status==='done'&&!hasDeliveredActions(readDeliveredActions)?'false_done':value.status
    return JSON.stringify({status:decisionStatus==='false_done'?'blocked':value.status})
   }
   const a=value.action,e=value.expect
