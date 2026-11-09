@@ -138,7 +138,7 @@ def start(target, log, delay, argv):
         child = None; recorded = False
         try:
             with open(log, 'wb') as output:
-                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True)
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True)
             time.sleep(delay)
             if child.poll() is not None: raise ValueError('launch failed')
             record(target, child.pid); recorded = True

@@ -13,6 +13,19 @@ const session:ComputerSession={session_id:request.session_id,subject_id:'tvs_'+'
 const action={command:'click' as const,role:'button',name:'Fixture action'}
 const check={kind:'enabled' as const,role:'button',name:'Fixture result'}
 const scope:NativeScope={app:'Fixture',window:{id:'w-1',pid:123,title_sha256:hash('Fixture')},actions:[action],success:[check],mode:'deterministic_actuator',steps:[{action,expect:[check]}]}
+async function waitForFixtureAction(file:string,outcome:Promise<unknown>){
+ // Artifact hashing and worker startup compete with other test files in CI.
+ // Wait for actual action delivery, fail early on worker exit, and retain a deadline.
+ let settled=false,error:unknown
+ void outcome.then(()=>{settled=true},failure=>{settled=true;error=failure})
+ const deadline=Date.now()+5000
+ while(Date.now()<deadline){
+  try{const pid=Number(await readFile(file,'utf8'));if(Number.isSafeInteger(pid)&&pid>0)return pid}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e}
+  if(settled)throw error??Error('fixture worker exited before action delivery')
+  await new Promise(r=>setTimeout(r,10))
+ }
+ throw Error('fixture action delivery deadline exceeded')
+}
 async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false){
  const dir=await realpath(await mkdtemp(join(tmpdir(),'tarx-core-executor-test-')));t.after(()=>rm(dir,{recursive:true,force:true}))
  const pidFile=join(dir,'descendant-pid')
@@ -51,10 +64,10 @@ test('isolated worker rechecks exact artifacts and approved scope; deterministic
 })
 test('cancellation confirms owned worker exit and kills its native descendant before acknowledging',async t=>{
  const f=await fixture(t,true),abort=new AbortController()
+ t.after(()=>abort.abort())
  const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope})
  const result=executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:abort.signal,stillAuthorized:async()=>!abort.signal.aborted})
- let pid=0
- for(let i=0;i<100;i++){try{pid=Number(await readFile(f.pidFile,'utf8'));break}catch{}await new Promise(r=>setTimeout(r,10))}
+ const pid=await waitForFixtureAction(f.pidFile,result)
  assert.ok(pid>0);abort.abort()
  assert.equal((await result).outcome,'cancelled')
  let alive=true
@@ -63,12 +76,12 @@ test('cancellation confirms owned worker exit and kills its native descendant be
 })
 test('late interrupted-worker errors do not replace an acknowledged Stop after owned exit',async t=>{
  const f=await fixture(t,true,false,true),abort=new AbortController()
+ t.after(()=>abort.abort())
  const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope})
  const result=executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:abort.signal,stillAuthorized:async()=>!abort.signal.aborted})
  // Attach the rejection handler before triggering the deliberate worker error.
  const outcome=result.then(value=>({value}),error=>({error}))
- let pid=0
- for(let i=0;i<100;i++){try{pid=Number(await readFile(f.pidFile,'utf8'));break}catch{}await new Promise(r=>setTimeout(r,10))}
+ const pid=await waitForFixtureAction(f.pidFile,result)
  assert.ok(pid>0);abort.abort()
  const settled=await outcome
  assert.ok('value' in settled,'late worker interruption must remain cancellation')

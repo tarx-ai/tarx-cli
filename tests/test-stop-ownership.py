@@ -75,6 +75,9 @@ class StopOwnership(unittest.TestCase):
     def test_concurrent_starts_keep_one_owner_per_service(self):
         self.exercise_owned_start(concurrent=True)
 
+    def test_foreground_interrupt_does_not_kill_owned_services(self):
+        self.exercise_owned_start(interrupt=True)
+
     def test_reaped_stale_record_does_not_prevent_a_new_owner(self):
         exited = subprocess.Popen([sys.executable, '-c', 'pass'])
         exited.wait(timeout=3)
@@ -114,7 +117,7 @@ class StopOwnership(unittest.TestCase):
             if locker.poll() is None: locker.kill()
             locker.wait(timeout=3); locker.stdout.close()
 
-    def exercise_owned_start(self, concurrent=False):
+    def exercise_owned_start(self, concurrent=False, interrupt=False):
         if pathlib.Path('/usr/local/bin/tarx-mesh').exists() or shutil.which('tarx-mesh', path=self.env['PATH']):
             self.skipTest('a real mesh binary must never be started by this fixture')
         data = self.pids.parent
@@ -126,15 +129,32 @@ class StopOwnership(unittest.TestCase):
         curl.write_text('#!/bin/sh\nexit 1\n'); curl.chmod(0o700)
         trace = self.home / 'owned-fixture-pids'
         engine = self.bin / 'fixture-engine'
-        engine.write_text('#!/bin/sh\nprintf "%s\\n" "$$" >> "$FIXTURE_ENGINE_PID_LOG"\nexec python3 -c "import time; time.sleep(30)"\n')
+        engine.write_text('#!' + sys.executable + '\nimport os,time\nwith open(os.environ["FIXTURE_ENGINE_PID_LOG"], "a") as trace: trace.write(str(os.getpid()) + "\\n")\ntime.sleep(30)\n')
         engine.chmod(0o700)
         def alive(pid):
             result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
             return result.returncode == 0 and result.stdout.strip() and not result.stdout.strip().startswith('Z')
         owned = []
         try:
-            env = {**self.env, 'TARX_LLAMA_SERVER': str(engine), 'TARX_START_PROBE_SECONDS': '0.05', 'FIXTURE_ENGINE_PID_LOG': str(trace)}
-            if concurrent:
+            env = {**self.env, 'TARX_LLAMA_SERVER': str(engine), 'TARX_START_PROBE_SECONDS': '0.2', 'FIXTURE_ENGINE_PID_LOG': str(trace)}
+            if interrupt:
+                launcher = subprocess.Popen(['sh', str(ROOT / 'tarx'), 'start'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        if all((self.pids / (service + '.pid')).exists() for service in ['inference', 'embeddings']): break
+                        if launcher.poll() is not None: self.fail('launcher exited before publishing both service owners')
+                        time.sleep(0.01)
+                    self.assertTrue((self.pids / 'embeddings.pid').exists())
+                    for value in trace.read_text().splitlines():
+                        self.assertNotEqual(os.getpgid(int(value)), launcher.pid)
+                    os.killpg(launcher.pid, signal.SIGINT)
+                    launcher.communicate(timeout=5)
+                    self.assertTrue(all(alive(int(value)) for value in trace.read_text().splitlines()), 'foreground Ctrl-C must leave owned services alive')
+                finally:
+                    if launcher.poll() is None: os.killpg(launcher.pid, signal.SIGKILL)
+                    launcher.communicate(timeout=3)
+            elif concurrent:
                 launches = [subprocess.Popen(['sh', str(ROOT / 'tarx'), 'start'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
                 results = [process.communicate(timeout=10) for process in launches]
                 self.assertTrue(any(process.returncode == 0 for process in launches), results)
@@ -162,7 +182,7 @@ class StopOwnership(unittest.TestCase):
                 with lock.open('r+') as lease:
                     fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
             stopped = self.stop()
-            self.assertIn('Stop requested for owned inference', stopped.stdout)
+            self.assertIn('Stop requested for owned inference', stopped.stdout, stopped.stderr)
             self.assertNotIn('Stopped inference', stopped.stdout)
             for _ in range(50):
                 if not any(alive(pid) for pid in owned): break
