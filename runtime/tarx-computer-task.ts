@@ -186,15 +186,23 @@ export function createComputerTaskController(input:{file:string;authority:Comput
     const live=await authorized(id,request,paired)
     return Boolean(live&&sameGrant(live,session))
    }
+   let checking=false
+   const watch=setInterval(()=>{
+    if(checking||abort.signal.aborted)return
+    checking=true
+    void still().then(ok=>{if(!ok)abort.abort()},()=>abort.abort()).finally(()=>{checking=false})
+   },250)
    const timer=setTimeout(()=>abort.abort(),Math.min(session.timeout_ms,Math.max(1,session.expires_at-now())))
    try {
     if(!await still())await transition(k,'cancelled')
     else {
-     const outcome=await abortable(()=>input.executor.observe!({request,session,signal:abort.signal,stillAuthorized:still}),abort.signal)
+     const outcome=await abortable(()=>input.executor.observe!({request,session,signal:abort.signal,stillAuthorized:still}),abort.signal,shutdownGraceMs)
      await settle(k,request,outcome,abort.signal,still)
     }
-   } catch {await transition(k,abort.signal.aborted?'cancelled':'uncertain').catch(()=>{})}
-   finally {clearTimeout(timer)}
+   // A read-only worker still owns native resources. If its bounded shutdown
+   // cannot be confirmed, preserve uncertainty instead of acknowledging Stop.
+   } catch {await transition(k,'uncertain').catch(()=>{})}
+   finally {clearTimeout(timer);clearInterval(watch)}
    const r=await store.get(k)
    return {code:200,body:safe(r!)}
   } finally {active.delete(k);release()}
