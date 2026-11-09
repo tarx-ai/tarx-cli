@@ -13,7 +13,7 @@ import {pathToFileURL} from 'node:url'
 import {createFilePairStore,createPairingChallenge,approvePairingChallenge,revokePairing} from './tarx-browser-pairing.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
 import {connectComputerHost,createComputerHostConsent} from './tarx-computer-consent.ts'
-import type {ComputerArtifacts} from './tarx-computer-executor.ts'
+import {verifyComputerArtifacts,type ComputerArtifacts} from './tarx-computer-executor.ts'
 import {createOwnedPublicWorker} from './tarx-owned-worker.ts'
 import {createBoundedTaskController,createEveReadNoteExecutor} from './tarx-bounded-task.ts'
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
@@ -39,8 +39,8 @@ function attachComputerHost(state:string,host?:ComputerHostAttachment){
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv;computerHost?:ComputerHostAttachment}={}){
  const command=args[0]??'help',options:Record<string,string>={}
  for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port|resume)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
- if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
- if(!['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'].includes(command))throw Error('unknown_command')
+ if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal','serve-computer','serve-browser'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; serve-computer requires native host attachment; no service or worker installed'}
+ if(!['challenge','approve','revoke','serve','serve-check','serve-personal','serve-computer','serve-browser'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
  const store=createFilePairStore(join(state,'pairs.json'))
  if(command==='challenge'){
@@ -55,6 +55,29 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
  if(command==='serve-browser'){const listener=createBrowserBridge({port:Number(options.port??3271)});return {listener,address:await listener.listen()}}
+ if(command==='serve-computer'){
+  // Native-owned attachment only; no personal configuration or Eve worker lookup.
+  const host=testDeps.computerHost
+  if(!host)throw Error('computer_host_required')
+  await verifyComputerArtifacts(host.artifacts)
+  const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
+  const computer=attachComputerHost(state,host)
+  let browser:ReturnType<typeof createBrowserBridge>|undefined
+  let closeCore=async()=>{}
+  let closing:Promise<void>|undefined
+  const close=()=>closing??=(async()=>{
+   try{if(browser?.server.listening)await browser.close()}
+   finally{try{await closeCore()}finally{await computer.close()}}
+  })()
+  try{
+   const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),computerTasks:computer.computerTasks,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false})})
+   closeCore=listener.close.bind(listener)
+   const address=await listener.listen()
+   browser=createBrowserBridge({port:port===0?0:3271,corePort:address.port})
+   const browser_bridge=await browser.listen()
+   return {listener:{close},address,browser_bridge}
+  }catch(error){await close();throw error}
+ }
  const personalClient=await loadPersonalClient(testDeps.personalHome??homedir(),testDeps.personalEnv??process.env)
  const personalContext=createPersonalContextResolver(testDeps.personalHome??homedir())
  const learning=await loadLearningController(testDeps.personalHome??homedir())

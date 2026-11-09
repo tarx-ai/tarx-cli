@@ -7,6 +7,7 @@ import {mkdtemp,mkdir,readFile,realpath,rm,writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {createHash} from 'node:crypto'
+import {createServer} from 'node:http'
 import {createFilePairStore,createPairingChallenge,approvePairingChallenge} from './tarx-browser-pairing.ts'
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
@@ -40,6 +41,39 @@ async function artifacts(t:any,clickLog:string){
  return {dir,built}
 }
 async function clicks(file:string){return readFile(file,'utf8').then(v=>v.length?v.trim().split('\n').length:0,()=>0)}
+
+test('host-only computer listener requires verified host artifacts and starts no personal or Eve worker',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'tarx-computer-only-')));t.after(()=>rm(root,{recursive:true,force:true}))
+ const args=['serve-computer','--state-dir',join(root,'state'),'--port','0']
+ await assert.rejects(runRuntimeEntry(args),/computer_host_required/)
+ await assert.rejects(readFile(join(root,'state','pairs.json')),/ENOENT/)
+ const {built}=await artifacts(t,join(root,'no-clicks'))
+ const consent=createComputerHostConsent()
+ const deps={personalHome:join(root,'absent-personal-home'),personalEnv:{},clientFactory:()=>{throw Error('computer mode must not create an Eve client')}}
+ await assert.rejects(runRuntimeEntry(args,{...deps,computerHost:{artifacts:{...built,node:{...built.node,sha256:'0'.repeat(64)}},consent}}),/mismatch/)
+ const blocker=createServer((_req,res)=>res.end('owned fixture'))
+ await new Promise<void>(resolve=>blocker.listen(0,'127.0.0.1',resolve))
+ const held=blocker.address();assert.ok(held&&typeof held!=='string')
+ try{
+  await assert.rejects(runRuntimeEntry(['serve-computer','--state-dir',join(root,'state'),'--port',String(held.port)],{...deps,computerHost:{artifacts:built,consent}}),/EADDRINUSE/)
+  assert.equal(await(await fetch('http://127.0.0.1:'+held.port)).text(),'owned fixture','startup failure must preserve an existing port owner')
+ }finally{await new Promise<void>(resolve=>blocker.close(()=>resolve()))}
+ const running:any=await runRuntimeEntry(args,{...deps,computerHost:{artifacts:built,consent}})
+ try{
+  assert.ok(running.address.port>0);assert.ok(running.browser_bridge.port>0)
+  assert.notEqual(running.address.port,running.browser_bridge.port)
+  const health=await(await fetch('http://127.0.0.1:'+running.address.port+'/readiness')).json()
+  assert.equal(health.model_responsive,false);assert.equal(health.worker_reachable,false)
+  assert.equal(health.healthy,false)
+  const page=await fetch('http://127.0.0.1:'+running.browser_bridge.port+'/bridge')
+  assert.equal(page.status,200)
+  assert.equal(await consent.authority.resolve(request.session_id),null,'listener startup creates no execution grant')
+  assert.equal(await clicks(join(root,'no-clicks')),0)
+ }finally{await running.listener.close()}
+ await running.listener.close() // Native Stop/dispose may converge on the same owner.
+ for(const address of [running.address,running.browser_bridge])
+  await assert.rejects(fetch('http://127.0.0.1:'+address.port+'/readiness',{signal:AbortSignal.timeout(1000)}))
+})
 
 test('paired runtime still refuses execution until host consent matches channel, agent, request, actions, and expiry',async t=>{
  const now={value:Date.now()}
