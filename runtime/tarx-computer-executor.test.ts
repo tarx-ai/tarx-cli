@@ -13,12 +13,12 @@ const session:ComputerSession={session_id:request.session_id,subject_id:'tvs_'+'
 const action={command:'click' as const,role:'button',name:'Fixture action'}
 const check={kind:'enabled' as const,role:'button',name:'Fixture result'}
 const scope:NativeScope={app:'Fixture',window:{id:'w-1',pid:123,title_sha256:hash('Fixture')},actions:[action],success:[check],mode:'deterministic_actuator',steps:[{action,expect:[check]}]}
-async function fixture(t:any,hang=false,cursor=false){
+async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false){
  const dir=await realpath(await mkdtemp(join(tmpdir(),'tarx-core-executor-test-')));t.after(()=>rm(dir,{recursive:true,force:true}))
  const pidFile=join(dir,'descendant-pid')
  const files:Record<string,string>={
   'package.json':JSON.stringify({type:'module'}),
-  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidFile)},String(c.pid));return new Promise(()=>{})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
+  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});return new Promise((_,reject)=>{${interruptOnStop?`process.once('SIGTERM',()=>reject(Error('fixture action interrupted during Stop')));` : ''}writeFileSync(${JSON.stringify(pidFile)},String(c.pid))})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
   'refs.js':`export const indexRefs=tree=>new Map([[tree.ref_id,tree]])`,
   'policy.js':`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`,
   'loop.js':`export const verifyAll=async()=>({passed:true});export const runTask=async()=>{throw Error('fixture is not a planner')}`,
@@ -61,12 +61,42 @@ test('cancellation confirms owned worker exit and kills its native descendant be
  for(let i=0;i<100;i++){try{process.kill(pid,0)}catch{alive=false;break}await new Promise(r=>setTimeout(r,10))}
  assert.equal(alive,false,'native descendant must be gone')
 })
+test('late interrupted-worker errors do not replace an acknowledged Stop after owned exit',async t=>{
+ const f=await fixture(t,true,false,true),abort=new AbortController()
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope})
+ const result=executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:abort.signal,stillAuthorized:async()=>!abort.signal.aborted})
+ // Attach the rejection handler before triggering the deliberate worker error.
+ const outcome=result.then(value=>({value}),error=>({error}))
+ let pid=0
+ for(let i=0;i<100;i++){try{pid=Number(await readFile(f.pidFile,'utf8'));break}catch{}await new Promise(r=>setTimeout(r,10))}
+ assert.ok(pid>0);abort.abort()
+ const settled=await outcome
+ assert.ok('value' in settled,'late worker interruption must remain cancellation')
+ assert.equal(settled.value.outcome,'cancelled');assert.equal(settled.value.independent_verified,false)
+ let alive=true
+ for(let i=0;i<100;i++){try{process.kill(pid,0)}catch{alive=false;break}await new Promise(r=>setTimeout(r,10))}
+ assert.equal(alive,false)
+})
 test('browser/model-like scope substitutions and additional artifact files fail closed',async t=>{
  const f=await fixture(t)
  for(const change of [{mode:'remote_model'},{model:{baseURL:'https://foreign.test',model:'x'},mode:'local_model',steps:undefined},{window:{...scope.window,title_sha256:'unverified'}},{steps:[{action:{...action,name:'Send'},expect:[check]}]}])
   assert.throws(()=>validateNativeScope({...scope,...change} as NativeScope,2))
  await writeFile(join(f.artifacts.coreDirectory,'extra.js'),'export {}')
  await assert.rejects(verifyComputerArtifacts(f.artifacts),/inventory_mismatch/)
+})
+
+test('late cursor ownership is retained for cleanup without reactivating presentation after Stop',async t=>{
+ const f=await fixture(t,false,true),abort=new AbortController(),states:boolean[]=[]
+ const marker=join(f.dir,'pending-native-session')
+ const source=`import {writeFileSync} from 'node:fs';export class AgentDesktop {async exec(argv){if(argv[0]==='session'){return new Promise(resolve=>{process.once('SIGTERM',()=>resolve({data:{session_id:'cursor_fixture_session'}}));writeFileSync(${JSON.stringify(marker)},'waiting')})}if(argv[0]==='cursor-overlay')return {data:{rendered:true}};throw Error('unexpected fixture command')}}`
+ await writeFile(join(f.artifacts.coreDirectory,'adapter.js'),source);f.artifacts.files['adapter.js']=hash(source)
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope,onCursorState:shown=>states.push(shown)})
+ const result=executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:abort.signal,stillAuthorized:async()=>!abort.signal.aborted})
+ for(let i=0;i<100;i++){try{await readFile(marker);break}catch{}await new Promise(r=>setTimeout(r,10))}
+ assert.equal(await readFile(marker,'utf8'),'waiting');abort.abort()
+ assert.equal((await result).outcome,'cancelled')
+ assert.deepEqual(states,[false])
+ assert.deepEqual(JSON.parse(await readFile(join(f.dir,'cursor-ended'),'utf8')),['session','end','cursor_fixture_session'])
 })
 
 test('cursor is session-owned, uses the canonical checked TARX asset and is ended by the parent on cancellation',async t=>{

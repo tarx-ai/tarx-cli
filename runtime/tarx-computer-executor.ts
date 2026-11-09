@@ -126,6 +126,8 @@ export function createNativeComputerExecutor(input:{artifacts:ComputerArtifacts;
      child.on('message',message=>{
       if(finished||!message||typeof message!=='object')return
       const m=message as {kind?:string;id?:number;result?:ComputerOutcome;phase?:string;code?:string;session?:string;rendered?:boolean}
+      // Stop fences late outcomes/presentation; retain session identity for owned cleanup.
+      if(signal.aborted&&m.kind!=='native_session')return
       if(m.kind==='authorize'&&Number.isInteger(m.id)&&++checks<=32){
        void stillAuthorized().then(ok=>{if(!ok||signal.aborted){stop();return}if(child.connected)child.send({kind:'authorization',id:m.id,allowed:true})},stop)
       }else if(m.kind==='native_session'&&!nativeSession&&artifacts.cursor&&typeof m.session==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(m.session)){
