@@ -200,8 +200,8 @@ test('native host grant issues a bound session; pairing and missing artifacts do
  assert.deepEqual((await consent.resolveScope(issued,{request_id:asked.request_id}))?.actions,[action])
 })
 
-test('paired serve runs under the issued host session and refuses before that grant',async t=>{
- const root=await realpath(await mkdtemp(join(tmpdir(),'tarx-serve-issued-')));t.after(()=>rm(root,{recursive:true,force:true}))
+test('paired serve is bound to the stored host session and pairing grants nothing',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'tarx-serve-bound-')));t.after(()=>rm(root,{recursive:true,force:true}))
  const clickLog=join(root,'clicks.log')
  const {built}=await artifacts(t,clickLog)
  const state=join(root,'state'),key=join(root,'cli')
@@ -213,7 +213,10 @@ test('paired serve runs under the issued host session and refuses before that gr
  assert.doesNotMatch(await readFile(join(state,'pairs.json'),'utf8'),/wrun_/)
  const install_id=(await readFile(join(state,'install-id'),'utf8')).trim()
  const consent=createComputerHostConsent()
- const asked={request_id:'host_serve_issue1',channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Open the fixture control'}
+ const asked={request_id:'host_serve_bound1',channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Open the fixture control'}
+ const fixture=request.session_id
+ const open={task:COMPUTER_TASK,session_id:fixture,...asked}
+ const expires_at=Date.now()+60000
  const running:any=await runRuntimeEntry(['serve','--state-dir',state,'--worker-url','http://127.0.0.1:9','--port','0'],{clientFactory:()=>({health:async()=>({ok:true,status:'ready'}),sessions:{attach:()=>({async *stream(){}})}}),computerHost:{artifacts:built,consent}})
  try{
   const base='http://127.0.0.1:'+running.address.port
@@ -224,20 +227,24 @@ test('paired serve runs under the issued host session and refuses before that gr
   const denied=await fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(body)})
   assert.equal(denied.status,403);assert.equal((await denied.json()).error,'computer_session_approval_required')
   assert.equal(await clicks(clickLog),0)
-  const expires_at=Date.now()+60000
-  const issued=await issueNativeHostGrant({artifacts:built,consent,request:asked,subject_id:subject,install_id,actions:[action],scope:scope(),expires_at,max_steps:2,timeout_ms:4000})
-  if(!issued)throw Error('host_grant_not_issued')
-  const stored=await consent.authority.resolve(issued.session_id)
+  const foreign={...open,channel_id:'other-channel'}
+  consent.grant({request_id:asked.request_id,actions:[action],session:{session_id:fixture,subject_id:subject,install_id,channel_id:'other-channel',agent_id:asked.agent_id,intent_sha256:computerIntentHash(foreign),expires_at,max_steps:2,timeout_ms:4000},scope:scope()})
+  assert.equal((await fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(body)})).status,403)
+  assert.equal(await clicks(clickLog),0)
+  consent.revoke(fixture)
+  consent.grant({request_id:asked.request_id,actions:[action],session:{session_id:fixture,subject_id:subject,install_id,channel_id:asked.channel_id,agent_id:asked.agent_id,intent_sha256:computerIntentHash(open),expires_at,max_steps:2,timeout_ms:4000},scope:scope()})
+  const stored=await consent.authority.resolve(fixture)
   assert.equal(stored?.channel_id,asked.channel_id)
   assert.equal(stored?.agent_id,asked.agent_id)
   assert.equal(stored?.expires_at,expires_at)
+  assert.equal(stored?.intent_sha256,computerIntentHash(open))
   assert.deepEqual((await consent.resolveScope(stored!,{request_id:asked.request_id}))?.actions,[action])
   assert.equal((await fetch(base+'/computer-tasks',{method:'POST',headers,body:JSON.stringify(body)})).status,202)
   let result:any
   for(let i=0;i<100;i++){result=await(await fetch(base+'/computer-tasks/'+asked.request_id,{headers})).json();if(['completed','failed','cancelled','uncertain'].includes(result.status))break;await new Promise(r=>setTimeout(r,50))}
   const readBack=await(await fetch(base+'/computer-tasks/'+asked.request_id,{headers})).json()
   assert.equal(readBack.status,'completed')
-  assert.equal(readBack.receipt.session_id,issued.session_id)
+  assert.equal(readBack.receipt.session_id,fixture)
   assert.equal(readBack.receipt.channel_id,asked.channel_id)
   assert.equal(readBack.receipt.agent_id,asked.agent_id)
   assert.equal(readBack.receipt.native_actions,1)
