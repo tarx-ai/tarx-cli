@@ -69,6 +69,39 @@ class StopOwnership(unittest.TestCase):
         self.assertEqual(target.read_text(), str(self.sentinel.pid))
 
     def test_successful_fixture_start_records_owned_instances(self):
+        self.exercise_owned_start()
+
+    def test_concurrent_starts_keep_one_owner_per_service(self):
+        self.exercise_owned_start(concurrent=True)
+
+    def test_reaped_stale_record_does_not_prevent_a_new_owner(self):
+        exited = subprocess.Popen([sys.executable, '-c', 'pass'])
+        exited.wait(timeout=3)
+        record = self.pids / 'inference.pid'
+        record.write_text(str(exited.pid) + '\n' + '0' * 64 + '\n')
+        record.chmod(0o600)
+        self.exercise_owned_start()
+
+    def test_legacy_live_record_is_preserved_before_any_new_launch(self):
+        models = self.pids.parent / 'models'
+        models.mkdir()
+        (models / 'tarx-qwen2.5-7b-deep-Q4_K_M.gguf').touch()
+        record = self.pids / 'inference.pid'
+        previous = str(self.sentinel.pid) + '\n'
+        record.write_text(previous); record.chmod(0o600)
+        curl = self.bin / 'curl'
+        curl.write_text('#!/bin/sh\nexit 1\n'); curl.chmod(0o700)
+        marker = self.home / 'must-not-launch'
+        engine = self.bin / 'fixture-engine'
+        engine.write_text('#!/bin/sh\ntouch "$FIXTURE_MARKER"\nexit 1\n'); engine.chmod(0o700)
+        env = {**self.env, 'TARX_LLAMA_SERVER': str(engine), 'FIXTURE_MARKER': str(marker)}
+        result = subprocess.run(['sh', str(ROOT / 'tarx'), 'start'], env=env, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(marker.exists())
+        self.assertEqual(record.read_text(), previous)
+        self.assertIsNone(self.sentinel.poll())
+
+    def exercise_owned_start(self, concurrent=False):
         if pathlib.Path('/usr/local/bin/tarx-mesh').exists() or shutil.which('tarx-mesh', path=self.env['PATH']):
             self.skipTest('a real mesh binary must never be started by this fixture')
         data = self.pids.parent
@@ -88,8 +121,13 @@ class StopOwnership(unittest.TestCase):
         owned = []
         try:
             env = {**self.env, 'TARX_LLAMA_SERVER': str(engine), 'TARX_START_PROBE_SECONDS': '0.05', 'FIXTURE_ENGINE_PID_LOG': str(trace)}
-            result = subprocess.run(['sh', str(ROOT / 'tarx'), 'start'], env=env, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            if concurrent:
+                launches = [subprocess.Popen(['sh', str(ROOT / 'tarx'), 'start'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+                results = [process.communicate(timeout=10) for process in launches]
+                self.assertTrue(any(process.returncode == 0 for process in launches), results)
+            else:
+                result = subprocess.run(['sh', str(ROOT / 'tarx'), 'start'], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
             owned = [int(value) for value in trace.read_text().splitlines()]
             self.assertEqual(len(owned), 2)
             for service in ['inference', 'embeddings']:
@@ -99,6 +137,13 @@ class StopOwnership(unittest.TestCase):
                 self.assertIn(int(rows[0]), owned)
                 self.assertRegex(rows[1], '^[a-f0-9]{64}$')
                 self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+            records = {service: (self.pids / (service + '.pid')).read_bytes() for service in ['inference', 'embeddings']}
+            again = subprocess.run(['sh', str(ROOT / 'tarx'), 'start'], env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(again.returncode, 0, 'unhealthy existing owners must not be reported ready')
+            self.assertEqual(len(trace.read_text().splitlines()), 2, 'repeated Start must not spawn duplicate warming services')
+            for service, previous in records.items():
+                self.assertEqual((self.pids / (service + '.pid')).read_bytes(), previous, 'Start must preserve the live ownership record')
+            self.assertEqual(list(self.pids.glob('*.start-lock')), [], 'completed launchers must release their own reservations')
             stopped = self.stop()
             self.assertIn('Stop requested for owned inference', stopped.stdout)
             self.assertNotIn('Stopped inference', stopped.stdout)
