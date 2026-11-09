@@ -12,7 +12,7 @@ const identity={subject_id:'tvs_'+'a'.repeat(32),install_id:'fixture_install',ta
 const request:ComputerRequest={request_id:'computer_request_01',task:COMPUTER_TASK,session_id:'wrun_'+'B'.repeat(26),channel_id:'channel-fixture',agent_id:'channel-agent:qa-pass',goal:'Private synthetic goal',context:'Private synthetic channel context'}
 const core='a'.repeat(40)
 const verified:ComputerOutcome={outcome:'done',independent_verified:true,native_actions:1,model_calls:0,core_source:core,execution_mode:'deterministic_actuator'}
-async function fixture(t:any,executor:Pick<ComputerExecutor,'run'|'observe'>) {
+async function fixture(t:any,executor:Pick<ComputerExecutor,'run'|'observe'|'shutdownGraceMs'>) {
  const dir=await mkdtemp(join(tmpdir(),'tarx-computer-contract-'));t.after(()=>rm(dir,{recursive:true,force:true}))
  let paired=true,grant:ComputerSession|null={session_id:request.session_id,channel_id:request.channel_id,agent_id:request.agent_id,subject_id:identity.subject_id,install_id:identity.install_id,intent_sha256:computerIntentHash(request),expires_at:Date.now()+60000,max_steps:4,timeout_ms:4000}
  const file=join(dir,'tasks.json')
@@ -99,4 +99,81 @@ test('owner loss and a missing observation hook cannot post success or replay a 
  assert.equal((await until(stuck.controller,['uncertain'])).body.status,'uncertain')
  const replay=await stuck.controller.submit(identity,request,stuck.paired)
  assert.equal(replay.body.status,'uncertain');assert.equal(replay.body.receipt,null);assert.equal(actions,2)
+})
+
+test('Stop during recovery waits for owned observation cleanup before releasing the task',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-recovery-stop-'));t.after(()=>rm(dir,{recursive:true,force:true}))
+ const grant:ComputerSession={session_id:request.session_id,channel_id:request.channel_id,agent_id:request.agent_id,subject_id:identity.subject_id,install_id:identity.install_id,intent_sha256:computerIntentHash(request),expires_at:Date.now()+10000,max_steps:2,timeout_ms:4000}
+ let observing=false,cleaned=false,actions=0
+ const controller=createComputerTaskController({file:join(dir,'tasks.json'),coreSource:core,authority:{resolve:async()=>grant},executor:{
+  shutdownGraceMs:500,ready:async()=>true,
+  run:async()=>{actions++;throw Error('fixture_after_delivery')},
+  observe:async({signal})=>{
+   observing=true
+   await new Promise<void>(resolve=>signal.addEventListener('abort',()=>resolve(),{once:true}))
+   await new Promise(resolve=>setTimeout(resolve,100));cleaned=true
+   return {...verified,outcome:'cancelled',independent_verified:false,native_actions:0}
+  },
+ }})
+ t.after(()=>controller.close())
+ await controller.submit(identity,request,async()=>true)
+ await until(controller,['uncertain'])
+ const recovery=controller.submit(identity,request,async()=>true)
+ for(let i=0;i<100&&!observing;i++)await new Promise(resolve=>setTimeout(resolve,5))
+ assert.equal(observing,true)
+ assert.equal((await controller.cancel(identity,request.request_id)).body.status,'cancelling')
+ await controller.close()
+ assert.equal(cleaned,true,'Stop must await observation cleanup')
+ assert.equal((await recovery).body.status,'cancelled')
+ assert.equal((await controller.read(identity,request.request_id)).body.receipt,null)
+ assert.equal(actions,1,'recovery must not dispatch the action again')
+})
+
+test('revoking consent interrupts recovery and rejects a late verified observation',async t=>{
+ let observing=false,cleaned=false,actions=0
+ const f=await fixture(t,{
+  shutdownGraceMs:500,
+  run:async()=>{actions++;throw Error('fixture_after_delivery')},
+  observe:async({signal})=>{
+   observing=true
+   await new Promise<void>(resolve=>signal.addEventListener('abort',()=>resolve(),{once:true}))
+   await new Promise(resolve=>setTimeout(resolve,50));cleaned=true
+   return {...verified,native_actions:0}
+  },
+ })
+ await f.controller.submit(identity,request,f.paired)
+ await until(f.controller,['uncertain'])
+ const recovery=f.controller.submit(identity,request,f.paired)
+ for(let i=0;i<100&&!observing;i++)await new Promise(resolve=>setTimeout(resolve,5))
+ assert.equal(observing,true)
+ const start=Date.now();f.setGrant(null)
+ const reply=await recovery
+ assert.ok(Date.now()-start<1500,'revocation must interrupt before the task deadline')
+ assert.equal(cleaned,true)
+ assert.equal(reply.body.status,'cancelled');assert.equal(reply.body.receipt,null)
+ assert.equal(actions,1)
+})
+
+test('unconfirmed recovery cleanup stays uncertain and holds the install lease',async t=>{
+ let observing=false,release:((outcome:ComputerOutcome)=>void)|undefined,actions=0
+ const f=await fixture(t,{
+  shutdownGraceMs:50,
+  run:async()=>{actions++;throw Error('fixture_after_delivery')},
+  observe:async()=>{observing=true;return new Promise(resolve=>{release=resolve})},
+ })
+ await f.controller.submit(identity,request,f.paired)
+ await until(f.controller,['uncertain'])
+ const recovery=f.controller.submit(identity,request,f.paired)
+ for(let i=0;i<100&&!observing;i++)await new Promise(resolve=>setTimeout(resolve,5))
+ assert.equal(observing,true)
+ assert.equal((await f.controller.cancel(identity,request.request_id)).body.status,'cancelling')
+ const reply=await recovery
+ assert.equal(reply.body.status,'uncertain');assert.equal(reply.body.receipt,null)
+ release!({...verified,native_actions:0})
+ await new Promise(resolve=>setTimeout(resolve,20))
+ assert.equal((await f.controller.read(identity,request.request_id)).body.status,'uncertain')
+ const other={...request,request_id:'recovery_other_02',channel_id:'another-channel'}
+ f.setGrant({...f.grant(),channel_id:other.channel_id,intent_sha256:computerIntentHash(other)})
+ assert.equal((await f.controller.submit(identity,other,f.paired)).code,409)
+ assert.equal(actions,1)
 })
