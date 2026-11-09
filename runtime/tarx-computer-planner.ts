@@ -52,20 +52,36 @@ export function scopeNativeObservation(tree:NativeNode,actions:Action[]):NativeN
  }
  return prune(tree)??{}
 }
-export function createScopedComputerPlanner(client:Client,actions:Action[],context?:string,onGeneration?:()=>void) {
+export type PlannerObservation={text:string;controls:Array<{handle:number;role:string;name:string}>}
+export function createScopedComputerPlanner(client:Client,actions:Action[],context?:string,onGeneration?:()=>void,readObservation?:()=>PlannerObservation|null) {
  let decisionStatus='idle'
  return {modelId:client.modelId,endpoint:client.endpoint,get decisionStatus(){return decisionStatus},async complete(messages:Message[]) {
   const observation=messages.at(-1)?.content??''
   const separator='\nObservation:\n',at=observation.lastIndexOf(separator)
   if(at<0){decisionStatus='invalid_action';return null}
   const handles=new Set<number>()
-  const eligible=observation.slice(at+separator.length).split('\n').filter(line=>{
+  const observed=observation.slice(at+separator.length)
+  const eligible:string[]=[]
+  if(readObservation){
+   // Display labels may be shortened or trimmed. Authority comes from the
+   // current core handle-to-ref map and original native names, never a prefix.
+   const bound=readObservation()
+   if(!bound||bound.text!==observed||!Array.isArray(bound.controls)||bound.controls.length>80){decisionStatus='invalid_action';return null}
+   const seen=new Set<number>()
+   for(const control of bound.controls){
+    if(!Number.isSafeInteger(control.handle)||control.handle<1||seen.has(control.handle)){decisionStatus='invalid_action';return null}
+    seen.add(control.handle)
+    if(!actions.some(a=>a.command==='click'&&a.role===control.role&&a.name===control.name))continue
+    handles.add(control.handle)
+    eligible.push(`[${control.handle}] ${control.role} ${JSON.stringify(control.name)}`)
+   }
+  }else for(const line of observed.split('\n')){
    const match=line.match(/^\[([0-9]+)\] ([A-Za-z_-]+) ("(?:[^"\\]|\\.)*")/)
-   if(!match)return false
-   let name:string;try{name=JSON.parse(match[3])}catch{return false}
-   if(!actions.some(a=>a.command==='click'&&a.role===match[2]&&a.name===name))return false
-   handles.add(Number(match[1]));return true
-  })
+   if(!match)continue
+   let name:string;try{name=JSON.parse(match[3])}catch{continue}
+   if(!actions.some(a=>a.command==='click'&&a.role===match[2]&&a.name===name))continue
+   handles.add(Number(match[1]));eligible.push(line)
+  }
   if(!handles.size){decisionStatus='no_controls';return JSON.stringify({status:'blocked'})}
   const prefix=observation.slice(0,at)
   const schema={type:'object',additionalProperties:false,required:['status'],properties:{
