@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Disposable service-process fixtures. Never probes or stops a host service."""
 import os
+import fcntl
 import signal
 import shutil
 import pathlib
@@ -101,6 +102,18 @@ class StopOwnership(unittest.TestCase):
         self.assertEqual(record.read_text(), previous)
         self.assertIsNone(self.sentinel.poll())
 
+    def test_killed_launcher_releases_kernel_reservation(self):
+        lock = self.pids / 'inference.pid.start-lock'
+        code = 'import os,fcntl,time,sys; fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600); fcntl.flock(fd,fcntl.LOCK_EX); print("held",flush=True); time.sleep(30)'
+        locker = subprocess.Popen([sys.executable, '-c', code, str(lock)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(locker.stdout.readline().strip(), 'held')
+            locker.kill(); locker.wait(timeout=3)
+            self.exercise_owned_start()
+        finally:
+            if locker.poll() is None: locker.kill()
+            locker.wait(timeout=3); locker.stdout.close()
+
     def exercise_owned_start(self, concurrent=False):
         if pathlib.Path('/usr/local/bin/tarx-mesh').exists() or shutil.which('tarx-mesh', path=self.env['PATH']):
             self.skipTest('a real mesh binary must never be started by this fixture')
@@ -143,7 +156,11 @@ class StopOwnership(unittest.TestCase):
             self.assertEqual(len(trace.read_text().splitlines()), 2, 'repeated Start must not spawn duplicate warming services')
             for service, previous in records.items():
                 self.assertEqual((self.pids / (service + '.pid')).read_bytes(), previous, 'Start must preserve the live ownership record')
-            self.assertEqual(list(self.pids.glob('*.start-lock')), [], 'completed launchers must release their own reservations')
+            for lock in self.pids.glob('*.start-lock'):
+                self.assertTrue(lock.is_file())
+                self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+                with lock.open('r+') as lease:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
             stopped = self.stop()
             self.assertIn('Stop requested for owned inference', stopped.stdout)
             self.assertNotIn('Stopped inference', stopped.stdout)
