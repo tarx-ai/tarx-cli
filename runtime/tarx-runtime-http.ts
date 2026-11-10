@@ -1,6 +1,7 @@
 /** Paired runtime routes. Scope approval stays on the trusted CLI.
  * Private inference is opt-in and never falls back to hosted compute. */
 import {createSessionListener,type ListenerDeps} from './tarx-eve-listener.ts'
+import {COMPUTER_TASK,type createComputerTaskController} from './tarx-computer-task.ts'
 import type {createBoundedTaskController} from './tarx-bounded-task.ts'
 import {claimPairing,pairingIdentityResolver,pairingTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
 import {validatePersonalTurn,runPersonalTurn,type PersonalClient} from './tarx-personal-turn.ts'
@@ -8,7 +9,7 @@ import {createLearningController,ownerNamespace,type AdapterResolution} from './
 import {deliverOwnedPersonalContext} from './tarx-context-consumer.ts'
 import type {PersonalContextResolver} from './tarx-context-runtime.ts'
 import {buildCapabilityManifest,READ_LAUNCH_NOTE_CAPABILITY,COGNITIVE_ADAPTER_UNKNOWN} from './tarx-capability-manifest.ts'
-export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;personalClient?:PersonalClient;personalContext?:PersonalContextResolver;learning?:ReturnType<typeof createLearningController>}){
+export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;computerTasks?:ReturnType<typeof createComputerTaskController>;personalClient?:PersonalClient;personalContext?:PersonalContextResolver;learning?:ReturnType<typeof createLearningController>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
   const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
   if(path==='/personal-learning'){
@@ -66,7 +67,8 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
    if(!deps.allowedOrigins.has(String(req.headers.origin??'')))return reply(403,{error:'untrusted_origin'})
    const identity=await pairingTaskAccess(req,deps.pairStore);if(!identity)return reply(401,{error:'missing_identity'})
    let discovered:string[]=[];try{discovered=deps.tasks&&deps.taskDiscovery?await deps.taskDiscovery():[]}catch{return reply(503,{error:'task_discovery_unavailable'})}
-   const available=discovered.filter(name=>name==='read_launch_note')
+   const available:string[]=discovered.filter(name=>name==='read_launch_note')
+   if(deps.computerTasks&&await deps.computerTasks.available())available.push(COMPUTER_TASK)
    return reply(200,{available_tasks:available,permitted_tasks:available.filter(name=>identity.task_scopes.includes(name))})
   }
   if(path==='/capability-manifest'){
@@ -95,6 +97,25 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
     declared_unknown_adapters:[COGNITIVE_ADAPTER_UNKNOWN],
    })
    return reply(200,manifest)
+  }
+  if(path==='/computer-tasks'||path.startsWith('/computer-tasks/')){
+   if(!deps.allowedOrigins.has(String(req.headers.origin??'')))return reply(403,{error:'untrusted_origin'})
+   const identity=await pairingTaskAccess(req,deps.pairStore)
+   if(!identity)return reply(401,{error:'missing_identity'})
+   if(!deps.computerTasks)return reply(503,{error:'computer_runtime_unavailable'})
+   const tail=path.slice('/computer-tasks/'.length)
+   if(req.method==='GET'&&path.startsWith('/computer-tasks/')){
+    const result=await deps.computerTasks.read(identity,tail);return reply(result.code,result.body)
+   }
+   if(req.method==='POST'&&/^[A-Za-z0-9_-]{8,80}\/cancel$/.test(tail)){
+    const result=await deps.computerTasks.cancel(identity,tail.slice(0,-'/cancel'.length));return reply(result.code,result.body)
+   }
+   if(req.method!=='POST'||path!=='/computer-tasks')return reply(405,{error:'method_not_allowed'})
+   if(!/^application\/json(?:;|$)/i.test(String(req.headers['content-type']??'')))return reply(415,{error:'json_required'})
+   let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>32768)return reply(413,{error:'body_too_large'})}
+   let body:unknown;try{body=JSON.parse(raw)}catch{return reply(400,{error:'invalid_json'})}
+   const paired=async()=>{const current=await pairingTaskAccess(req,deps.pairStore);return Boolean(current&&current.subject_id===identity.subject_id&&current.install_id===identity.install_id&&current.task_scopes.includes(COMPUTER_TASK))}
+   const result=await deps.computerTasks.submit(identity,body,paired);return reply(result.code,result.body)
   }
   if(path==='/tasks'||path.startsWith('/tasks/')){
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''

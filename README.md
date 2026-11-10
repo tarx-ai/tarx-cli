@@ -46,6 +46,11 @@ Run `tarx`, then `/signin` to connect the CLI account. Runtime pairing requires 
 
 Browser task submission and automatic worker setup are not included yet. An existing loopback Eve worker is required for read/attach. Windows setup and OS restart recovery are not verified.
 
+The source also includes a channel-bound computer executor and browser bridge.
+They remain unavailable until a trusted native host supplies verified artifacts,
+an account-bound task and explicit native consent; ordinary CLI installation or
+pairing does not activate them. See [computer task boundaries](runtime/COMPUTER.md).
+
 ## Public proofs in this stack
 
 | Proof | Where |

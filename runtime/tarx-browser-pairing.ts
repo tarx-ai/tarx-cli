@@ -100,7 +100,7 @@ export async function createPairingChallenge(input: {
  *  explicit combination, e.g. ['personal_chat','personal_learning']. */
 export async function approvePairingChallenge(challenge: string, store: PairStore, now = Date.now(), taskScope?: string | string[]): Promise<boolean> {
   const requested = taskScope == null ? [] : Array.isArray(taskScope) ? taskScope : [taskScope]
-  const allowed = new Set(['read_launch_note', 'personal_chat', 'personal_learning', 'personal_context'])
+  const allowed = new Set(['read_launch_note', 'personal_chat', 'personal_learning', 'personal_context', 'computer_use'])
   if (requested.some(s => !allowed.has(s))) return false
   // personal_learning is only grantable alongside personal_chat (mutations need
   // the fresh combined grant; a read-only/chat-only pair can never train).
@@ -149,23 +149,34 @@ export function pairingIdentityResolver(store: PairStore, now: () => number = Da
   return async (req) => {
     const auth = typeof req.headers.authorization === 'string' ? req.headers.authorization : ''
     if (!auth.startsWith('Bearer tpc_')) return null
-    const presented = auth.slice('Bearer '.length).trim()
-    if (!/^tpc_[0-9a-f]{64}$/.test(presented)) return null
-    const rec = await store.byPairingHash(sha256(presented))
-    if (!rec || rec.revoked || !rec.approved || !rec.claimed || !rec.pairing_hash) return null
-    if (!hashEq(rec.pairing_hash, sha256(presented))) return null
-    if (!Number.isFinite(rec.pairing_expires_at) || now() >= rec.pairing_expires_at!) return null
-    if (!STABLE_SUBJECT.test(rec.subject_id) || !rec.install_id) return null
+    const rec = await presentedPair(auth.slice('Bearer '.length).trim(), store, now)
+    if (!rec) return null
     return { subject_id: rec.subject_id, install_id: rec.install_id }
   }
 }
 
+async function presentedPair(presented: string, store: PairStore, now: () => number): Promise<PairRecord | null> {
+ if (typeof presented !== 'string' || !/^tpc_[0-9a-f]{64}$/.test(presented)) return null
+ const digest=sha256(presented),rec=await store.byPairingHash(digest)
+ // Check time after the asynchronous read, not before it.
+ const time=now()
+ if (!rec || rec.revoked || !rec.approved || !rec.claimed || typeof rec.pairing_hash!=='string' ||
+     !hashEq(rec.pairing_hash,digest) || !Number.isFinite(time) || !Number.isFinite(rec.pairing_expires_at) || time>=rec.pairing_expires_at! ||
+     !STABLE_SUBJECT.test(rec.subject_id) || typeof rec.install_id!=='string' || !rec.install_id) return null
+ return structuredClone(rec)
+}
+
+/** Native-only lookup reuses the same hashed credential and fresh pair checks.
+ * It reads existing authority metadata; it creates no pairing or execution grant. */
+export async function pairingCredentialTaskAccess(presented: string, store: PairStore, now:()=>number=Date.now) {
+ const rec=await presentedPair(presented,store,now)
+ if (!rec || rec.task_scopes!==undefined && (!Array.isArray(rec.task_scopes)||rec.task_scopes.some(scope=>typeof scope!=='string'))) return null
+ return {subject_id:rec.subject_id,install_id:rec.install_id,task_scopes:[...(rec.task_scopes??[])]}
+}
+
 /** Authorization to execute is separate from paired read access. */
 export async function pairingTaskAccess(req:Parameters<IdentityResolver>[0],store:PairStore){
- const identity=await pairingIdentityResolver(store)(req)
- if(!identity)return null
- const auth=String(req.headers.authorization??'').slice('Bearer '.length).trim()
- const record=await store.byPairingHash(sha256(auth))
- if(!record||record.revoked)return null
- return {...identity,task_scopes:record.task_scopes??[]}
+ const auth=typeof req.headers.authorization==='string'?req.headers.authorization:''
+ if(!auth.startsWith('Bearer tpc_'))return null
+ return pairingCredentialTaskAccess(auth.slice('Bearer '.length).trim(),store)
 }

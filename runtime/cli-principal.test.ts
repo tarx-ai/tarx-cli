@@ -16,3 +16,11 @@ test('legacy/missing/foreign credential responses cannot seed a stable session o
 test('authority failure returns bounded error without echoing credentials or response data',async()=>{
  const result=await resolveCliPrincipal({loadCredential:async()=>token,fetcher:(async()=>{throw Error(token)})as typeof fetch});assert.deepEqual(result,{ok:false,error:'identity_unavailable'})
 })
+
+test('caller cancellation reaches the identity read without sending extra context',async()=>{
+ const abort=new AbortController();let calls=0
+ const result=resolveCliPrincipal({loadCredential:async()=> 'tarx_cli_'+'1'.repeat(64),signal:abort.signal,fetcher:(async(_url,options)=>{calls++;return new Promise<Response>((_resolve,reject)=>{const signal=options?.signal;signal?.addEventListener('abort',()=>reject(Error('cancelled identity fixture')),{once:true});abort.abort()})}) as typeof fetch})
+ assert.deepEqual(await result,{ok:false,error:'identity_unavailable'});assert.equal(calls,1)
+ let read=false
+ assert.deepEqual(await resolveCliPrincipal({signal:abort.signal,loadCredential:async()=>{read=true;return 'unread'}}),{ok:false,error:'identity_unavailable'});assert.equal(read,false)
+})

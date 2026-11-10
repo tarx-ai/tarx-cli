@@ -34,20 +34,8 @@ EMBED_MODEL="nomic-embed-text-v1.5-f16.gguf"
 # a failed start truthfully instead of assuming success.
 start_bg() {
   _svc_name="$1"; shift
-  if ! command -v "$1" >/dev/null 2>&1 && [ ! -x "$1" ]; then
-    return 1
-  fi
-  "$@" > "${TARX_LOGS}/${_svc_name}.log" 2>&1 &
-  _bg_pid=$!
-  echo "$_bg_pid" > "$(pid_file "$_svc_name")"
-  # Give an immediately-failing launch a moment to exit, so we can detect it.
-  sleep "${TARX_START_PROBE_SECONDS:-0.2}" 2>/dev/null || sleep 1
-  if kill -0 "$_bg_pid" 2>/dev/null; then
-    return 0
-  fi
-  # Process already exited: treat as a failed launch.
-  rm -f "$(pid_file "$_svc_name")"
-  return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  service_owner start "$(pid_file "$_svc_name")" "${TARX_LOGS}/${_svc_name}.log" "${TARX_START_PROBE_SECONDS:-0.2}" "$@"
 }
 
 log() { printf '%s\n' "$*"; }
@@ -89,10 +77,128 @@ pid_file() {
   echo "${TARX_PID_DIR}/${1}.pid"
 }
 
+# Local lifecycle metadata only: PID + process-instance digest in the existing
+# PID file. Legacy PIDs and listening ports cannot authorize a signal.
+service_owner() {
+  python3 - "$@" <<'OWNER_PY'
+import fcntl, hashlib, math, os, pathlib, re, signal, stat, subprocess, sys, tempfile, time
+class Starting(Exception): pass
+def pid(value):
+    if not re.fullmatch(r'[0-9]{1,10}', value) or not 1 < int(value) < 2147483648:
+        raise ValueError('invalid process')
+    return int(value)
+def identity(value):
+    result = subprocess.run(['/bin/ps', '-p', str(value), '-o', 'lstart=', '-o', 'comm='], capture_output=True, timeout=2, check=True, env={**os.environ, 'LC_ALL': 'C'})
+    text = result.stdout.strip()
+    if not text: raise ValueError('process unavailable')
+    return hashlib.sha256(str(value).encode() + b'\n' + text).hexdigest()
+def read_record(target):
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 128:
+            raise ValueError('invalid ownership record')
+        rows = stream.read(129).splitlines()
+    if len(rows) != 2 or not re.fullmatch(r'[a-f0-9]{64}', rows[1]): raise ValueError('ownership unavailable')
+    return pid(rows[0]), rows[1], info
+def vacant(target):
+    try: value, digest, info = read_record(target)
+    except FileNotFoundError: return
+    try: os.kill(value, 0)
+    except ProcessLookupError:
+        current = os.lstat(target)
+        if current.st_dev != info.st_dev or current.st_ino != info.st_ino: raise ValueError('ownership changed')
+        os.unlink(target)
+        return
+    if identity(value) == digest: raise Starting('owned process is still starting; readiness unconfirmed')
+    raise ValueError('unverified live record')
+def record(target, value):
+    digest = identity(value)
+    fd, temporary = tempfile.mkstemp(prefix='.tarx-owner-', dir=target.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(f'{value}\n{digest}\n'); stream.flush(); os.fsync(stream.fileno())
+        os.link(temporary, target)  # Never replace another owner's record.
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+def start(target, log, delay, argv):
+    # The regular lock file may persist; its kernel lease cannot survive process
+    # exit, SIGKILL or reboot. Children never inherit the descriptor.
+    fd = os.open(str(target) + '.start-lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077: raise ValueError('invalid startup reservation')
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: raise Starting('startup is already in progress; readiness unconfirmed')
+        vacant(target)
+        try: delay = float(delay)
+        except ValueError: delay = 1
+        if not math.isfinite(delay) or delay < 0: delay = 1
+        child = None; recorded = False; cancelled = False; phase = 'spawn'
+        def cancel_start(_signum, _frame):
+            nonlocal cancelled
+            if cancelled: return
+            cancelled = True
+            # Creation/handle assignment and link/commit must settle before
+            # cleanup can know which process instance this helper owns.
+            if phase not in ('spawn', 'publish'): raise InterruptedError('startup cancelled')
+        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP) if signal.getsignal(signum) not in (signal.SIG_IGN, None)}
+        try:
+            with open(log, 'wb') as output:
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True)
+            phase = 'waiting'
+            if cancelled: raise InterruptedError('startup cancelled')
+            time.sleep(delay)
+            if child.poll() is not None: raise ValueError('launch failed')
+            phase = 'publish'
+            record(target, child.pid); recorded = True
+            phase = 'waiting'
+            if cancelled: raise Starting('startup cancelled after ownership was recorded; readiness unconfirmed')
+        finally:
+            # Repeated termination cannot interrupt reaping. Successfully
+            # published services keep their owner record and remain running.
+            for signum in previous_signals: signal.signal(signum, signal.SIG_IGN)
+            try:
+                if child is not None and not recorded:
+                    try:
+                        if child.poll() is None:
+                            # The fresh session leader remains unreaped, so its
+                            # pid cannot be reused. Never infer groups from disk.
+                            try: os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError: pass
+                            except OSError: child.kill()  # Owned handle only.
+                    finally:
+                        child.wait(timeout=3)
+            finally:
+                for signum, handler in previous_signals.items(): signal.signal(signum, handler)
+
+    finally:
+        os.close(fd)
+try:
+    mode, name = sys.argv[1:3]; target = pathlib.Path(name)
+    if mode == 'record': record(target, pid(sys.argv[3]))
+    elif mode == 'verify':
+        value, digest, _ = read_record(target)
+        if identity(value) != digest: raise ValueError('process instance changed')
+        print(value)
+    elif mode == 'start': start(target, sys.argv[3], sys.argv[4], sys.argv[5:])
+    else: raise ValueError('invalid operation')
+except Starting as error:
+    print('WARNING: ' + str(error), file=sys.stderr)
+    sys.exit(3)
+except Exception:
+    print('WARNING: service launch/ownership unavailable; existing records preserved', file=sys.stderr)
+    sys.exit(1)
+OWNER_PY
+}
+
 is_running() {
   _pf="$(pid_file "$1")"
   if [ -f "$_pf" ]; then
-    _pid=$(cat "$_pf")
+    _pid=$(head -1 "$_pf")
+    case "$_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_pid" -gt 1 ] 2>/dev/null || return 1
     if kill -0 "$_pid" 2>/dev/null; then
       return 0
     fi
@@ -173,12 +279,18 @@ cmd_start() {
         --ctx-size 8192 \
         --parallel 2 \
         --no-warmup; then
-        log "  Inference  (${INFERENCE_PORT}): starting (pid $(cat "$(pid_file inference)"))"
+        log "  Inference  (${INFERENCE_PORT}): starting (pid $(head -1 "$(pid_file inference)"))"
         _started=$(( _started + 1 ))
         _inference_ok=1
       else
-        log "  Inference  (${INFERENCE_PORT}): failed to launch — see ${TARX_LOGS}/inference.log"
-        _inference_problem="launch failed"
+        _launch_result=$?
+        if [ "$_launch_result" -eq 3 ]; then
+          log "  Inference  (${INFERENCE_PORT}): already starting — readiness unconfirmed"
+          _inference_problem="still starting"
+        else
+          log "  Inference  (${INFERENCE_PORT}): failed to launch — see ${TARX_LOGS}/inference.log"
+          _inference_problem="launch failed"
+        fi
       fi
     fi
   fi
@@ -205,10 +317,15 @@ cmd_start() {
         --pooling mean \
         --parallel 1 \
         --no-warmup; then
-        log "  Embeddings (${EMBED_PORT}): starting (pid $(cat "$(pid_file embeddings)"))"
+        log "  Embeddings (${EMBED_PORT}): starting (pid $(head -1 "$(pid_file embeddings)"))"
         _started=$(( _started + 1 ))
       else
-        log "  Embeddings (${EMBED_PORT}): failed to launch — see ${TARX_LOGS}/embeddings.log"
+        _launch_result=$?
+        if [ "$_launch_result" -eq 3 ]; then
+          log "  Embeddings (${EMBED_PORT}): already starting — readiness unconfirmed"
+        else
+          log "  Embeddings (${EMBED_PORT}): failed to launch — see ${TARX_LOGS}/embeddings.log"
+        fi
       fi
     fi
   fi
@@ -223,7 +340,7 @@ cmd_start() {
       log "  Mesh       (${MESH_PORT}): binary not found (optional)"
     else
       if TARX_MESH_BIND="127.0.0.1:${MESH_PORT}" start_bg mesh "$_mesh"; then
-        log "  Mesh       (${MESH_PORT}): starting (pid $(cat "$(pid_file mesh)"))"
+        log "  Mesh       (${MESH_PORT}): starting (pid $(head -1 "$(pid_file mesh)"))"
         _started=$(( _started + 1 ))
       else
         log "  Mesh       (${MESH_PORT}): failed to launch (optional) — see ${TARX_LOGS}/mesh.log"
@@ -257,31 +374,20 @@ cmd_stop() {
 
   for _svc in inference embeddings mesh; do
     _pf="$(pid_file "$_svc")"
-    if [ -f "$_pf" ]; then
-      _pid=$(cat "$_pf")
-      if kill -0 "$_pid" 2>/dev/null; then
-        kill "$_pid" 2>/dev/null || true
-        log "  Stopped ${_svc} (pid ${_pid})"
-      fi
-      rm -f "$_pf"
-    else
-      # Try to find by port
-      case "$_svc" in
-        inference)  _port=$INFERENCE_PORT ;;
-        embeddings) _port=$EMBED_PORT ;;
-        mesh)       _port=$MESH_PORT ;;
-      esac
-      _pid=$(lsof -ti ":${_port}" 2>/dev/null | head -1) || true
-      if [ -n "$_pid" ]; then
-        kill "$_pid" 2>/dev/null || true
-        log "  Stopped ${_svc} (pid ${_pid})"
+    if _pid=$(service_owner verify "$_pf"); then
+      if kill "$_pid" 2>/dev/null; then
+        log "  Stop requested for owned ${_svc} (pid ${_pid}); exit not yet confirmed"
       else
-        log "  ${_svc}: not running"
+        warn "${_svc}: signal not delivered; ownership record retained"
       fi
+    elif [ -e "$_pf" ] || [ -L "$_pf" ]; then
+      warn "${_svc}: process ownership unverified; left unchanged"
+    else
+      log "  ${_svc}: no owned instance; left unchanged"
     fi
   done
 
-  log "Done."
+  log "Stop requests finished; unverified instances were left unchanged."
 }
 
 # ── status ───────────────────────────────────────────────────────────
@@ -2337,7 +2443,7 @@ try:
             if member.size>2_000_000:raise ValueError('runtime_file_too_large')
             data=source.extractfile(member).read()
             (dest/relative.name).write_bytes(data)
-    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts','tarx-browser-bridge.ts','tarx-local-learning.ts','personal_learning_mlx.py']
+    required=['package.json','package-lock.json','tarx-runtime-entry.ts','tarx-runtime-http.ts','tarx-browser-pairing.ts','cli-principal.ts','tarx-eve-listener.ts','tarx-eve-transport.ts','tarx-eve-worker.ts','local-json-store.ts','tarx-bounded-task.ts','tarx-public-worker-profile.ts','tarx-owned-worker.ts','tarx-personal-turn.ts','tarx-personal-config.ts','tarx-browser-bridge.ts','tarx-local-learning.ts','personal_learning_mlx.py','tarx-computer-task.ts','tarx-computer-executor.ts','tarx-computer-worker.ts','tarx-computer-planner.ts','tarx-supercomputer-planner.ts','tarx-cursor.png','tarx-cursor.svg']
     if any(not(dest/name).is_file() for name in required):raise ValueError('incomplete_runtime_archive')
     package=json.loads((dest/'package.json').read_text())
     if package.get('dependencies',{}).get('eve')!='0.83.2':raise ValueError('unexpected_runtime_version')
