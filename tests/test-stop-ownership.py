@@ -123,7 +123,12 @@ class StopOwnership(unittest.TestCase):
                 with self.subTest(signal=signum, boundary=boundary):
                     self.exercise_unpublished_termination(signum, boundary)
 
-    def exercise_unpublished_termination(self, signum, boundary):
+    def test_explicitly_ignored_startup_signals_remain_ignored(self):
+        for signum in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+            with self.subTest(signal=signum):
+                self.exercise_unpublished_termination(signum, None, ignored=True)
+
+    def exercise_unpublished_termination(self, signum, boundary, ignored=False):
         # Actual inline helper; the boundary shim delivers the signal after
         # creation but before Popen can return its handle to the caller.
         source = (ROOT / 'tarx').read_text().split("<<'OWNER_PY'\n", 1)[1].split('\nOWNER_PY', 1)[0]
@@ -131,7 +136,7 @@ class StopOwnership(unittest.TestCase):
         engine = self.bin / 'fixture-starting-engine'
         engine.write_text('#!' + sys.executable + '\nimport os,time,pathlib\nif os.environ.get("FIXTURE_START_WRAPPED") != "1": pathlib.Path(os.environ["FIXTURE_START_TRACE"]).write_text(str(os.getpid()))\ntime.sleep(30)\n')
         engine.chmod(0o700)
-        if boundary:
+        if boundary or ignored:
             source = ('import os,pathlib,signal,subprocess\n_real_spawn = subprocess.Popen\n'
                 'def fixture_spawn(*args, **kwargs):\n'
                 '    child = _real_spawn(*args, **kwargs)\n'
@@ -142,8 +147,9 @@ class StopOwnership(unittest.TestCase):
                     '_real_link = os.link\ndef fixture_link(*args, **kwargs):\n    _real_link(*args, **kwargs)\n    os.kill(os.getpid(), ' + str(int(signum)) + ')\nos.link = fixture_link\n' if boundary == 'publish' else '') + (
                     '_real_signal = signal.signal\ndef fixture_signal(number, handler):\n    if handler == signal.SIG_IGN: os.kill(os.getpid(), ' + str(int(signum)) + ')\n    return _real_signal(number, handler)\nsignal.signal = fixture_signal\n' if boundary == 'repeat' else '') + source)
         record = self.pids / 'inference.pid'
-        launcher = subprocess.Popen([sys.executable, '-c', source, 'start', str(record), str(self.home / 'fixture.log'), '0' if boundary == 'publish' else '30', str(engine)],
-            env={**self.env, 'FIXTURE_START_TRACE': str(trace), 'FIXTURE_START_WRAPPED': '1' if boundary else '0'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        launcher = subprocess.Popen([sys.executable, '-c', source, 'start', str(record), str(self.home / 'fixture.log'), '0.2' if ignored else ('0' if boundary == 'publish' else '30'), str(engine)],
+            env={**self.env, 'FIXTURE_START_TRACE': str(trace), 'FIXTURE_START_WRAPPED': '1' if boundary or ignored else '0'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            preexec_fn=(lambda: signal.signal(signum, signal.SIG_IGN)) if ignored else None)
         child = None
         def alive(value):
             result = subprocess.run(['/bin/ps', '-p', str(value), '-o', 'stat='], capture_output=True, text=True)
@@ -152,7 +158,9 @@ class StopOwnership(unittest.TestCase):
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 if trace.exists() and trace.read_text().strip().isdigit(): break
-                if launcher.poll() is not None: self.fail('fixture launcher exited before recording its disposable child')
+                if launcher.poll() is not None:
+                    _out, _err = launcher.communicate(timeout=1)
+                    self.fail('fixture launcher exited before recording its disposable child: ' + _err)
                 time.sleep(0.01)
             self.assertTrue(trace.exists(), 'fixture must enter the spawn/publication interval')
             child = int(trace.read_text())
@@ -160,9 +168,9 @@ class StopOwnership(unittest.TestCase):
             if boundary in (None, 'repeat'):
                 self.assertTrue(alive(child)); launcher.send_signal(signum)
             _out, _err = launcher.communicate(timeout=4)
-            self.assertNotEqual(launcher.returncode, 0)
-            if boundary == 'publish':
-                self.assertEqual(launcher.returncode, 3, 'published owner must report starting, not a launch failure')
+            if not ignored: self.assertNotEqual(launcher.returncode, 0)
+            if boundary == 'publish' or ignored:
+                self.assertEqual(launcher.returncode, 0 if ignored else 3, 'startup must preserve ignored signals and truthful published-owner status')
                 self.assertTrue(alive(child), 'published service must survive launcher cancellation')
                 self.assertEqual(int(record.read_text().splitlines()[0]), child)
                 record.unlink()  # Fixture record only; child remains owned by test cleanup.

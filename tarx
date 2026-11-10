@@ -143,7 +143,7 @@ def start(target, log, delay, argv):
             # Creation/handle assignment and link/commit must settle before
             # cleanup can know which process instance this helper owns.
             if phase not in ('spawn', 'publish'): raise InterruptedError('startup cancelled')
-        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP) if signal.getsignal(signum) not in (signal.SIG_IGN, None)}
         try:
             with open(log, 'wb') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True)
