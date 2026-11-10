@@ -17,7 +17,7 @@ function call(port:number,path:string,body?:unknown,headers:Record<string,string
 }
 async function fixture(){
  const seen:any[]=[]
- const core=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;seen.push({path:req.url,headers:req.headers,body:JSON.parse(raw)});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/pairing/claim'?{ok:false,error:'not_approved'}:{role:'assistant',content:'Local fixture'}))})
+ const core=createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;seen.push({path:req.url,method:req.method,headers:req.headers,body:raw?JSON.parse(raw):null});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/pairing/claim'?{ok:false,error:'not_approved'}:{role:'assistant',content:'Local fixture'}))})
  await new Promise<void>(r=>core.listen(0,'127.0.0.1',r));const address=core.address();assert.ok(address&&typeof address!=='string')
  const bridge=createBrowserBridge({port:0,corePort:address.port});const a=await bridge.listen()
  const page=await call(a.port,'/bridge?origin='+encodeURIComponent(parent));assert.equal(page.status,200)
@@ -133,5 +133,48 @@ test('Return selects the existing named parent with an empty URL, without closin
   for(const bad of ['_blank','_top','https://evil.example','tarx-return-short'])
    assert.equal((await call(f.port,'/bridge?return='+encodeURIComponent(bad))).status,403)
   assert.equal(f.seen.length,0)
+ }finally{await f.close()}
+})
+
+test('computer RPC is channel-bound data over fixed methods and paths, never caller-selected authority',async()=>{
+ const f=await fixture()
+ const task={request_id:'bridge_computer_001',task:'computer_use',session_id:'wrun_'+'A'.repeat(26),channel_id:'qa-channel',agent_id:'qa-agent',goal:'Private synthetic context'}
+ try{
+  for(const request of [{action:'capabilities'},{action:'submit',task},{action:'read',request_id:task.request_id},{action:'cancel',request_id:task.request_id}])
+   assert.equal((await call(f.port,'/rpc',{id:'computer1',kind:'computer',bearer,request},f.headers)).status,200)
+  assert.deepEqual(f.seen.map(x=>[x.method,x.path]),[['GET','/task-capabilities'],['POST','/computer-tasks'],['GET','/computer-tasks/'+task.request_id],['POST','/computer-tasks/'+task.request_id+'/cancel']])
+  assert.deepEqual(f.seen[1].body,task)
+  for(const row of f.seen){assert.equal(row.headers.authorization,'Bearer '+bearer);assert.equal(row.headers.origin,parent)}
+  for(const request of [{action:'approve'},{action:'submit',task:{...task,approved:true}},{action:'read',request_id:'../pairing/claim'},{action:'cancel',request_id:task.request_id,url:'https://evil.test'},{action:'capabilities',model:'other'}])
+   assert.equal((await call(f.port,'/rpc',{id:'bad',kind:'computer',bearer,request},f.headers)).status,400)
+  assert.equal(f.seen.length,4)
+ }finally{await f.close()}
+})
+
+test('actual browser MessagePort relays computer requests through the validated HTTP boundary',async()=>{
+ const f=await fixture()
+ try{
+  const source=f.page.text.match(/<script>([\s\S]*)<\/script>/)?.[1];assert.ok(source)
+  let connect:any;const replies:any[]=[]
+  const owner={postMessage(){}}
+  const port:any={onmessage:null,start(){},close(){},postMessage:(reply:any)=>replies.push(reply)}
+  new Script(source).runInContext(createContext({window:{opener:owner,addEventListener:(_name:string,fn:any)=>connect=fn},
+   document:{getElementById:()=>null},Map,AbortController,
+   fetch:async(url:string,init:any)=>{
+    assert.equal(url,'/rpc');assert.equal(init.signal.aborted,false)
+    const response=await call(f.port,url,JSON.parse(init.body),{...init.headers,origin:f.headers.origin})
+    return {status:response.status,text:async()=>response.text}
+   }}))
+  connect({origin:parent,source:owner,data:{type:'tarx.local-bridge.connect',version:1},ports:[port]})
+  const task={request_id:'bridge_port_0001',task:'computer_use',session_id:null,channel_id:'qa-pass',agent_id:'channel-agent:qa-pass',goal:'Synthetic fixture only'}
+  const requests=[{action:'capabilities'},{action:'submit',task},{action:'read',request_id:task.request_id},{action:'cancel',request_id:task.request_id}]
+  for(const [i,request]of requests.entries())await port.onmessage({data:{id:'port_'+i,kind:'computer',bearer,request}})
+  assert.equal(f.seen.length,4,'computer messages must reach the existing validated relay')
+  assert.deepEqual(replies.map(reply=>[reply.id,reply.status]),requests.map((_,i)=>['port_'+i,200]))
+  assert.deepEqual(f.seen.map(row=>[row.method,row.path]),[['GET','/task-capabilities'],['POST','/computer-tasks'],['GET','/computer-tasks/'+task.request_id],['POST','/computer-tasks/'+task.request_id+'/cancel']])
+  await port.onmessage({data:{id:'rejected',kind:'computer',bearer,request:{action:'approve'}}})
+  assert.equal(replies.at(-1).status,400);assert.equal(f.seen.length,4)
+  await port.onmessage({data:{id:'unknown',kind:'shell',bearer,request:{action:'run'}}})
+  assert.equal(replies.length,5);assert.equal(f.seen.length,4)
  }finally{await f.close()}
 })

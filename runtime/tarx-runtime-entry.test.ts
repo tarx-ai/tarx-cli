@@ -1,10 +1,13 @@
-import test from 'node:test'
+import test,{after} from 'node:test'
 import assert from 'node:assert/strict'
-import {mkdtemp,writeFile,stat} from 'node:fs/promises'
+import {mkdtemp as createTemporary,writeFile,stat,rm} from 'node:fs/promises'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {fileURLToPath} from 'node:url'
 import {installIdentity,runRuntimeEntry} from './tarx-runtime-entry.ts'
+const ownedRoots=new Set<string>()
+async function mkdtemp(prefix:string){const dir=await createTemporary(prefix);ownedRoots.add(dir);return dir}
+after(async()=>{for(const dir of ownedRoots)await rm(dir,{recursive:true,force:true})})
 test('install identity is persistent and restrictive; missing saved CLI sign-in fails closed',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'tarx-entry-'))
  assert.equal(await installIdentity(dir),await installIdentity(dir));assert.equal((await stat(join(dir,'install-id'))).mode&0o777,0o600)
@@ -17,7 +20,7 @@ test('actual commands mint/approve challenge through server-derived principal th
  const ch:any=await runRuntimeEntry(['challenge','--state-dir',dir,'--credential-file',key],{fetcher:(async()=>new Response(JSON.stringify({ok:true,subject_id:'tvs_'+'a'.repeat(32)}))) as typeof fetch})
  assert.equal(ch.ok,true);assert.doesNotMatch(JSON.stringify(ch),/tarx_cli_/)
  assert.deepEqual(await runRuntimeEntry(['approve','--state-dir',dir,'--challenge',ch.challenge]),{ok:true})
- const running:any=await runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','http://127.0.0.1:9999','--port','0'],{clientFactory:()=>({health:async()=>({ok:true,status:'ready'}),sessions:{attach:()=>({async *stream(){}})}})})
+ const running:any=await runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','http://127.0.0.1:9999','--port','0'],{personalHome:dir,personalEnv:{},clientFactory:()=>({health:async()=>({ok:true,status:'ready'}),sessions:{attach:()=>({async *stream(){}})}})})
  try{
   const base='http://127.0.0.1:'+running.address.port
   const readiness=await(await fetch(base+'/readiness')).json();assert.equal(readiness.worker_reachable,true);assert.equal(readiness.healthy,false);assert.equal(readiness.model_responsive,false)
@@ -26,12 +29,13 @@ test('actual commands mint/approve challenge through server-derived principal th
  }finally{await running.listener.close()}
 })
 test('serve rejects external worker and missing runtime provenance',async()=>{
- await assert.rejects(()=>runRuntimeEntry(['serve','--worker-url','https://example.com']),/loopback_worker_required/)
- await assert.rejects(()=>runRuntimeEntry(['serve']),/existing_worker_required/)
+ const dir=await mkdtemp(join(tmpdir(),'tarx-entry-reject-'))
+ await assert.rejects(()=>runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','https://example.com'],{personalHome:dir,personalEnv:{}}),/loopback_worker_required/)
+ await assert.rejects(()=>runRuntimeEntry(['serve','--state-dir',dir],{personalHome:dir,personalEnv:{}}),/existing_worker_required/)
 })
 test('entrypoint resolves the actual pinned Eve Client without starting a worker',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'tarx-entry-client-'))
- const runtime:any=await runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','http://127.0.0.1:9999','--eve-root',fileURLToPath(new URL('.',import.meta.url)),'--port','0'])
+ const runtime:any=await runRuntimeEntry(['serve','--state-dir',dir,'--worker-url','http://127.0.0.1:9999','--eve-root',fileURLToPath(new URL('.',import.meta.url)),'--port','0'],{personalHome:dir,personalEnv:{}})
  try{assert.ok(runtime.address.port>0)}finally{await runtime.listener.close()}
 })
 

@@ -4,7 +4,7 @@ import {createBrowserBridge} from './tarx-browser-bridge.ts'
 import {loadPersonalClient,loadLearningController} from './tarx-personal-config.ts'
 /** Explicit local commands. No model startup or OS service registration.
  * serve-check alone explicitly starts its owned Eve check worker. */
-import {readFile,writeFile,mkdir,open,realpath} from 'node:fs/promises'
+import {readFile,writeFile,mkdir,open,realpath,link,unlink} from 'node:fs/promises'
 import {join,resolve} from 'node:path'
 import {homedir} from 'node:os'
 import {randomBytes,createHash} from 'node:crypto'
@@ -12,6 +12,8 @@ import {createRequire} from 'node:module'
 import {pathToFileURL} from 'node:url'
 import {createFilePairStore,createPairingChallenge,approvePairingChallenge,revokePairing} from './tarx-browser-pairing.ts'
 import {createPairedSessionListener} from './tarx-runtime-http.ts'
+import {connectComputerHost,createComputerHostConsent} from './tarx-computer-consent.ts'
+import {verifyComputerArtifacts,type ComputerArtifacts} from './tarx-computer-executor.ts'
 import {createOwnedPublicWorker} from './tarx-owned-worker.ts'
 import {createBoundedTaskController,createEveReadNoteExecutor} from './tarx-bounded-task.ts'
 import {createFileOwnerStore} from './tarx-eve-listener.ts'
@@ -19,18 +21,40 @@ import {createFileOwnerStore} from './tarx-eve-listener.ts'
 export async function installIdentity(stateDir:string):Promise<string>{
  await mkdir(stateDir,{recursive:true,mode:0o700})
  const file=join(stateDir,'install-id')
- try{const h=await open(file,'wx',0o600);try{await h.writeFile('install_'+randomBytes(24).toString('hex'))}finally{await h.close()}}
- catch(e:any){if(e.code!=='EEXIST')throw e}
- const id=(await readFile(file,'utf8')).trim()
- if(!/^install_[a-f0-9]{48}$/.test(id))throw Error('invalid_install_identity')
- return id
+ const readIdentity=async()=>{
+  const id=(await readFile(file,'utf8')).trim()
+  if(!/^install_[a-f0-9]{48}$/.test(id))throw Error('invalid_install_identity')
+  return id
+ }
+ try{return await readIdentity()}catch(error:any){if(error.code!=='ENOENT')throw error}
+ // Publish only complete bytes, without replacing another installation owner.
+ const temporary=join(stateDir,'.install-id-'+randomBytes(16).toString('hex')+'.tmp')
+ let handle:Awaited<ReturnType<typeof open>>|undefined,owned=false
+ try{
+  handle=await open(temporary,'wx',0o600);owned=true
+  await handle.writeFile('install_'+randomBytes(24).toString('hex'))
+  await handle.sync();await handle.close();handle=undefined
+  try{await link(temporary,file)}catch(error:any){if(error.code!=='EEXIST')throw error}
+ }finally{
+  try{if(handle)await handle.close()}
+  finally{if(owned)try{await unlink(temporary)}catch(error:any){if(error.code!=='ENOENT')throw error}}
+ }
+ return readIdentity()
 }
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
-export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv}={}){
+type ComputerHostAttachment={resolveAccountAccess?:import('./tarx-computer-executor.ts').NativeAccountAccess;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}
+/** Host consent reaches the paired listener only through this attachment.
+ * No session is minted here. Without a host, computer execution stays unavailable. */
+function attachComputerHost(state:string,host?:ComputerHostAttachment){
+ if(!host)return {computerTasks:undefined,close:async()=>{}}
+ const computerTasks=connectComputerHost({file:join(state,'computer-tasks.json'),coreSource:host.artifacts.coreSource,artifacts:host.artifacts,consent:host.consent,resolveAccountAccess:host.resolveAccountAccess})
+ return {computerTasks,close:()=>computerTasks.close()}
+}
+export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv;computerHost?:ComputerHostAttachment}={}){
  const command=args[0]??'help',options:Record<string,string>={}
  for(let i=1;i<args.length;i+=2){if(!/^--(state-dir|credential-file|eve-root|worker-url|port|challenge|task|worker-root|model-url|model-id|worker-port|resume)$/.test(args[i])||!args[i+1]||args[i+1].startsWith('--'))throw Error('invalid_arguments');options[args[i].slice(2)]=args[i+1]}
- if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; no service or worker installed'}
- if(!['challenge','approve','revoke','serve','serve-check','serve-personal','serve-browser'].includes(command))throw Error('unknown_command')
+ if(command==='help')return {command:'runtime',commands:['challenge','approve','revoke','serve','serve-check','serve-personal','serve-computer','serve-browser'],requires:'Node >=24 and pinned Eve 0.83.2 for serve; serve-computer requires native host attachment; no service or worker installed'}
+ if(!['challenge','approve','revoke','serve','serve-check','serve-personal','serve-computer','serve-browser'].includes(command))throw Error('unknown_command')
  const state=resolve(options['state-dir']??join(homedir(),'.tarx','state','eve'))
  const store=createFilePairStore(join(state,'pairs.json'))
  if(command==='challenge'){
@@ -45,12 +69,37 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
  }
  if(Number(process.versions.node.split('.')[0])<24)throw Error('node_24_required')
  if(command==='serve-browser'){const listener=createBrowserBridge({port:Number(options.port??3271)});return {listener,address:await listener.listen()}}
+ if(command==='serve-computer'){
+  // Native-owned attachment only; no personal configuration or Eve worker lookup.
+  const host=testDeps.computerHost
+  if(!host)throw Error('computer_host_required')
+  await verifyComputerArtifacts(host.artifacts)
+  const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
+  const computer=attachComputerHost(state,host)
+  let browser:ReturnType<typeof createBrowserBridge>|undefined
+  let closeCore=async()=>{}
+  let closing:Promise<void>|undefined
+  const close=()=>closing??=(async()=>{
+   try{if(browser?.server.listening)await browser.close()}
+   finally{try{await closeCore()}finally{await computer.close()}}
+  })()
+  try{
+   const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),computerTasks:computer.computerTasks,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false})})
+   closeCore=listener.close.bind(listener)
+   const address=await listener.listen()
+   browser=createBrowserBridge({port:port===0?0:3271,corePort:address.port})
+   const browser_bridge=await browser.listen()
+   return {listener:{close},address,browser_bridge}
+  }catch(error){await close();throw error}
+ }
  const personalClient=await loadPersonalClient(testDeps.personalHome??homedir(),testDeps.personalEnv??process.env)
  const personalContext=createPersonalContextResolver(testDeps.personalHome??homedir())
  const learning=await loadLearningController(testDeps.personalHome??homedir())
  if(command==='serve-personal'){
   const port=Number(options.port??3270);if(!Number.isInteger(port)||port<0||port>65535)throw Error('invalid_port')
-  const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,personalContext,learning,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
+  const computer=attachComputerHost(state,testDeps.computerHost)
+  const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),personalClient,personalContext,learning,computerTasks:computer.computerTasks,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false,personal_configured:Boolean(personalClient)})})
+  const closeListener=listener.close.bind(listener);listener.close=async()=>{try{await closeListener()}finally{await computer.close()}}
   const address=await listener.listen()
   const browser=createBrowserBridge({port:options.port==='0'?0:3271,corePort:address.port})
   try{const browser_bridge=await browser.listen();return {listener:{close:async()=>{await browser.close();await listener.close()}},address,browser_bridge,personal_configured:Boolean(personalClient)}}
@@ -61,13 +110,16 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   const listenerPort=Number(options.port??3270);if(!Number.isInteger(listenerPort)||listenerPort<0||listenerPort>65535)throw Error('invalid_port')
   const root=resolve(options['worker-root'])
   const worker=await createOwnedPublicWorker({root,home:root+'-home',eveRoot:resolve(options['eve-root']),modelBaseURL:options['model-url'],modelId:options['model-id'],port:Number(options['worker-port']),resume:options.resume==='true'})
+  let release=async()=>{}
   try{await worker.start()
    const owners=createFileOwnerStore(join(state,'owners.json'))
    const tasks=createBoundedTaskController({file:join(state,'tasks.json'),owners,executor:createEveReadNoteExecutor(worker.client,worker.verify)})
-   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:owners,tasks,taskDiscovery:worker.tools,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
+   const computer=attachComputerHost(state,testDeps.computerHost);release=()=>computer.close()
+   const listener=createPairedSessionListener({host:'127.0.0.1',port:listenerPort,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:owners,tasks,taskDiscovery:worker.tools,computerTasks:computer.computerTasks,eveClient:()=>({attach:(id:string)=>worker.client.sessions.attach(id)}),readiness:async()=>({config_valid:true,worker_reachable:await worker.verify(),model_responsive:false,tools:await worker.tools(),healthy:false})})
+   const closeListener=listener.close.bind(listener);listener.close=async()=>{try{await closeListener()}finally{await computer.close()}}
    const address=await listener.listen()
    return {listener:{close:async()=>{try{await listener.close()}finally{await worker.stop()}}},address,task_submission:true}
-  }catch(e){await worker.stop();throw e}
+  }catch(e){await release();await worker.stop();throw e}
  }
  if(!options['worker-url'])throw Error('existing_worker_required')
  const workerURL=localURL(options['worker-url'])
@@ -82,15 +134,17 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
   const {Client}=await import(pathToFileURL(require.resolve('eve/client')).href)
   client=new Client({host:workerURL})
  }
- const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:createFileOwnerStore(join(state,'owners.json')),eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
+ const computer=attachComputerHost(state,testDeps.computerHost)
+ const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,personalClient,personalContext,learning,ownerStore:createFileOwnerStore(join(state,'owners.json')),computerTasks:computer.computerTasks,eveClient:()=>({attach:(id:string)=>client.sessions.attach(id)}),readiness:async()=>{
   let reachable=false
   let timeout:ReturnType<typeof setTimeout>|undefined
   try{const h=await Promise.race([client.health(),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('health_timeout')),1500)})]);reachable=h?.ok===true&&h?.status==='ready'}catch{}finally{if(timeout)clearTimeout(timeout)}
   // A worker health reply is not model inference or tool discovery.
   return {config_valid:true,worker_reachable:reachable,model_responsive:false,tools:[],healthy:false}
  }})
- const address=await listener.listen()
- return {listener,address}
+ const closeListener=listener.close.bind(listener);listener.close=async()=>{try{await closeListener()}finally{await computer.close()}}
+ try{const address=await listener.listen();return {listener,address}}
+ catch(error){await computer.close();throw error}
 }
 const invokedEntry=process.argv[1]?await realpath(resolve(process.argv[1])).catch(()=>null):null
 if(invokedEntry&&import.meta.url===pathToFileURL(invokedEntry).href){
