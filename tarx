@@ -81,7 +81,7 @@ pid_file() {
 # PID file. Legacy PIDs and listening ports cannot authorize a signal.
 service_owner() {
   python3 - "$@" <<'OWNER_PY'
-import fcntl, hashlib, math, os, pathlib, re, stat, subprocess, sys, tempfile, time
+import fcntl, hashlib, math, os, pathlib, re, signal, stat, subprocess, sys, tempfile, time
 class Starting(Exception): pass
 def pid(value):
     if not re.fullmatch(r'[0-9]{1,10}', value) or not 1 < int(value) < 2147483648:
@@ -135,17 +135,36 @@ def start(target, log, delay, argv):
         try: delay = float(delay)
         except ValueError: delay = 1
         if not math.isfinite(delay) or delay < 0: delay = 1
-        child = None; recorded = False
+        child = None; recorded = False; cancelled = False; phase = 'spawn'
+        def cancel_start(_signum, _frame):
+            nonlocal cancelled
+            cancelled = True
+            # Creation/handle assignment and link/commit must settle before
+            # cleanup can know which process instance this helper owns.
+            if phase not in ('spawn', 'publish'): raise InterruptedError('startup cancelled')
+        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT)}
         try:
             with open(log, 'wb') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True)
+            phase = 'waiting'
+            if cancelled: raise InterruptedError('startup cancelled')
             time.sleep(delay)
             if child.poll() is not None: raise ValueError('launch failed')
+            phase = 'publish'
             record(target, child.pid); recorded = True
+            phase = 'waiting'
+            if cancelled: raise InterruptedError('startup cancelled')
         finally:
-            if child is not None and not recorded:
-                if child.poll() is None: child.kill()
-                child.wait(timeout=3)
+            # Repeated termination cannot interrupt reaping. Successfully
+            # published services keep their owner record and remain running.
+            for signum in previous_signals: signal.signal(signum, signal.SIG_IGN)
+            try:
+                if child is not None and not recorded:
+                    if child.poll() is None: child.kill()
+                    child.wait(timeout=3)
+            finally:
+                for signum, handler in previous_signals.items(): signal.signal(signum, handler)
+
     finally:
         os.close(fd)
 try:
