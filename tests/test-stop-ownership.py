@@ -118,8 +118,8 @@ class StopOwnership(unittest.TestCase):
             locker.wait(timeout=3); locker.stdout.close()
 
     def test_terminated_startup_reaps_unpublished_child(self):
-        for signum in [signal.SIGTERM, signal.SIGINT]:
-            for boundary in [None, 'spawn', 'publish']:
+        for signum in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]:
+            for boundary in [None, 'spawn', 'publish', 'repeat']:
                 with self.subTest(signal=signum, boundary=boundary):
                     self.exercise_unpublished_termination(signum, boundary)
 
@@ -139,7 +139,8 @@ class StopOwnership(unittest.TestCase):
                 '        pathlib.Path(os.environ["FIXTURE_START_TRACE"]).write_text(str(child.pid))\n'
                 + ('        os.kill(os.getpid(), ' + str(int(signum)) + ')\n' if boundary == 'spawn' else '')
                 + '    return child\nsubprocess.Popen = fixture_spawn\n' + (
-                    '_real_link = os.link\ndef fixture_link(*args, **kwargs):\n    _real_link(*args, **kwargs)\n    os.kill(os.getpid(), ' + str(int(signum)) + ')\nos.link = fixture_link\n' if boundary == 'publish' else '') + source)
+                    '_real_link = os.link\ndef fixture_link(*args, **kwargs):\n    _real_link(*args, **kwargs)\n    os.kill(os.getpid(), ' + str(int(signum)) + ')\nos.link = fixture_link\n' if boundary == 'publish' else '') + (
+                    '_real_signal = signal.signal\ndef fixture_signal(number, handler):\n    if handler == signal.SIG_IGN: os.kill(os.getpid(), ' + str(int(signum)) + ')\n    return _real_signal(number, handler)\nsignal.signal = fixture_signal\n' if boundary == 'repeat' else '') + source)
         record = self.pids / 'inference.pid'
         launcher = subprocess.Popen([sys.executable, '-c', source, 'start', str(record), str(self.home / 'fixture.log'), '0' if boundary == 'publish' else '30', str(engine)],
             env={**self.env, 'FIXTURE_START_TRACE': str(trace), 'FIXTURE_START_WRAPPED': '1' if boundary else '0'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -156,11 +157,12 @@ class StopOwnership(unittest.TestCase):
             self.assertTrue(trace.exists(), 'fixture must enter the spawn/publication interval')
             child = int(trace.read_text())
             if boundary != 'publish': self.assertFalse(record.exists())
-            if not boundary:
+            if boundary in (None, 'repeat'):
                 self.assertTrue(alive(child)); launcher.send_signal(signum)
             _out, _err = launcher.communicate(timeout=4)
             self.assertNotEqual(launcher.returncode, 0)
             if boundary == 'publish':
+                self.assertEqual(launcher.returncode, 3, 'published owner must report starting, not a launch failure')
                 self.assertTrue(alive(child), 'published service must survive launcher cancellation')
                 self.assertEqual(int(record.read_text().splitlines()[0]), child)
                 record.unlink()  # Fixture record only; child remains owned by test cleanup.

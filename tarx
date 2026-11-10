@@ -138,11 +138,12 @@ def start(target, log, delay, argv):
         child = None; recorded = False; cancelled = False; phase = 'spawn'
         def cancel_start(_signum, _frame):
             nonlocal cancelled
+            if cancelled: return
             cancelled = True
             # Creation/handle assignment and link/commit must settle before
             # cleanup can know which process instance this helper owns.
             if phase not in ('spawn', 'publish'): raise InterruptedError('startup cancelled')
-        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT)}
+        previous_signals = {signum: signal.signal(signum, cancel_start) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
         try:
             with open(log, 'wb') as output:
                 child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True)
@@ -153,7 +154,7 @@ def start(target, log, delay, argv):
             phase = 'publish'
             record(target, child.pid); recorded = True
             phase = 'waiting'
-            if cancelled: raise InterruptedError('startup cancelled')
+            if cancelled: raise Starting('startup cancelled after ownership was recorded; readiness unconfirmed')
         finally:
             # Repeated termination cannot interrupt reaping. Successfully
             # published services keep their owner record and remain running.
