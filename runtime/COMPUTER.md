@@ -16,26 +16,43 @@ private task ledger. Repeated request IDs recover the existing result; uncertain
 runs never replay. Raw goals, context, credentials and accessibility trees are not
 stored in this ledger. Stop, revocation, expiry or changed consent abort execution.
 
-After loss of the in-memory owner, a persisted `cancelling` record remains held.
+After loss of the in-memory owner, a persisted `cancelling` record without matching
+execution-exit proof remains held.
 Repeating its request returns `computer_outcome_uncertain`, with no completion
 receipt, observation or action replay. Neither an existing nor a missing grant
 proves that the previous worker exited. The controller does not erase Stop intent
 or free the installation lease on that assumption. Cleanup grace expiry also
 preserves Stop intent instead of downgrading it to ordinary uncertain recovery.
-Without confirmed owned cleanup this can hold indefinitely; there is no automatic
-operator reconciliation in this increment. A still-owned worker can finish
-its normal cancellation; orphaned-worker reconciliation and full daemon crash
-recovery remain separate work.
+Without confirmed owned cleanup this can hold indefinitely. There is no PID-based
+or operator-state inference. A still-owned execution that fulfills after grace
+expiry can record its actual exit and resolve Stop without a completion receipt.
+Orphaned-worker reconciliation and full daemon crash recovery remain separate work.
 
 Lost authority before or during read-only recovery also retains an uncertain
 installation lease. Finishing an observer proves only that observer's cleanup;
 it does not prove the original execution worker exited. If Stop was persisted,
 recovery keeps `cancelling` instead. No completion or cancellation receipt is
 inferred from permission loss. A live owner whose actual executor resolves still
-uses its normal cancellation settlement. Authorized independent observation
-success is unchanged; full ownership reconciliation remains unaccepted.
+uses its normal cancellation settlement. Independent observation success requires
+matching original execution-exit proof; full ownership reconciliation remains
+unaccepted.
 Unverified, denied, error, cancelled or malformed observer results also retain
 the lease; those verdicts do not prove the original execution worker exited.
+
+Execution-exit proof is private metadata in the existing task ledger, bound to
+the subject, installation, request, native session, channel, agent, intent hash
+and core source. Only fulfillment of the trusted execution promise writes it.
+The native executor fulfills only after its child and native-host cleanup end;
+rejection or proof-publication failure leaves exit unconfirmed. Observation,
+health, timeout and model output cannot create proof. Completion checks proof in
+the same ledger transaction that publishes the receipt. A proof-backed Stop can
+settle after reopening without replaying work. Proof is neither consent nor a
+billing record and is not exposed in public task replies. Legacy nonterminal
+rows without proof stay unconfirmed; existing terminal receipts remain readable.
+This assumes the existing private-ledger trust boundary, not hostile same-UID
+filesystem isolation. A crash before proof publication can still retain a lease.
+The native proof covers the worker leader's close and the known private native
+host cleanup. It does not establish exit of escaped or inaccessible descendants.
 
 The native executor verifies artifact hashes, runs one isolated worker, observes
 fresh native refs and checks the approved window before each click. It enforces

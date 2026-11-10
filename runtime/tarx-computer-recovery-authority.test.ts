@@ -76,7 +76,7 @@ test('Stop while the final observation authority read is pending cannot publish 
  }finally{releaseRun();releaseAuthority();await original.close();await replacement.close();await rm(dir,{recursive:true,force:true})}
 })
 
-for(const verdict of ['unverified','denied','error','cancelled','invalid'] as const)test(`observer-only ${verdict} cannot release an unknown execution owner's lease`,async()=>{
+for(const verdict of ['done','unverified','denied','error','cancelled','invalid'] as const)test(`observer-only ${verdict} cannot release an unknown execution owner's lease`,async()=>{
  const dir=await mkdtemp(join(tmpdir(),'tarx-recovery-observer-verdict-')),file=join(dir,'tasks.json')
  let executing=false,finished=false,release!:()=>void
  const gate=new Promise<void>(resolve=>{release=resolve})

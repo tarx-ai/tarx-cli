@@ -60,7 +60,7 @@ test('verifying rejects an unverified outcome, and owner loss blocks a late succ
  assert.equal((await lost.controller.submit(identity,request,lost.paired)).code,403)
 })
 
-test('a crash after delivery reconciles from observation and does not replay the action',async t=>{
+test('observation after an unconfirmed execution cannot complete or replay the action',async t=>{
  let actions=0,observations=0
  const f=await fixture(t,{
   run:async()=>{actions++;throw Error('crashed_before_receipt')},
@@ -69,7 +69,7 @@ test('a crash after delivery reconciles from observation and does not replay the
  await f.controller.submit(identity,request,f.paired)
  assert.equal((await until(f.controller,['uncertain','completed','failed'])).body.status,'uncertain')
  const again=await f.controller.submit(identity,request,f.paired)
- assert.equal(again.body.status,'completed');assert.equal(again.body.receipt?.independent_verified,true)
+ assert.equal(again.body.status,'uncertain');assert.equal(again.body.receipt,null)
  assert.equal(actions,1);assert.equal(observations,1)
  const negative=await fixture(t,{
   run:async()=>{actions++;throw Error('crashed_before_receipt')},

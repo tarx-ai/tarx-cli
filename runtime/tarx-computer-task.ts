@@ -21,6 +21,7 @@ export type ComputerExecutor = {
  /** Trusted executor cleanup budget; never supplied by a browser request. */
  shutdownGraceMs?:number
  ready:()=>Promise<boolean>
+ /** Fulfill only after owned execution and native cleanup are confirmed ended. */
  run:(input:ComputerRun)=>Promise<ComputerOutcome>
  /** Fresh observation after a crash. Must not repeat a delivered action. */
  observe?:(input:ComputerRun)=>Promise<ComputerOutcome>
@@ -33,7 +34,8 @@ export type ComputerAuthority = {
  bind?:(request:ComputerSubmission)=>Promise<ComputerSession|null>
 }
 type Status='reserved'|'running'|'completed'|'failed'|'cancelling'|'cancelled'|'uncertain'
-type Record = {task:typeof COMPUTER_TASK;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;status:Status;receipt?:{
+type ExecutionExitProof={kind:'computer_execution_exit';version:1;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;core_source:string}
+type Record = {task:typeof COMPUTER_TASK;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;status:Status;execution_exit?:ExecutionExitProof;receipt?:{
  kind:'computer_use';session_id:string;channel_id:string;agent_id:string;independent_verified:true;native_actions:number;model_calls:number;core_source:string;execution_mode:ComputerOutcome['execution_mode'];billing_truth:'not_a_charge'
 }}
 type Reply={code:number;body:{error?:string;request_id?:string;session_id?:string;channel_id?:string;agent_id?:string;task?:typeof COMPUTER_TASK;status?:Status;receipt?:Record['receipt']|null}}
@@ -56,10 +58,18 @@ export function parseComputerRequest(value:unknown):ComputerSubmission|null {
  return parsed
 }
 export function computerIntentHash(r:ComputerRequest) {return hash([r.request_id,r.session_id,r.channel_id,r.agent_id,r.goal,r.context??''])}
+function validExecutionExitProof(value:unknown,r:Record,source:string):value is ExecutionExitProof {
+ if(!value||typeof value!=='object'||Array.isArray(value))return false
+ const proof=value as {[key:string]:unknown}
+ return Object.keys(proof).sort().join(',')==='agent_id,channel_id,core_source,install_id,intent_sha256,kind,request_id,session_id,subject_id,version'&&
+  proof.kind==='computer_execution_exit'&&proof.version===1&&proof.core_source===source&&
+  ['request_id','session_id','channel_id','agent_id','subject_id','install_id','intent_sha256'].every(key=>proof[key]===r[key as keyof Record])
+}
 function validRecord(r:Record,source:string):boolean {
  if(!r||r.task!==COMPUTER_TASK||!requestId(r.request_id)||!sessionId(r.session_id)||!opaque(r.channel_id)||!agentId(r.agent_id)||
   typeof r.subject_id!=='string'||!/^tvs_[a-f0-9]{32}$/.test(r.subject_id)||!opaque(r.install_id)||!/^[a-f0-9]{64}$/.test(r.intent_sha256)||
   !['reserved','running','completed','failed','cancelling','cancelled','uncertain'].includes(r.status))return false
+ if(r.execution_exit!==undefined&&!validExecutionExitProof(r.execution_exit,r,source))return false
  const receipt=r.receipt
  if(r.status!=='completed')return receipt===undefined
  return Boolean(receipt&&Object.keys(receipt).sort().join(',')==='agent_id,billing_truth,channel_id,core_source,execution_mode,independent_verified,kind,model_calls,native_actions,session_id'&&
@@ -118,13 +128,17 @@ export function createComputerTaskController(input:{file:string;authority:Comput
     !Number.isInteger(s.max_steps)||s.max_steps<1||s.max_steps>8||!Number.isInteger(s.timeout_ms)||s.timeout_ms<1||s.timeout_ms>45000)return null
   return s
  }
- async function transition(k:string,status:Status,receipt?:Record['receipt'],signal?:AbortSignal,interruptedStatus:'cancelled'|'uncertain'='cancelled') {
+ async function transition(k:string,status:Status,receipt?:Record['receipt'],options:{signal?:AbortSignal;ownership?:'execution'|'observation'}={}) {
   return store.transact(all=>{
    const r=all[k];if(!r)throw Error('unknown_computer_task')
+   if(!validRecord(r,input.coreSource))throw Error('invalid_computer_record')
    if(terminal(r.status))return {result:r}
+   const {signal,ownership='execution'}=options
+   const interruptedStatus=ownership==='execution'?'cancelled':'uncertain'
    // Losing cleanup confirmation cannot erase a previously persisted Stop.
    const interrupted=(signal?.aborted&&terminal(status))||(status==='completed'&&r.status==='cancelling')
-   const proposed:Status=interrupted?interruptedStatus:status
+   const missingExit=status==='completed'&&!validExecutionExitProof(r.execution_exit,r,input.coreSource)
+   const proposed:Status=interrupted?interruptedStatus:missingExit?'uncertain':status
    const next:Status=r.status==='cancelling'
     ?proposed==='cancelled'?'cancelled':'cancelling'
     :proposed
@@ -134,6 +148,32 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    return {result:all[k],write:true}
   })
  }
+ async function persistExecutionExit(k:string,id:TaskIdentity,request:ComputerRequest) {
+  await store.transact(all=>{
+   const r=all[k]
+   if(!r||!validRecord(r,input.coreSource)||r.subject_id!==id.subject_id||r.install_id!==id.install_id||
+    r.request_id!==request.request_id||r.session_id!==request.session_id||r.channel_id!==request.channel_id||r.agent_id!==request.agent_id||r.intent_sha256!==computerIntentHash(request))throw Error('computer_execution_identity_changed')
+   if(terminal(r.status))return {result:undefined}
+   const proof:ExecutionExitProof={kind:'computer_execution_exit',version:1,request_id:r.request_id,session_id:r.session_id,
+    channel_id:r.channel_id,agent_id:r.agent_id,subject_id:r.subject_id,install_id:r.install_id,intent_sha256:r.intent_sha256,core_source:input.coreSource}
+   const next:Status=r.status==='cancelling'?'cancelled':r.status
+   all[k]={...r,status:next,execution_exit:proof}
+   if(next!=='completed')delete all[k].receipt
+   return {result:undefined,write:true}
+  })
+ }
+ async function stoppedExecutionReply(k:string,mode:'existing_stop'|'new_stop'):Promise<Reply> {
+  const r=await store.transact(all=>{
+   const current=all[k]
+   if(!current||!validRecord(current,input.coreSource))throw Error('invalid_computer_record')
+   if(!terminal(current.status)&&(current.status==='cancelling'||mode==='new_stop')&&validExecutionExitProof(current.execution_exit,current,input.coreSource)){
+    all[k]={...current,status:'cancelled'};delete all[k].receipt
+    return {result:all[k],write:true}
+   }
+   return {result:current}
+  })
+  return terminal(r.status)?{code:200,body:safe(r)}:{code:409,body:{...safe(r),error:'computer_outcome_uncertain'}}
+ }
  function sameGrant(current:ComputerSession,session:ComputerSession) {
   return current.expires_at===session.expires_at&&current.max_steps===session.max_steps&&current.timeout_ms===session.timeout_ms
  }
@@ -142,12 +182,12 @@ export function createComputerTaskController(input:{file:string;authority:Comput
   const authorized=await still()
   // An observer settling proves only its own cleanup, not the old execution's exit.
   if(signal.aborted||!authorized){await transition(k,interruptedStatus);return}
-  if(!validOutcome(outcome,input.coreSource)){await transition(k,ownership==='observation'?'uncertain':'failed',undefined,signal,interruptedStatus);return}
+  if(!validOutcome(outcome,input.coreSource)){await transition(k,ownership==='observation'?'uncertain':'failed',undefined,{signal,ownership});return}
   if(outcome.outcome==='done'&&outcome.independent_verified&&(outcome.native_actions===null||outcome.model_calls===null)){await transition(k,'uncertain');return}
   if(outcome.outcome==='done'&&outcome.independent_verified&&outcome.native_actions!==null&&outcome.model_calls!==null) {
    await transition(k,'completed',{kind:'computer_use',session_id:request.session_id,channel_id:request.channel_id,agent_id:request.agent_id,
-    independent_verified:true,native_actions:outcome.native_actions,model_calls:outcome.model_calls,core_source:outcome.core_source,execution_mode:outcome.execution_mode,billing_truth:'not_a_charge'},signal,interruptedStatus)
-  } else await transition(k,ownership==='observation'?'uncertain':outcome.outcome==='cancelled'?'cancelled':'failed',undefined,signal,interruptedStatus)
+    independent_verified:true,native_actions:outcome.native_actions,model_calls:outcome.model_calls,core_source:outcome.core_source,execution_mode:outcome.execution_mode,billing_truth:'not_a_charge'},{signal,ownership})
+  } else await transition(k,ownership==='observation'?'uncertain':outcome.outcome==='cancelled'?'cancelled':'failed',undefined,{signal,ownership})
  }
  async function execute(k:string,id:TaskIdentity,request:ComputerRequest,session:ComputerSession,paired:()=>Promise<boolean>,abort:AbortController) {
   let checking=false
@@ -167,8 +207,14 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    if(!await abortable(stillAuthorized,abort.signal)) {await transition(k,'cancelled');return}
    await transition(k,'running')
    if(abort.signal.aborted) {await transition(k,'cancelled');return}
-   dispatched=true
-   const outcome=await abortable(()=>input.executor.run({request,session,signal:abort.signal,stillAuthorized}),abort.signal,shutdownGraceMs)
+   const outcome=await abortable(async()=>{
+    dispatched=true
+    const value=await input.executor.run({request,session,signal:abort.signal,stillAuthorized})
+    // Retain this continuation after grace expiry; a late owned exit is evidence,
+    // while a rejected run or an observer can never manufacture this proof.
+    await persistExecutionExit(k,id,request)
+    return value
+   },abort.signal,shutdownGraceMs)
    await settle(k,request,outcome,abort.signal,stillAuthorized,'execution')
   } catch {
    settling.add(k)
@@ -185,10 +231,11 @@ export function createComputerTaskController(input:{file:string;authority:Comput
   try {
    const current=await store.get(k)
    if(!current)return {code:404,body:{error:'unknown_computer_task'}}
+   if(!validRecord(current,input.coreSource))throw Error('invalid_computer_record')
    if(terminal(current.status))return {code:200,body:safe(current)}
    // A durable Stop request does not prove that a previous owner's worker exited.
    // Preserve its intent and installation lease until owned cleanup is confirmed.
-   if(current.status==='cancelling')return {code:409,body:{...safe(current),error:'computer_outcome_uncertain'}}
+   if(current.status==='cancelling')return stoppedExecutionReply(k,'existing_stop')
    const session=await authorized(id,request,paired)
    if(!session){await transition(k,'uncertain');const r=await store.get(k);return {code:403,body:{...safe(r!),error:'computer_session_approval_required'}}}
    if(!input.executor.observe)return {code:200,body:safe(current)}
@@ -228,9 +275,10 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    const kExisting=key(id,request.request_id)
    const existing=await store.get(kExisting)
    if(existing){
+    if(!validRecord(existing,input.coreSource))throw Error('invalid_computer_record')
     if(existing.intent_sha256!==computerIntentHash(request))return {code:409,body:{error:'request_conflict'}}
     if(terminal(existing.status)||active.has(kExisting)||settling.has(kExisting))return {code:200,body:safe(existing)}
-    if(existing.status==='cancelling')return {code:409,body:{...safe(existing),error:'computer_outcome_uncertain'}}
+    if(existing.status==='cancelling')return stoppedExecutionReply(kExisting,'existing_stop')
     return recover(kExisting,id,request,paired)
    }
    const session=await authorized(id,request,paired)
@@ -268,7 +316,7 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    if(!r||r.task!==COMPUTER_TASK)return {code:404,body:{error:'unknown_computer_task'}}
    if(terminal(r.status))return {code:200,body:safe(r)}
    const owned=active.get(k)
-   if(!owned)return {code:409,body:{...safe(r),error:'computer_outcome_uncertain'}}
+   if(!owned)return stoppedExecutionReply(k,'new_stop')
    await transition(k,'cancelling');owned.abort.abort()
    return {code:202,body:{...safe(r),status:'cancelling'}}
   },

@@ -47,7 +47,7 @@ for(const grantAvailable of [true,false])test(`a recreated controller cannot ack
  }
 })
 
-test('unconfirmed live Stop cleanup preserves cancellation intent across controller recreation',async()=>{
+test('late confirmed owned cleanup resolves Stop after grace expiry without a completion receipt',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'tarx-restart-cancel-timeout-')),file=join(dir,'tasks.json')
  let entered=false,finished=false,observations=0,release!:()=>void,finishedRun!:()=>void
  const runFinished=new Promise<void>(resolve=>{finishedRun=resolve})
@@ -65,11 +65,13 @@ test('unconfirmed live Stop cleanup preserves cancellation intent across control
   assert.equal((await replacement.read(identity,request.request_id)).body.status,'cancelling')
   assert.equal((await replacement.submit(identity,request,async()=>true)).code,409)
   assert.equal(observations,0,'Stop cannot become a successful read-only recovery')
-  const held=await readFile(file,'utf8')
   release();await runFinished
   assert.equal(finished,true)
-  assert.equal(await readFile(file,'utf8'),held,'late completion cannot silently rewrite a held Stop')
+  let stopped=await replacement.read(identity,request.request_id)
+  for(let i=0;i<100&&stopped.body.status!=='cancelled';i++){
+   await new Promise(resolve=>setTimeout(resolve,5));stopped=await replacement.read(identity,request.request_id)
+  }
   assert.equal((await replacement.read(identity,request.request_id)).body.receipt,null)
-  assert.equal((await replacement.read(identity,request.request_id)).body.status,'cancelling')
+  assert.equal(stopped.body.status,'cancelled','only the real execution exit may release the held Stop')
  }finally{release();await original.close();await replacement.close();await rm(dir,{recursive:true,force:true})}
 })
