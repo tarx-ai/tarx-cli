@@ -1,3 +1,4 @@
+/** Legacy adapter. The durable task/outbox core is daemon/src/store.ts; see daemon/MIGRATION.md. Do not add a second ledger here. */
 import {createHash} from 'node:crypto'
 import {createLocalJsonStore} from './local-json-store.ts'
 import type {OwnerStore} from './tarx-eve-listener.ts'
