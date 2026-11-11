@@ -21,6 +21,16 @@ export type NativeScope={
  data_consent?:'goal_and_scoped_controls'
  preparation_model_calls?:number
 }
+/** An exact native plan approval can satisfy the core's generic click-effect
+ * question. Other external effects and consequential risk categories still
+ * require their own authority; matching a label alone does not approve them. */
+export function approvedNativeScopedClick(scope:Pick<NativeScope,'app'|'actions'>,request:unknown):boolean {
+ if(!scope||typeof scope.app!=='string'||!scope.app||!Array.isArray(scope.actions)||!request||typeof request!=='object'||Array.isArray(request))return false
+ const r=request as {app?:unknown;action?:{command?:unknown};risk?:{level?:unknown;category?:unknown;why?:unknown};targetRole?:unknown;targetName?:unknown}
+ if(r.app!==scope.app||r.action?.command!=='click'||r.risk?.level!=='high'||typeof r.targetRole!=='string'||!r.targetRole||typeof r.targetName!=='string'||!r.targetName||
+  !scope.actions.some(action=>action&&action.command==='click'&&action.role===r.targetRole&&action.name===r.targetName))return false
+ return r.risk.category==='settings'||r.risk.category==='external'&&r.risk.why==='action effect requires approval'
+}
 const digest=(s:unknown)=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s)
 const TARX_CURSOR_SHA256='1ee0717a18e54e525682077e3f9a8128da08aab2b1059a1f4365cea85769133b'
 const exec=promisify(execFile)
