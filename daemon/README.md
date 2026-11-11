@@ -146,6 +146,12 @@ The outbox is not a generic ledger read. A receipt reader must still verify the
 account, install, channel, agent and request identity before returning the
 payload, and must not expose raw execution proof.
 
+The Electron main process acknowledges the delivery after a verified ledger read
+with `POST /v1/receipts/ack` using `<state>/daemon.token`. The daemon checks the
+task is completed and the channel/agent still match, then marks the outbox row
+`delivered`. A repeated acknowledgement is idempotent. A missing or stopped
+daemon does not block the ledger read.
+
 ## Events
 
 `recordEvent` accepts an event id, task id, sequence, type and bounded payload.

@@ -499,6 +499,28 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
       })
     },
 
+    /** Delivery acknowledgement from the owning conversation host. The task
+     * must still belong to the same channel/agent; a repeated ack is idempotent. */
+    ackReceipt(input: {requestId: string; channelId: string; agentId: string}): OutboxRecord {
+      const requestId = assertId(input.requestId, TASK_ID, "task")
+      const channelId = assertId(input.channelId, OPAQUE, "channel")
+      const agentId = assertId(input.agentId, OPAQUE, "agent")
+      return tx(() => {
+        const task = getTask(requestId)
+        if (!task || task.status !== "completed" || !task.delivery_id) throw new DaemonError("receipt_not_found", 404)
+        if (task.channel_id !== channelId || task.agent_id !== agentId) throw new DaemonError("receipt_identity_mismatch", 403)
+        const delivery = outboxFor(task.delivery_id)
+        if (!delivery) throw new DaemonError("receipt_not_found", 404)
+        if (delivery.status === "delivered") return delivery
+        if (delivery.status === "dead") throw new DaemonError("receipt_dead", 409)
+        const at = now()
+        const updated = statement(`UPDATE outbox SET status = 'delivered', delivered_at = ?, lease_owner = NULL,
+          lease_expires_at = NULL, last_error = NULL WHERE delivery_id = ? AND status IN ('pending','delivering')
+          RETURNING *`).get(at, delivery.delivery_id) as Record<string, any> | undefined
+        return updated ? mapOutbox(updated) : (outboxFor(delivery.delivery_id) as OutboxRecord)
+      })
+    },
+
     getTask(taskId: string): TaskRecord | null {
       return getTask(assertId(taskId, TASK_ID, "task"))
     },
