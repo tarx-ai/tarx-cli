@@ -1,3 +1,5 @@
+import {randomBytes} from "node:crypto"
+import {lstat, open, readFile} from "node:fs/promises"
 import {join, resolve} from "node:path"
 
 import {syncComputerReceipts} from "./adapters/computer-receipts.ts"
@@ -6,6 +8,36 @@ import {DaemonError, asDaemonError} from "./errors.ts"
 import {createDaemonServer} from "./http.ts"
 import {acquireDaemonLock} from "./lock.ts"
 import {createDaemonStore, type DaemonStore} from "./store.ts"
+
+async function daemonToken(stateDirectory: string): Promise<string> {
+  const file = join(stateDirectory, "daemon.token")
+  const read = async () => {
+    const info = await lstat(file)
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077) || info.size < 1 || info.size > 128) throw new DaemonError("daemon_token_unsafe", 503)
+    const token = (await readFile(file, "utf8")).trim()
+    if (!/^[a-f0-9]{64}$/.test(token)) throw new DaemonError("daemon_token_invalid", 503)
+    return token
+  }
+  try {
+    return await read()
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error
+  }
+  const token = randomBytes(32).toString("hex")
+  try {
+    const handle = await open(file, "wx", 0o600)
+    try {
+      await handle.writeFile(token)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    return token
+  } catch (error: any) {
+    if (error?.code === "EEXIST") return read()
+    throw error
+  }
+}
 
 export type DaemonOptions = {
   stateDirectory: string
@@ -72,7 +104,8 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
       await shutdown()
       return {ok: true, check: true, recovered, receipts, stats, coordinator: null}
     }
-    server = createDaemonServer({store, port: options.port, now})
+    const token = await daemonToken(stateDirectory)
+    server = createDaemonServer({store, port: options.port, now, token})
     const address = await server.listen()
     timer = setInterval(() => {
       try {
