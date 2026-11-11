@@ -1,3 +1,4 @@
+/** Legacy worker supervisor. The daemon supervisor is daemon/src/supervisor.ts; this owns the Eve check-worker only. */
 /** Explicit owned child only; never install/page-load startup or arbitrary attach. */
 import {spawn,type ChildProcess} from 'node:child_process'
 import {mkdir,symlink,readFile,readlink,writeFile,lstat,readdir,unlink,rmdir} from 'node:fs/promises'

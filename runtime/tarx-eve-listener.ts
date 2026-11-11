@@ -1,3 +1,4 @@
+/** Legacy paired listener. Delivery dedup is moving to the daemon outbox; keep this adapter until the migration gate. */
 /**
  * TARX Eve local session listener — executable loopback read/attach server.
  *
