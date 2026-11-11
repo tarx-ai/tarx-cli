@@ -69,3 +69,13 @@ jobs:
         run: python3 tests/test-runtime-package.py
       - name: Test public CLI install and readiness
         run: sh tests/test-install-readiness.sh
+
+  daemon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test daemon ledger, leases, outbox, lock and adapters
+        run: node --test --experimental-strip-types daemon/test/*.test.ts
