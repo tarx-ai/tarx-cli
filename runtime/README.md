@@ -1,3 +1,5 @@
+> **Daemon v2:** the durable task/outbox core is in [`../daemon/`](../daemon/README.md). This runtime remains the execution adapter until the migration gates in [`../daemon/MIGRATION.md`](../daemon/MIGRATION.md) are met. Do not run two task ledgers for one install.
+
 # Optional local connection runtime
 
 Install with `tarx runtime install` after installing Node.js24 or newer. The ordinary CLI install remains independent of Node.

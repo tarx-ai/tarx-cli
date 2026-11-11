@@ -1,0 +1,13 @@
+{
+  "name": "@tarx/daemon",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "check": "node --experimental-strip-types src/main.ts --check"
+  }
+}

@@ -32,6 +32,12 @@ For extra compute, enter `/compute` followed by a task you approve for the super
 
 These controls do not provision models, add tools, start training or prove personal-model readiness on every installation.
 
+## Daemon v2
+
+The local coordination core is being rebuilt in [`daemon/`](daemon/README.md): one SQLite/WAL ledger per install, fenced task leases, one active task per account/install, a transactional outbox, event deduplication, lease-expiry recovery that never replays uncertain work, and a service supervisor that verifies PID identity before signaling.
+
+It is a source-reviewed core, not an installed service. The existing runtime modules remain the execution adapters until the migration gates in [`daemon/MIGRATION.md`](daemon/MIGRATION.md) are met. `daemon/bin/tarxd --check --state-dir DIR` is the only current entrypoint.
+
 ## Optional local runtime
 
 The runtime package requires Node.js24 or newer, npm, Python3, and curl:

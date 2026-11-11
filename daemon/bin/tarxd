@@ -1,0 +1,6 @@
+#!/bin/sh
+# TARX daemon entrypoint. The daemon is Node + built-in SQLite; no native
+# service is installed and no model is started by this command.
+set -eu
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node --experimental-strip-types "$DIR/../src/main.ts" "$@"
