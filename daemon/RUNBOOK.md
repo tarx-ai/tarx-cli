@@ -34,8 +34,10 @@ Prometheus text, bounded to counters.
 
 ## Daemon will not start
 
-- `daemon_already_running`: another process holds `<state>/.daemon.lock`. Check
-  its PID; do not delete the lock while it is alive.
+- `daemon_already_running`: another process holds the SQLite exclusive lock in
+  `<state>/daemon.lock.sqlite`. Do not delete the file while that process is
+  alive. If the process was killed, the OS released the lock; retry the daemon.
+  The file may remain on disk; it is not the ownership proof.
 - `schema_newer`: the binary is older than the database. Upgrade the daemon; do
   not downgrade the file.
 - `service_record_invalid` / `service_owner_changed`: a service record is unsafe

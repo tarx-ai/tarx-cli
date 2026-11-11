@@ -39,7 +39,11 @@ for the reference pattern and its explicit research-code boundary.
 daemon/
   bin/tarxd              entrypoint shim
   src/
-    main.ts              composition root, lock, recovery loop, loopback HTTP
+    main.ts              composition root, SQLite lock, recovery loop, coordinator, loopback HTTP
+    lock.ts              crash-safe exclusive startup lock (SQLite transaction)
+    coordinator.ts       one-owner task loop and outbox drain
+    adapters/
+      computer-receipts.ts  read-only import of the existing computer-task ledger
     store.ts             SQLite/WAL task ledger, leases, outbox, events
     schema.ts            schema v1 and migration guard
     sqlite.ts            node:sqlite adapter and IMMEDIATE transaction helper
@@ -53,8 +57,16 @@ daemon/
 ```
 
 `daemon/bin/tarxd --state-dir DIR --once` opens the store, recovers expired
-leases and exits. `--check` does the same without serving. The default run binds
+leases, runs one coordinator tick when adapters are supplied, and exits.
+`--check` does the same without serving. The default run binds
 `127.0.0.1:3272`; the listener exposes health only.
+
+The launcher owns one `createCoordinator` when both an executor and a delivery
+adapter are supplied (`DaemonOptions.executor` and `DaemonOptions.delivery`).
+`--receipt-ledger FILE` imports completed rows from the existing desktop
+`computer-tasks.json` into the transactional outbox. The import is read-only,
+validates the execution-exit proof, and uses a deterministic idempotency key; a
+second import is an `existing` result, not a second delivery.
 
 ## State
 

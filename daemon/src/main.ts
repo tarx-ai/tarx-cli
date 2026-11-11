@@ -1,35 +1,11 @@
-import {mkdir, open, unlink, writeFile} from "node:fs/promises"
 import {join, resolve} from "node:path"
 
+import {syncComputerReceipts} from "./adapters/computer-receipts.ts"
+import {createCoordinator, type DeliveryAdapter, type TaskExecutor} from "./coordinator.ts"
 import {DaemonError, asDaemonError} from "./errors.ts"
 import {createDaemonServer} from "./http.ts"
+import {acquireDaemonLock} from "./lock.ts"
 import {createDaemonStore, type DaemonStore} from "./store.ts"
-
-const LOCK = ".daemon.lock"
-
-async function acquire(stateDirectory: string): Promise<{release: () => Promise<void>}> {
-  await mkdir(stateDirectory, {recursive: true, mode: 0o700})
-  const file = join(stateDirectory, LOCK)
-  const handle = await open(file, "wx", 0o600)
-  try {
-    await handle.writeFile(String(process.pid))
-    await handle.sync()
-  } catch (error) {
-    await handle.close()
-    await unlink(file).catch(() => {})
-    throw error
-  }
-  await handle.close()
-  return {
-    async release() {
-      try {
-        await unlink(file)
-      } catch {
-        /* another owner cannot remove it; leave the directory as found */
-      }
-    },
-  }
-}
 
 export type DaemonOptions = {
   stateDirectory: string
@@ -38,6 +14,12 @@ export type DaemonOptions = {
   check?: boolean
   recoveryIntervalMs?: number
   now?: () => number
+  executor?: TaskExecutor
+  delivery?: DeliveryAdapter
+  workerId?: string
+  leaseMs?: number
+  heartbeatMs?: number
+  receiptLedger?: string
 }
 
 export async function runDaemon(options: DaemonOptions): Promise<Record<string, unknown>> {
@@ -46,15 +28,18 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
   const now = options.now ?? Date.now
   const intervalMs = options.recoveryIntervalMs ?? 1_000
   if (!Number.isInteger(intervalMs) || intervalMs < 100 || intervalMs > 60_000) throw new DaemonError("invalid_recovery_interval", 400)
-  const lock = await acquire(stateDirectory)
+  if (Boolean(options.executor) !== Boolean(options.delivery)) throw new DaemonError("coordinator_incomplete", 400)
+  const lock = await acquireDaemonLock(stateDirectory)
   let store: DaemonStore | undefined
   let server: ReturnType<typeof createDaemonServer> | undefined
   let timer: ReturnType<typeof setInterval> | undefined
+  let coordinator: ReturnType<typeof createCoordinator> | undefined
   let closed = false
   const shutdown = async () => {
     if (closed) return
     closed = true
     if (timer) clearInterval(timer)
+    await coordinator?.stop().catch(() => {})
     await server?.close().catch(() => {})
     store?.close()
     await lock.release()
@@ -64,10 +49,28 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
     const recovered = store.recoverExpired(now())
     store.recoverExpiredDeliveries(now())
     store.expireWorkers(now())
-    const stats = store.stats()
-    if (options.check || options.once) {
+    const receipts = options.receiptLedger ? await syncComputerReceipts({ledgerFile: options.receiptLedger, store}) : null
+    if (options.executor && options.delivery) {
+      coordinator = createCoordinator({
+        store,
+        executor: options.executor,
+        delivery: options.delivery,
+        workerId: options.workerId ?? `daemon-${process.pid}`,
+        leaseMs: options.leaseMs,
+        heartbeatMs: options.heartbeatMs,
+      })
+    }
+    if (options.once) {
+      if (coordinator) await coordinator.tick()
+      const stats = store.stats()
+      const coordinatorStats = coordinator?.stats()
       await shutdown()
-      return {ok: true, check: Boolean(options.check), recovered, stats}
+      return {ok: true, check: false, recovered, receipts, stats, coordinator: coordinatorStats ?? null}
+    }
+    if (options.check) {
+      const stats = store.stats()
+      await shutdown()
+      return {ok: true, check: true, recovered, receipts, stats, coordinator: null}
     }
     server = createDaemonServer({store, port: options.port, now})
     const address = await server.listen()
@@ -81,12 +84,13 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
       }
     }, intervalMs)
     timer.unref?.()
+    coordinator?.start()
     const stop = () => {
       void shutdown().finally(() => process.exit(0))
     }
     process.once("SIGTERM", stop)
     process.once("SIGINT", stop)
-    return {ok: true, listening: address, state_directory: stateDirectory, recovered}
+    return {ok: true, listening: address, state_directory: stateDirectory, recovered, receipts, coordinator: coordinator?.stats() ?? null}
   } catch (error) {
     await shutdown()
     throw error
@@ -102,8 +106,9 @@ function parse(argv: string[]): DaemonOptions {
     else if (arg === "--state-dir") options.stateDirectory = argv[++i] ?? ""
     else if (arg === "--port") options.port = Number(argv[++i])
     else if (arg === "--interval") options.recoveryIntervalMs = Number(argv[++i])
+    else if (arg === "--receipt-ledger") options.receiptLedger = argv[++i] ?? ""
     else if (arg === "--help") {
-      console.log(JSON.stringify({usage: "tarxd --state-dir DIR [--port PORT] [--once|--check]", commands: ["run", "check"]}))
+      console.log(JSON.stringify({usage: "tarxd --state-dir DIR [--port PORT] [--receipt-ledger FILE] [--once|--check]", commands: ["run", "check"]}))
       process.exit(0)
     } else throw new DaemonError("invalid_arguments", 400)
   }

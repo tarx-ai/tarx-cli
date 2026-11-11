@@ -313,6 +313,47 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
       })
     },
 
+    /** One-way import of an already-verified external completion (for example
+     * the desktop computer-task ledger). The task row and its outbox row are
+     * written together; an existing task/outbox is returned, never duplicated. */
+    importCompletedTask(input: {taskId: string; ownerId: string; installId: string; channelId: string; agentId: string; kind: string; request: unknown; result: unknown; delivery: DeliveryInput}): {task: TaskRecord; delivery: OutboxRecord; imported: boolean} {
+      const taskId = assertId(input.taskId, TASK_ID, "task")
+      const ownerId = assertId(input.ownerId, OPAQUE, "owner")
+      const installId = assertId(input.installId, OPAQUE, "install")
+      const channelId = assertId(input.channelId, OPAQUE, "channel")
+      const agentId = assertId(input.agentId, OPAQUE, "agent")
+      const kind = assertId(input.kind, KIND, "kind")
+      const requestJson = encoded(input.request, MAX_REQUEST)
+      const resultJson = encoded(input.result, MAX_RESULT)
+      const at = now()
+      return tx(() => {
+        const existing = getTask(taskId)
+        if (existing) {
+          if (existing.status !== "completed" || !existing.delivery_id) throw new DaemonError("task_exists", 409)
+          const delivery = outboxFor(existing.delivery_id)
+          if (!delivery) throw new DaemonError("outbox_missing", 503)
+          return {task: existing, delivery, imported: false}
+        }
+        statement(`INSERT INTO tasks(
+          task_id, owner_id, install_id, channel_id, agent_id, kind, status, priority,
+          request_json, result_json, created_at, updated_at, started_at, finished_at, delivery_id
+        ) VALUES(?, ?, ?, ?, ?, ?, 'completed', 0, ?, ?, ?, ?, ?, ?, NULL)`).run(
+          taskId, ownerId, installId, channelId, agentId, kind, requestJson, resultJson, at, at, at, at,
+        )
+        const task = getTask(taskId) as TaskRecord
+        const delivery = enqueue(task, input.delivery)
+        statement("UPDATE tasks SET delivery_id = ?, updated_at = ? WHERE task_id = ?").run(delivery.delivery_id, at, taskId)
+        insertEvent({
+          eventId: `task.imported:${taskId}`,
+          taskId,
+          sequence: nextSequence(taskId),
+          type: "task.imported",
+          payload: {task_id: taskId, delivery_id: delivery.delivery_id},
+        }, JSON.stringify({task_id: taskId, delivery_id: delivery.delivery_id}))
+        return {task: getTask(taskId) as TaskRecord, delivery, imported: true}
+      })
+    },
+
     claimTask(workerId: string, leaseMs: number): TaskRecord | null {
       assertId(workerId, OPAQUE, "worker")
       const lease = assertLease(leaseMs)
