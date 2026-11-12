@@ -40,6 +40,23 @@ test('actual serve-browser entrypoint exposes only a CSP-pinned local transport 
  }finally{await result.listener.close()}
 })
 
+test('loopback host beacon is origin-allowlisted and carries no credentials',async()=>{
+ const f=await fixture()
+ try{
+  const host=await call(f.port,'/v1/host',undefined,{origin:parent})
+  assert.equal(host.status,200)
+  assert.equal(host.headers['access-control-allow-origin'],parent)
+  assert.equal(host.headers['access-control-allow-private-network'],'true')
+  const body=JSON.parse(host.text)
+  assert.equal(body.service,'tarx-local-host')
+  assert.deepEqual(body.capabilities,['computer_use'])
+  assert.equal(JSON.stringify(body).includes('tpc_'),false)
+  assert.equal((await call(f.port,'/v1/host',undefined,{origin:'https://evil.example'})).status,403)
+  const preflight=await call(f.port,'/v1/host',undefined,{origin:parent,'access-control-request-method':'GET'})
+  assert.equal(preflight.status,200) // fixture helper uses GET; real browser sends OPTIONS
+ }finally{await f.close()}
+})
+
 test('local browser relay strips RPC envelope; target is pinned and credentials stay in header',async()=>{
  const f=await fixture()
  try{

@@ -3,7 +3,7 @@
 import {createHash} from 'node:crypto'
 import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
-import {verifyComputerArtifacts,validateNativeScope,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
+import {verifyComputerArtifacts,validateNativeScope,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient,createSupercomputerPlannerClient} from './tarx-computer-planner.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean;accountToken?:string}
 let started=false,serial=0
@@ -86,7 +86,7 @@ async function run(job:Job) {
   process.send?.({kind:'native_cursor',rendered:true})
  }
  const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000,...(nativeSession?{session:nativeSession}:{})})
- const approve=async(r:any)=>r.app===scope.app&&r.action.command==='click'&&r.risk.category==='settings'&&scope.actions.some(a=>a.command===r.action.command&&a.role===r.targetRole&&a.name===r.targetName)
+ const approve=async(r:unknown)=>approvedNativeScopedClick(scope,r)
  let done=false
  if(scope.mode==='deterministic_actuator'){
   for(const step of scope.steps!){

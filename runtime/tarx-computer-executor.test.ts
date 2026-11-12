@@ -4,7 +4,7 @@ import {mkdtemp,writeFile,readFile,rm,realpath} from 'node:fs/promises'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {createHash} from 'node:crypto'
-import {createNativeComputerExecutor,verifyComputerArtifacts,validateNativeScope,resolveNativeAccountAccess,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
+import {createNativeComputerExecutor,verifyComputerArtifacts,validateNativeScope,resolveNativeAccountAccess,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {COMPUTER_TASK,computerIntentHash,type ComputerRequest,type ComputerSession} from './tarx-computer-task.ts'
 const hash=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex')
 const core='b'.repeat(40)
@@ -13,6 +13,16 @@ const session:ComputerSession={session_id:request.session_id,subject_id:'tvs_'+'
 const action={command:'click' as const,role:'button',name:'Fixture action'}
 const check={kind:'enabled' as const,role:'button',name:'Fixture result'}
 const scope:NativeScope={app:'Fixture',window:{id:'w-1',pid:123,title_sha256:hash('Fixture')},actions:[action],success:[check],mode:'deterministic_actuator',steps:[{action,expect:[check]}]}
+test('an exact native plan satisfies only its generic click-effect or existing settings approval',()=>{
+ const approved={app:scope.app,action:{command:'click',ref:'@fixture:e1'},risk:{level:'high',category:'external',why:'action effect requires approval'},targetRole:action.role,targetName:action.name}
+ assert.equal(approvedNativeScopedClick(scope,approved),true)
+ assert.equal(approvedNativeScopedClick(scope,{...approved,risk:{level:'high',category:'settings'}}),true)
+ for(const category of ['credential','send','delete','submit','purchase','keystroke'])assert.equal(approvedNativeScopedClick(scope,{...approved,risk:{...approved.risk,category}}),false)
+ for(const why of [undefined,'network or service access requires approval','action effect requires approval '])assert.equal(approvedNativeScopedClick(scope,{...approved,risk:{...approved.risk,why}}),false)
+ for(const delta of [{app:'Foreign'},{targetRole:'menuitem'},{targetName:'Fixture action '},{action:{command:'press'}},{risk:{...approved.risk,level:'low'}},{risk:null},{action:null}])assert.equal(approvedNativeScopedClick(scope,{...approved,...delta}),false)
+ for(const request of [null,undefined,[],{},'click'])assert.equal(approvedNativeScopedClick(scope,request),false)
+ for(const malformed of [null,{}, {app:scope.app,actions:[null]}, {app:scope.app,actions:[]}])assert.equal(approvedNativeScopedClick(malformed as any,approved),false)
+})
 async function waitForFixtureAction(file:string,outcome:Promise<unknown>){
  // Artifact hashing and worker startup compete with other test files in CI.
  // Wait for actual action delivery, fail early on worker exit, and retain a deadline.
@@ -164,10 +174,10 @@ test('Supercomputer crash recovery observes only and never reads account access 
  const result=await executor.observe!({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
  assert.equal(reads,0);assert.equal(result.execution_mode,'supercomputer');assert.equal(result.native_actions,0);assert.equal(result.model_calls,null);assert.equal(result.independent_verified,true)
 })
-test('actual isolated worker allows bounded account verification latency and omits private context',async t=>{
+test('actual isolated worker honors native generic-effect approval, bounded account latency and private context',async t=>{
  const f=await fixture(t),account='tarx_cli_'+'1'.repeat(64)
  const observe=`export const renderObservation=tree=>({text:'[7] button "Fixture action"',handles:new Map([[7,'@fixture:e1']])})`
- const loop=`export const verifyAll=async()=>({passed:true});export const runTask=async(ad,model)=>{await ad.snapshot('Fixture');const input=[{role:'user',content:'Goal: Fixture task\\nHistory:\\nPRIVATE_HISTORY_MUST_NOT_LEAVE_HOST\\nObservation:\\n[7] button "Fixture action"'}];const step=JSON.parse(await model.complete(input));if(step.action.target!==7)throw Error('fixture scope');await ad.act(['click','@fixture:e1']);await ad.snapshot('Fixture');if(JSON.parse(await model.complete(input)).status!=='done')throw Error('fixture done');return {outcome:'done',finalCheck:{passed:true}}}`
+ const loop=`export const verifyAll=async()=>({passed:true});export const runTask=async(ad,model,_task,{approve})=>{await ad.snapshot('Fixture');const input=[{role:'user',content:'Goal: Fixture task\\nHistory:\\nPRIVATE_HISTORY_MUST_NOT_LEAVE_HOST\\nObservation:\\n[7] button "Fixture action"'}];const step=JSON.parse(await model.complete(input));if(step.action.target!==7)throw Error('fixture scope');if(!await approve({app:'Fixture',action:{command:'click',ref:'@fixture:e1'},risk:{level:'high',category:'external',why:'action effect requires approval'},targetRole:'button',targetName:'Fixture action'}))throw Error('fixture native approval denied');await ad.act(['click','@fixture:e1']);await ad.snapshot('Fixture');if(JSON.parse(await model.complete(input)).status!=='done')throw Error('fixture done');return {outcome:'done',finalCheck:{passed:true}}}`
  for(const [name,source] of [['observe.js',observe],['loop.js',loop]]){await writeFile(join(f.artifacts.coreDirectory,name),source);f.artifacts.files[name]=hash(source)}
  const preload=join(f.dir,'fixture-https.mjs'),calls=join(f.dir,'canonical-calls')
  const mock=`process.on('message',message=>{if(message?.kind==='start'&&message.request?.context!==undefined)throw Error('fixture private context in IPC')});import https from 'node:https';import {EventEmitter} from 'node:events';import {PassThrough} from 'node:stream';import {writeFileSync} from 'node:fs';let posts=0;https.request=(url,options,cb)=>{const req=new EventEmitter();req.destroy=()=>{req.emit('close');return req};req.end=body=>queueMicrotask(()=>{if(!String(url).startsWith('https://compute.tarx.com/'))throw Error('foreign fixture route');const res=new PassThrough();res.statusCode=200;cb(res);if(String(url).endsWith('/health')){if(options.headers.authorization)throw Error('fixture health credential');res.end(JSON.stringify({status:'ok',upstream_healthy:true}));return}if(String(url)!=='https://compute.tarx.com/v1/chat/completions'||options.headers.authorization!=='Bearer '+${JSON.stringify(account)}||(body.includes('PRIVATE_CONTEXT_MUST_NOT_LEAVE_HOST')||body.includes('PRIVATE_HISTORY_MUST_NOT_LEAVE_HOST')))throw Error('fixture credential/context mismatch');const data=JSON.parse(body);if(!data.response_format?.json_schema?.strict)throw Error('fixture schema missing');posts++;writeFileSync(${JSON.stringify(calls)},String(posts));res.end(JSON.stringify({model:'tarx/t-supercomputer',choices:[{message:{content:JSON.stringify(posts===1?{status:'act',action:{command:'click',target:7},expect:{kind:'none'}}:{status:'done'})}}]}))});return req}`
