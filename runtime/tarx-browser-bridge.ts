@@ -112,6 +112,22 @@ export function createBrowserBridge(options:{port?:number;corePort?:number}={}){
   if(req.headers.host!=='127.0.0.1:'+address.port)return send(res,403,{error:'untrusted_host'})
   const url=new URL(req.url??'/',own)
   if(url.origin!==own)return send(res,403,{error:'untrusted_host'})
+  const origin=req.headers.origin
+  const allowed=typeof origin==='string'&&PARENTS.has(origin)
+  if(allowed){
+   res.setHeader('access-control-allow-origin',origin)
+   res.setHeader('vary','Origin')
+   res.setHeader('access-control-allow-private-network','true')
+  }
+  if(url.pathname==='/v1/host'&&req.method==='OPTIONS'){
+   if(!allowed)return send(res,403,{error:'untrusted_parent'})
+   res.writeHead(204,{'access-control-allow-methods':'GET, OPTIONS','access-control-allow-headers':'content-type','access-control-max-age':'600','cache-control':'no-store'})
+   return res.end()
+  }
+  if(req.method==='GET'&&url.pathname==='/v1/host'){
+   if(!allowed)return send(res,403,{error:'untrusted_parent'})
+   return send(res,200,{ok:true,service:'tarx-local-host',protocol:1,capabilities:['computer_use','local_tools','personal_chat'],paired:false,account:null,update:null})
+  }
   if(req.method==='GET'&&url.pathname==='/bridge'){
    const parent=url.searchParams.get('origin')??'https://www.tarx.com'
    const returnName=url.searchParams.get('return')??undefined
