@@ -43,12 +43,12 @@ export async function installIdentity(stateDir:string):Promise<string>{
  return readIdentity()
 }
 function localURL(value:string){const u=new URL(value);if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)||u.username||u.password||u.search||u.hash||u.pathname!=='/')throw Error('loopback_worker_required');return u.origin}
-type ComputerHostAttachment={resolveAccountAccess?:import('./tarx-computer-executor.ts').NativeAccountAccess;prepareBrowser?:PrepareBrowserTask;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}
+type ComputerHostAttachment={resolveAccountAccess?:import('./tarx-computer-executor.ts').NativeAccountAccess;prepareBrowser?:PrepareBrowserTask;onCursorState?:(rendered:boolean)=>void;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}
 /** Host consent reaches the paired listener only through this attachment.
  * No session is minted here. Without a host, computer execution stays unavailable. */
 function attachComputerHost(state:string,host?:ComputerHostAttachment){
  if(!host)return {computerTasks:undefined,close:async()=>{}}
- const computerTasks=connectComputerHost({file:join(state,'computer-tasks.json'),coreSource:host.artifacts.coreSource,artifacts:host.artifacts,consent:host.consent,resolveAccountAccess:host.resolveAccountAccess,prepareBrowser:host.prepareBrowser})
+ const computerTasks=connectComputerHost({file:join(state,'computer-tasks.json'),coreSource:host.artifacts.coreSource,artifacts:host.artifacts,consent:host.consent,resolveAccountAccess:host.resolveAccountAccess,prepareBrowser:host.prepareBrowser,onCursorState:host.onCursorState})
  return {computerTasks,close:()=>computerTasks.close()}
 }
 export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fetch;clientFactory?:(url:string)=>any;personalHome?:string;personalEnv?:NodeJS.ProcessEnv;computerHost?:ComputerHostAttachment}={}){

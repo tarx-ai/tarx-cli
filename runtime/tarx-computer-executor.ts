@@ -223,8 +223,8 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
     let cleanupError:unknown
     try{if(nativeSession)await endOwnedCursorSession(home,artifacts,nativeSession)}catch(error){cleanupError=error}
     try{await closeOwnedComputerHosts(home,artifacts.adapter.path)}catch(error){cleanupError??=error}
-    try{input.onCursorState?.(false)}catch{}
     if(cleanupError)throw cleanupError
+    try{input.onCursorState?.(false)}catch{}
     await rm(home,{recursive:true,force:true})
    }
  }
