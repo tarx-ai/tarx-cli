@@ -33,6 +33,59 @@ test('channel/agent/native-session binding runs once and stores only independent
  assert.equal((await f.controller.submit(identity,request,f.paired)).code,200);assert.equal(f.calls(),1)
  assert.equal((await f.controller.submit(identity,{...request,goal:'Changed goal'},f.paired)).code,409)
 })
+test('browser waits for host approval, preserves the receipt on restart and rejects changed intent',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-browser-consent-'));t.after(()=>rm(dir,{recursive:true,force:true}))
+ let grant:ComputerSession|null=null,actions=0,approvals=0
+ let showReview!:()=>void,allow!:()=>void
+ const shown=new Promise<void>(resolve=>{showReview=resolve})
+ const approved=new Promise<void>(resolve=>{allow=resolve})
+ const options={file:join(dir,'tasks.json'),coreSource:core,authority:{resolve:async()=>grant},
+  executor:{ready:async()=>true,run:async()=>{actions++;return completed}},
+  prepareBrowser:async()=>{
+   approvals++;showReview();await approved
+   grant={session_id:request.session_id,subject_id:identity.subject_id,install_id:identity.install_id,
+    channel_id:request.channel_id,agent_id:request.agent_id,intent_sha256:computerIntentHash(request),
+    expires_at:Date.now()+10000,max_steps:2,timeout_ms:5000}
+   return {session:grant,release:()=>{grant=null}}
+  }}
+ const host=createComputerTaskController(options),paired=async()=>true,task={...request,session_id:null}
+ const submitting=host.submit(identity,task,paired)
+ await shown
+ assert.equal(actions,0)
+ assert.equal((await host.submit(identity,task,paired)).code,409)
+ allow()
+ assert.equal((await submitting).code,202)
+ const receipt=await final(host)
+ assert.equal(receipt.body.receipt.independent_verified,true)
+ await host.close()
+ const restarted=createComputerTaskController(options)
+ try{
+  assert.deepEqual(await restarted.submit(identity,task,paired),receipt)
+  assert.equal((await restarted.submit(identity,{...task,goal:'Different goal'},paired)).code,409)
+  assert.equal(approvals,1);assert.equal(actions,1)
+ }finally{await restarted.close()}
+})
+
+test('browser Stop dismisses a pending approval without creating an execution grant or ledger record',async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'tarx-browser-stop-'));t.after(()=>rm(dir,{recursive:true,force:true}))
+ let showReview!:()=>void
+ const shown=new Promise<void>(resolve=>{showReview=resolve})
+ const host=createComputerTaskController({file:join(dir,'tasks.json'),coreSource:core,authority:{resolve:async()=>null},
+  executor:{ready:async()=>true,run:async()=>{assert.fail('Stop must not dispatch')}},
+  prepareBrowser:async({signal})=>{
+   showReview()
+   await new Promise<void>(resolve=>signal.addEventListener('abort',()=>resolve(),{once:true}))
+   return null
+  }})
+ try{
+  const submitting=host.submit(identity,{...request,session_id:null},async()=>true)
+  await shown
+  const stop=await host.cancel(identity,request.request_id)
+  assert.equal(stop.code,200);assert.equal(stop.body.status,'cancelled');assert.equal(stop.body.session_id,undefined)
+  assert.deepEqual(await submitting,stop)
+  assert.equal((await host.read(identity,request.request_id)).code,404)
+ }finally{await host.close()}
+})
 test('pairing scope alone, foreign channel/agent/owner, expired native approval and caller-supplied grants cannot execute',async t=>{
  const f=await fixture(t)
  for(const change of [{channel_id:'other'},{agent_id:'other'},{session_id:'wrun_'+'C'.repeat(26)},{request_id:'another_request_02'}])assert.equal((await f.controller.submit(identity,{...request,...change},f.paired)).code,403)

@@ -11,7 +11,7 @@ import type {PersonalContextResolver} from './tarx-context-runtime.ts'
 import {buildCapabilityManifest,READ_LAUNCH_NOTE_CAPABILITY,COGNITIVE_ADAPTER_UNKNOWN} from './tarx-capability-manifest.ts'
 export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdentity'|'handleRequest'> & {pairStore:PairStore;tasks?:ReturnType<typeof createBoundedTaskController>;taskDiscovery?:()=>Promise<string[]>;computerTasks?:ReturnType<typeof createComputerTaskController>;personalClient?:PersonalClient;personalContext?:PersonalContextResolver;learning?:ReturnType<typeof createLearningController>}){
  return createSessionListener({...deps,resolveIdentity:pairingIdentityResolver(deps.pairStore),handleRequest:async(req,res,path)=>{
-  const reply=(status:number,body:unknown)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));return true}
+  const reply=(status:number,body:unknown)=>{if(!res.destroyed){res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body))}return true}
   if(path==='/personal-learning'){
    // Owner-isolated local training. Namespace derived server-side from pairing.
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''
@@ -115,7 +115,13 @@ export function createPairedSessionListener(deps:Omit<ListenerDeps,'resolveIdent
    let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>32768)return reply(413,{error:'body_too_large'})}
    let body:unknown;try{body=JSON.parse(raw)}catch{return reply(400,{error:'invalid_json'})}
    const paired=async()=>{const current=await pairingTaskAccess(req,deps.pairStore);return Boolean(current&&current.subject_id===identity.subject_id&&current.install_id===identity.install_id&&current.task_scopes.includes(COMPUTER_TASK))}
-   const result=await deps.computerTasks.submit(identity,body,paired);return reply(result.code,result.body)
+   const transport=new AbortController()
+   const disconnect=()=>transport.abort()
+   res.once('close',disconnect)
+   if(res.destroyed)disconnect()
+   try{
+    const result=await deps.computerTasks.submit(identity,body,paired,transport.signal);return reply(result.code,result.body)
+   }finally{res.removeListener('close',disconnect)}
   }
   if(path==='/tasks'||path.startsWith('/tasks/')){
    const origin=typeof req.headers.origin==='string'?req.headers.origin:''

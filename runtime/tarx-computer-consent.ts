@@ -2,7 +2,7 @@
  * one only after the native artifacts verify, then stores it here. Pairing is
  * not a grant. A runtime that cannot verify those artifacts does not issue. */
 import {randomBytes} from 'node:crypto'
-import {createComputerTaskController,computerIntentHash,parseComputerRequest,COMPUTER_TASK,type ComputerAuthority,type ComputerRequest,type ComputerSession,type ComputerSubmission} from './tarx-computer-task.ts'
+import {createComputerTaskController,computerIntentHash,parseComputerRequest,COMPUTER_TASK,type ComputerAuthority,type ComputerRequest,type ComputerSession,type ComputerSubmission,type PrepareBrowserTask} from './tarx-computer-task.ts'
 import {createNativeComputerExecutor,validateNativeScope,verifyComputerArtifacts,type ComputerArtifacts,type NativeAction,type NativeScope,type NativeAccountAccess} from './tarx-computer-executor.ts'
 import {pairingCredentialTaskAccess,type PairStore} from './tarx-browser-pairing.ts'
 const opaque=(s:unknown)=>typeof s==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)
@@ -131,6 +131,6 @@ export async function issueNativeHostGrant(input:NativeHostGrant):Promise<Comput
  consent.grant({request_id:request.request_id,actions:saved.actions,session,scope:saved.scope})
  return consent.authority.resolve(session_id)
 }
-export function connectComputerHost(input:{resolveAccountAccess?:NativeAccountAccess;file:string;coreSource:string;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}){
- return createComputerTaskController({file:input.file,coreSource:input.coreSource,authority:input.consent.authority,executor:createNativeComputerExecutor({artifacts:input.artifacts,resolveAccountAccess:input.resolveAccountAccess,resolveScope:(session,request)=>input.consent.resolveScope(session,request)})})
+export function connectComputerHost(input:{resolveAccountAccess?:NativeAccountAccess;prepareBrowser?:PrepareBrowserTask;file:string;coreSource:string;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}){
+ return createComputerTaskController({file:input.file,coreSource:input.coreSource,authority:input.consent.authority,prepareBrowser:input.prepareBrowser,executor:createNativeComputerExecutor({artifacts:input.artifacts,resolveAccountAccess:input.resolveAccountAccess,resolveScope:(session,request)=>input.consent.resolveScope(session,request)})})
 }

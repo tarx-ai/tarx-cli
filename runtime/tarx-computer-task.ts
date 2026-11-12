@@ -33,6 +33,9 @@ export type ComputerAuthority = {
  /** Find the host grant for this channel, agent, and request. Never mints a session. */
  bind?:(request:ComputerSubmission)=>Promise<ComputerSession|null>
 }
+export type PrepareBrowserTask = (input: {
+ identity:TaskIdentity; request:ComputerSubmission; paired:()=>Promise<boolean>; signal:AbortSignal
+})=>Promise<{session:ComputerSession; release:(status?:Status)=>void}|null>
 type Status='reserved'|'running'|'completed'|'failed'|'cancelling'|'cancelled'|'uncertain'
 type ExecutionExitProof={kind:'computer_execution_exit';version:1;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;core_source:string}
 type Record = {task:typeof COMPUTER_TASK;request_id:string;session_id:string;channel_id:string;agent_id:string;subject_id:string;install_id:string;intent_sha256:string;status:Status;execution_exit?:ExecutionExitProof;receipt?:{
@@ -99,7 +102,7 @@ async function abortable<T>(operation:()=>Promise<T>,signal:AbortSignal,graceMs=
  })])}finally{signal.removeEventListener('abort',onAbort);if(timer)clearTimeout(timer)}
 }
 
-export function createComputerTaskController(input:{file:string;authority:ComputerAuthority;executor:ComputerExecutor;coreSource:string;now?:()=>number}) {
+export function createComputerTaskController(input:{file:string;authority:ComputerAuthority;executor:ComputerExecutor;coreSource:string;now?:()=>number;prepareBrowser?:PrepareBrowserTask}) {
  if(!/^[a-f0-9]{40}$/.test(input.coreSource))throw Error('invalid_core_source')
  const shutdownGraceMs=input.executor.shutdownGraceMs??1500
  if(!Number.isInteger(shutdownGraceMs)||shutdownGraceMs<0||shutdownGraceMs>6000)throw Error('invalid_computer_shutdown_budget')
@@ -108,6 +111,9 @@ export function createComputerTaskController(input:{file:string;authority:Comput
  const now=input.now??Date.now
  let closed=false
  const active=new Map<string,{abort:AbortController;finished:Promise<void>}>()
+ type RequestBinding=Pick<ComputerSubmission,'request_id'|'channel_id'|'agent_id'>
+ const preparing=new Map<string,{abort:AbortController; finished:Promise<Reply>; request:RequestBinding}>()
+ let cancelledPreparation:{key:string;request:RequestBinding;until:number}|null=null
  const settling=new Set<string>()
  const key=(id:TaskIdentity,request:string)=>'computer:'+hash([id.subject_id,id.install_id,request])
  const safe=(r:Record)=>{if(!validRecord(r,input.coreSource))throw Error('invalid_computer_record');return {task:r.task,request_id:r.request_id,session_id:r.session_id,channel_id:r.channel_id,agent_id:r.agent_id,status:r.status,receipt:r.receipt??null}}
@@ -265,13 +271,64 @@ export function createComputerTaskController(input:{file:string;authority:Comput
    return {code:200,body:safe(r!)}
   } finally {active.delete(k);release()}
  }
- return {
+ function cancelled(request:RequestBinding):Reply {
+  return {code:200,body:{task:COMPUTER_TASK,request_id:request.request_id,channel_id:request.channel_id,agent_id:request.agent_id,status:'cancelled'}}
+ }
+ async function prepareSubmission(id:TaskIdentity,request:ComputerSubmission,paired:()=>Promise<boolean>,transport?:AbortSignal):Promise<Reply>{
+  if(!input.prepareBrowser||closed||transport?.aborted)return {code:403,body:{error:'computer_session_approval_required'}}
+  const k=key(id,request.request_id)
+  if(cancelledPreparation?.key===k&&now()<cancelledPreparation.until)return cancelled(cancelledPreparation.request)
+  if(preparing.size)return {code:409,body:{error:'computer_task_in_progress'}}
+  const abort=new AbortController()
+  const signal=AbortSignal.any([abort.signal,AbortSignal.timeout(65_000),...(transport?[transport]:[])])
+  const binding={request_id:request.request_id,channel_id:request.channel_id,agent_id:request.agent_id}
+  let submitted=false
+  const stillPaired=async()=>(submitted||!signal.aborted)&&await paired()
+  const finished=Promise.resolve().then(async():Promise<Reply>=>{
+   let grant:Awaited<ReturnType<PrepareBrowserTask>>=null
+   try{
+    grant=await input.prepareBrowser!({identity:id,request,paired:stillPaired,signal})
+    if(signal.aborted)return cancelled(request)
+    if(!grant||!await stillPaired())return {code:403,body:{error:'computer_session_approval_required'}}
+    // Once accepted, ordinary Stop controls the worker. A closed submit socket
+    // during approval can never authorize work.
+    const reply=await controller.submit(id,{...request,session_id:grant.session.session_id},stillPaired)
+    submitted=reply.code===202
+    const running=submitted?active.get(k):undefined
+    if(running){
+     const release=grant.release;grant=null
+     void running.finished.then(()=>controller.read(id,request.request_id))
+      .then(result=>release(result.body.status),()=>release()).catch(()=>{})
+    }
+    return reply
+   }catch{
+    return signal.aborted?cancelled(request):{code:403,body:{error:'computer_session_approval_required'}}
+   }finally{
+    if(signal.aborted)cancelledPreparation={key:k,request:binding,until:now()+60_000}
+    try{grant?.release()}finally{preparing.delete(k)}
+   }
+  })
+  preparing.set(k,{abort,finished,request:binding})
+  return finished
+ }
+ const controller = {
   async available(){return !closed&&await bounded(()=>input.executor.ready(),1000).catch(()=>false)},
-  async submit(id:TaskIdentity,body:unknown,paired:()=>Promise<boolean>):Promise<Reply> {
+  async submit(id:TaskIdentity,body:unknown,paired:()=>Promise<boolean>,transport?:AbortSignal):Promise<Reply> {
    if(closed)return {code:503,body:{error:'computer_runtime_unavailable'}}
    const parsed=parseComputerRequest(body);if(!parsed)return {code:400,body:{error:'invalid_computer_task'}}
    if(!id.task_scopes.includes(COMPUTER_TASK)||!await bounded(paired,1000).catch(()=>false))return {code:403,body:{error:'computer_session_approval_required'}}
-   const request=await bindRequest(parsed);if(!request)return {code:403,body:{error:'computer_session_approval_required'}}
+   if(!parsed.session_id&&input.prepareBrowser){
+    const k=key(id,parsed.request_id),prior=await store.get(k)
+    if(prior){
+     if(!validRecord(prior,input.coreSource))throw Error('invalid_computer_record')
+     if(prior.intent_sha256!==computerIntentHash({...parsed,session_id:prior.session_id}))return {code:409,body:{error:'request_conflict'}}
+     if(['reserved','running'].includes(prior.status)&&!preparing.has(k)&&!active.has(k)&&!settling.has(k)){
+      return {code:200,body:safe(await transition(k,'uncertain',undefined,{ownership:'observation'}))}
+     }
+     return {code:200,body:safe(prior)}
+    }
+   }
+   const request=await bindRequest(parsed);if(!request)return prepareSubmission(id,parsed,paired,transport)
    const kExisting=key(id,request.request_id)
    const existing=await store.get(kExisting)
    if(existing){
@@ -312,7 +369,11 @@ export function createComputerTaskController(input:{file:string;authority:Comput
   async cancel(id:TaskIdentity,idValue:string):Promise<Reply> {
    if(!id.task_scopes.includes(COMPUTER_TASK))return {code:403,body:{error:'computer_scope_required'}}
    if(!requestId(idValue))return {code:400,body:{error:'invalid_computer_task'}}
-   const k=key(id,idValue),r=await store.get(k)
+   const k=key(id,idValue),pending=preparing.get(k)
+   if(pending){pending.abort.abort();await pending.finished}
+   const r=await store.get(k)
+   if(!r&&pending)return cancelled(pending.request)
+   if(!r&&cancelledPreparation?.key===k&&now()<cancelledPreparation.until)return cancelled(cancelledPreparation.request)
    if(!r||r.task!==COMPUTER_TASK)return {code:404,body:{error:'unknown_computer_task'}}
    if(terminal(r.status))return {code:200,body:safe(r)}
    const owned=active.get(k)
@@ -322,8 +383,11 @@ export function createComputerTaskController(input:{file:string;authority:Comput
   },
   async close() {
    closed=true
+   for(const pending of preparing.values())pending.abort.abort()
    for(const owned of active.values())owned.abort.abort()
+   await Promise.allSettled([...preparing.values()].map(pending=>pending.finished))
    await Promise.allSettled([...active.values()].map(owned=>owned.finished))
   },
  }
+ return controller
 }
