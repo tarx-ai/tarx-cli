@@ -49,7 +49,7 @@ test('loopback host beacon is origin-allowlisted and carries no credentials',asy
   assert.equal(host.headers['access-control-allow-private-network'],'true')
   const body=JSON.parse(host.text)
   assert.equal(body.service,'tarx-local-host')
-  assert.deepEqual(body.capabilities,['computer_use','local_tools','personal_chat'])
+  assert.deepEqual(body.capabilities,['computer_use'])
   assert.equal(JSON.stringify(body).includes('tpc_'),false)
   assert.equal((await call(f.port,'/v1/host',undefined,{origin:'https://evil.example'})).status,403)
   const preflight=await call(f.port,'/v1/host',undefined,{origin:parent,'access-control-request-method':'GET'})
