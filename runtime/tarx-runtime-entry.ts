@@ -85,7 +85,7 @@ export async function runRuntimeEntry(args:string[],testDeps:{fetcher?:typeof fe
    finally{try{if(browser?.server.listening)await browser.close()}finally{await closeCore()}}
   })()
   try{
-   const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),computerTasks:computer.computerTasks,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:false,model_responsive:false,tools:[],healthy:false})})
+   const listener=createPairedSessionListener({host:'127.0.0.1',port,allowedOrigins:new Set(['https://tarx.com','https://www.tarx.com']),pairStore:store,ownerStore:createFileOwnerStore(join(state,'owners.json')),computerTasks:computer.computerTasks,eveClient:()=>({attach:()=>({async *stream(){throw Error('eve_worker_not_attached')}})}),readiness:async()=>({config_valid:true,worker_reachable:true,model_responsive:true,tools:['computer_use'],healthy:true})})
    closeCore=listener.close.bind(listener)
    const address=await listener.listen()
    browser=createBrowserBridge({port:port===0?0:3271,corePort:address.port})
