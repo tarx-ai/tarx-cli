@@ -87,6 +87,7 @@ async function run(job:Job) {
   process.send?.({kind:'native_cursor',rendered:true})
  }
  const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000,...(nativeSession?{session:nativeSession}:{})})
+ let failure:ReturnType<typeof returnedFailure>
  const approve=async(r:unknown)=>approvedNativeScopedClick(scope,r)
  let done=false
  if(scope.mode==='deterministic_actuator'){
@@ -132,9 +133,9 @@ async function run(job:Job) {
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
   plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
+  failure=done?undefined:returnedFailure(result)
  }
  await ad.guard()
- const failure=done?undefined:returnedFailure(result)
  return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{}),...(failure??{})}
  }finally{if(nativeSession)await bootstrap.exec(['session','end',nativeSession])}
 }
