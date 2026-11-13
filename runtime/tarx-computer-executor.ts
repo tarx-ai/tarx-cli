@@ -2,7 +2,8 @@
  * models, windows, success checks or approvals. Each run owns one process group. */
 import {fork,execFile} from 'node:child_process'
 import {createHash} from 'node:crypto'
-import {lstat,readFile,readdir,realpath,mkdtemp,rm} from 'node:fs/promises'
+import {lstat,readFile,readdir,realpath,mkdtemp,rm,open} from 'node:fs/promises'
+import {constants,type Stats} from 'node:fs'
 import {isAbsolute,join,dirname} from 'node:path'
 import {tmpdir} from 'node:os'
 import {promisify} from 'node:util'
@@ -17,7 +18,6 @@ export type NativeScope={
  mode:'local_model'|'deterministic_actuator';steps?:Array<{action:NativeAction;expect:NativeCheck[]}>
  model?:{baseURL:string;model:string}
 }
-const sha=(b:Buffer)=>createHash('sha256').update(b).digest('hex')
 const digest=(s:unknown)=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s)
 const TARX_CURSOR_SHA256='1ee0717a18e54e525682077e3f9a8128da08aab2b1059a1f4365cea85769133b'
 const exec=promisify(execFile)
@@ -58,10 +58,30 @@ export async function closeOwnedComputerHosts(home:string,adapterPath:string) {
   }
  }
 }
-async function checkedFile(file:CheckedFile) {
+// Node's official macOS distribution exceeds 128 MiB. Keep its allowance
+// separate from modules/adapters and stream hashes instead of allocating binaries.
+const ARTIFACT_LIMIT=128*1024*1024
+const NODE_ARTIFACT_LIMIT=256*1024*1024
+const sameFile=(a:Stats,b:Stats)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs
+async function checkedFile(file:CheckedFile,limit=ARTIFACT_LIMIT) {
  if(!isAbsolute(file.path)||!digest(file.sha256))throw Error('invalid_computer_artifact')
  const info=await lstat(file.path)
- if(!info.isFile()||info.isSymbolicLink()||info.size>128*1024*1024||sha(await readFile(file.path))!==file.sha256)throw Error('computer_artifact_mismatch')
+ if(!info.isFile()||info.isSymbolicLink()||info.size<1||info.size>limit)throw Error('computer_artifact_mismatch')
+ const handle=await open(file.path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK)
+ try{
+  const before=await handle.stat()
+  if(!before.isFile()||!sameFile(before,info))throw Error('computer_artifact_mismatch')
+  const hash=createHash('sha256'),buffer=Buffer.allocUnsafe(64*1024);let size=0
+  for(;;){
+   const {bytesRead}=await handle.read(buffer,0,Math.min(buffer.length,limit-size+1),null)
+   if(bytesRead===0)break
+   size+=bytesRead;if(size>limit)throw Error('computer_artifact_mismatch')
+   hash.update(buffer.subarray(0,bytesRead))
+  }
+  const after=await handle.stat(),current=await lstat(file.path)
+  if(size!==before.size||hash.digest('hex')!==file.sha256||!sameFile(before,after)||
+   !current.isFile()||current.isSymbolicLink()||!sameFile(before,current))throw Error('computer_artifact_mismatch')
+ }finally{await handle.close()}
 }
 export async function verifyComputerArtifacts(a:ComputerArtifacts) {
  if(!/^[a-f0-9]{40}$/.test(a.coreSource)||!isAbsolute(a.coreDirectory)||await realpath(a.coreDirectory)!==a.coreDirectory)throw Error('invalid_computer_artifact')
@@ -70,7 +90,7 @@ export async function verifyComputerArtifacts(a:ComputerArtifacts) {
  const actual=(await readdir(a.coreDirectory)).sort()
  if(JSON.stringify(actual)!==JSON.stringify(names))throw Error('computer_artifact_inventory_mismatch')
  for(const name of names)await checkedFile({path:join(a.coreDirectory,name),sha256:a.files[name]})
- await checkedFile(a.node);await checkedFile(a.adapter)
+ await checkedFile(a.node,NODE_ARTIFACT_LIMIT);await checkedFile(a.adapter)
  if(a.cursor){
   if(a.cursor.sha256!==TARX_CURSOR_SHA256)throw Error('unapproved_native_cursor')
   await checkedFile(a.cursor)
