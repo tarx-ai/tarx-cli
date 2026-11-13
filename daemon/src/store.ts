@@ -354,12 +354,15 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
       })
     },
 
-    claimTask(workerId: string, leaseMs: number): TaskRecord | null {
+    claimTask(workerId: string, leaseMs: number, kind?: string): TaskRecord | null {
       assertId(workerId, OPAQUE, "worker")
       const lease = assertLease(leaseMs)
       const at = now()
+      const taskKind = kind === undefined ? undefined : assertId(kind, KIND, "kind")
       return tx(() => {
-        const next = statement("SELECT task_id FROM tasks WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1").get() as {task_id: string} | undefined
+        const next = (taskKind
+          ? statement("SELECT task_id FROM tasks WHERE status = 'queued' AND kind = ? ORDER BY priority DESC, created_at ASC LIMIT 1").get(taskKind)
+          : statement("SELECT task_id FROM tasks WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1").get()) as {task_id: string} | undefined
         if (!next) return null
         const row = statement(`UPDATE tasks SET
           status = 'running', lease_owner = ?, lease_expires_at = ?, fencing_token = fencing_token + 1,
@@ -431,9 +434,10 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
         const delivery = input.status === "cancelled" && input.delivery ? enqueue(task, input.delivery) : null
         const at = now()
         const row = statement(`UPDATE tasks SET
-          status = ?, error_code = ?, finished_at = ?, updated_at = ?, lease_owner = NULL, lease_expires_at = NULL
+          status = ?, error_code = ?, finished_at = ?, updated_at = ?, lease_owner = NULL, lease_expires_at = NULL,
+          delivery_id = COALESCE(?, delivery_id)
           WHERE task_id = ? AND status = 'running' AND lease_owner = ? AND fencing_token = ?
-          RETURNING *`).get(input.status, errorCode, at, at, taskId, workerId, input.fencingToken) as Record<string, any> | undefined
+          RETURNING *`).get(input.status, errorCode, at, at, delivery?.delivery_id ?? null, taskId, workerId, input.fencingToken) as Record<string, any> | undefined
         if (!row) throw new DaemonError("stale_fence", 409)
         insertEvent({
           eventId: `task.${input.status}:${taskId}`,
@@ -547,13 +551,17 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
       return rows.map(mapTask)
     },
 
-    claimDeliveries(workerId: string, limit: number, leaseMs: number): OutboxRecord[] {
+    claimDeliveries(workerId: string, limit: number, leaseMs: number, taskKind?: string): OutboxRecord[] {
       assertId(workerId, OPAQUE, "worker")
       const max = assertLimit(limit)
       const lease = assertLease(leaseMs)
       const at = now()
+      const kind = taskKind === undefined ? undefined : assertId(taskKind, KIND, "task_kind")
       return tx(() => {
-        const due = statement("SELECT delivery_id FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC LIMIT ?").all(at, max) as {delivery_id: string}[]
+        const due = (kind
+          ? statement(`SELECT o.delivery_id FROM outbox o JOIN tasks t ON t.task_id = o.task_id
+              WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND t.kind = ? ORDER BY o.created_at ASC LIMIT ?`).all(at, kind, max)
+          : statement("SELECT delivery_id FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC LIMIT ?").all(at, max)) as {delivery_id: string}[]
         const claimed: OutboxRecord[] = []
         for (const row of due) {
           const updated = statement(`UPDATE outbox SET status = 'delivering', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1
