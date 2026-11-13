@@ -551,13 +551,17 @@ export function createDaemonStore(input: {file: string; now?: () => number; maxD
       return rows.map(mapTask)
     },
 
-    claimDeliveries(workerId: string, limit: number, leaseMs: number): OutboxRecord[] {
+    claimDeliveries(workerId: string, limit: number, leaseMs: number, taskKind?: string): OutboxRecord[] {
       assertId(workerId, OPAQUE, "worker")
       const max = assertLimit(limit)
       const lease = assertLease(leaseMs)
       const at = now()
+      const kind = taskKind === undefined ? undefined : assertId(taskKind, KIND, "task_kind")
       return tx(() => {
-        const due = statement("SELECT delivery_id FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC LIMIT ?").all(at, max) as {delivery_id: string}[]
+        const due = (kind
+          ? statement(`SELECT o.delivery_id FROM outbox o JOIN tasks t ON t.task_id = o.task_id
+              WHERE o.status = 'pending' AND o.next_attempt_at <= ? AND t.kind = ? ORDER BY o.created_at ASC LIMIT ?`).all(at, kind, max)
+          : statement("SELECT delivery_id FROM outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY created_at ASC LIMIT ?").all(at, max)) as {delivery_id: string}[]
         const claimed: OutboxRecord[] = []
         for (const row of due) {
           const updated = statement(`UPDATE outbox SET status = 'delivering', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1

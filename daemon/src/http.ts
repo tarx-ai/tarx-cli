@@ -124,6 +124,21 @@ export function createDaemonServer(input: {store: DaemonStore; port?: number; ho
           })
           return send(200, JSON.stringify({ok: true, task_id: settled.task.task_id, status: settled.task.status, delivery_id: settled.delivery?.delivery_id ?? null}))
         }
+        if (url.pathname === "/v1/browser-qa/deliveries/claim") {
+          const body = await jsonBody(req)
+          if (Object.keys(body).sort().join(",") !== "worker_id" || typeof body.worker_id !== "string") return send(400, JSON.stringify({error: "invalid_browser_qa_delivery_claim"}))
+          const deliveries = input.store.claimDeliveries(body.worker_id, 10, 30_000, BROWSER_QA_KIND)
+          return send(200, JSON.stringify({ok: true, deliveries: deliveries.map((delivery) => ({
+            delivery_id: delivery.delivery_id, task_id: delivery.task_id, kind: delivery.kind,
+            idempotency_key: delivery.idempotency_key, payload: delivery.payload,
+          }))}))
+        }
+        if (url.pathname === "/v1/browser-qa/deliveries/ack") {
+          const body = await jsonBody(req)
+          if (Object.keys(body).sort().join(",") !== "delivery_id,worker_id" || typeof body.delivery_id !== "string" || typeof body.worker_id !== "string") return send(400, JSON.stringify({error: "invalid_browser_qa_delivery_ack"}))
+          const delivery = input.store.ackDelivery(body.delivery_id, body.worker_id)
+          return send(200, JSON.stringify({ok: true, delivery_id: delivery.delivery_id, status: delivery.status}))
+        }
         if (url.pathname === "/v1/receipts/ack") {
           const body = await jsonBody(req)
           if (Object.keys(body).sort().join(",") !== "agent_id,channel_id,request_id" || ["request_id", "channel_id", "agent_id"].some((key) => typeof body[key] !== "string")) {
