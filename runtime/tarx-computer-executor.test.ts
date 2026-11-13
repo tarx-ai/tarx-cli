@@ -66,11 +66,26 @@ test('isolated worker rechecks exact artifacts and approved scope; deterministic
  const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope})
  assert.equal(await executor.ready(),true)
  const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>{checks++;return true}})
- assert.deepEqual(result,{outcome:'done',independent_verified:true,native_actions:1,model_calls:0,core_source:core,execution_mode:'deterministic_actuator'})
+ assert.deepEqual(result,{outcome:'done',independent_verified:true,native_actions:1,model_calls:0,core_source:core,execution_mode:'deterministic_actuator',diagnostics:{control:'button',delivery:'unknown',mechanism:'unknown',verification:'none',before:{open:0,close:0},after:{open:0,close:0}}})
  assert.ok(checks>=4)
  await writeFile(join(f.artifacts.coreDirectory,'adapter.js'),'tampered')
  assert.equal(await executor.ready(),false)
  await assert.rejects(verifyComputerArtifacts(f.artifacts),/mismatch/)
+})
+test('an acknowledged action carries bounded pane-control and delivery evidence',async t=>{
+ const f=await fixture(t),outcomes:any[]=[]
+ const adapter=`import {writeFileSync} from 'node:fs';export class AgentDesktop{constructor(){}async exec(argv){if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture',is_focused:false}]};if(argv[0]==='click')return {data:{disposition:{delivery:'delivered_unverified'},steps:[{mechanism:'semantic_api',verified:false}]}};throw Error('unexpected native command')}async snapshot(){return {tree:{role:'window',children:[{ref_id:'@fixture:e1',role:'button',name:'Open browser'}]},snapshot_id:'fixture'}}}`
+ const policy=`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`
+ const loop=`export const verifyAll=async()=>({passed:true});export const runTask=async(ad)=>{await ad.snapshot('Fixture');await ad.act(['click','@fixture:e1']);return {outcome:'max_steps',steps:[{decision:'act',result:'delivered',verification:{check:'observed_only',passed:false}}]}}`
+ const refs=`export const indexRefs=tree=>{const map=new Map(),stack=[tree];while(stack.length){const node=stack.pop();if(!node||typeof node!=='object')continue;if(node.ref_id)map.set(node.ref_id,node);if(Array.isArray(node.children))stack.push(...node.children)}return map}`
+ for(const [name,body] of [['adapter.js',adapter],['policy.js',policy],['loop.js',loop],['refs.js',refs]] as const){await writeFile(join(f.artifacts.coreDirectory,name),body);f.artifacts.files[name]=hash(body)}
+ const paneScope:NativeScope={...scope,actions:[{command:'click',role:'button',name:'Open browser'}],success:[{kind:'enabled',role:'button',name:'Close browser'}],steps:[{action:{command:'click',role:'button',name:'Open browser'},expect:[{kind:'enabled',role:'button',name:'Close browser'}]}]}
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>paneScope,onOutcome:(outcome,requestId)=>outcomes.push({outcome,requestId})})
+ const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
+ assert.equal(result.outcome,'done')
+ assert.deepEqual(result.diagnostics,{control:'browser_open',delivery:'delivered_unverified',mechanism:'semantic_api',verification:'none',focused:false,before:{open:1,close:0},after:{open:1,close:0}})
+ assert.equal(JSON.stringify(result).includes('Open browser'),false)
+ assert.deepEqual(outcomes[0].outcome.diagnostics,result.diagnostics)
 })
 test('an adapter click failure emits an allowlisted deterministic failure',async t=>{
  const f=await fixture(t,false,false,false,true),outcomes:any[]=[]

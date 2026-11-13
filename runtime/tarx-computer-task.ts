@@ -17,6 +17,11 @@ export type ComputerOutcome = {
  planner_status?:string
   failure_stage?:'preflight'|'scope'|'identity'|'observation'|'target'|'action'|'adapter'|'verification'|'worker'
   failure_code?:string
+  /** Local diagnostics only. Never part of a receipt, grant or ledger proof. */
+  diagnostics?:{
+   control?:string;delivery?:string;mechanism?:string;verification?:string;focused?:boolean
+   before?:{open:number;close:number};after?:{open:number;close:number}
+  }
 }
 export type ComputerRun = {request:ComputerRequest;session:ComputerSession;signal:AbortSignal;stillAuthorized:()=>Promise<boolean>}
 export type ComputerExecutor = {

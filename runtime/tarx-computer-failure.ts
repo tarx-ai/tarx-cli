@@ -10,7 +10,9 @@ export function returnedFailure(result:any) {
    const code=failureCodes.has(step.errorCode)?step.errorCode:'unknown'
    return {failure_stage:'adapter' as const,failure_code:code}
   }
-  if(step?.verification&&step.verification.passed===false)return {failure_stage:'verification' as const,failure_code:'native_step_unverified'}
+  // Planner actions force expect.kind 'none'; the core reports observed_only
+  // and that is not a failed action postcondition. Only a real check failure is.
+  if(step?.verification&&step.verification.passed===false&&step.verification.check!=='observed_only')return {failure_stage:'verification' as const,failure_code:'native_step_unverified'}
  }
  return {failure_stage:stageFor(String(result.outcome??'')),failure_code:result.outcome==='max_steps'?'max_steps':'unverified'}
 }
