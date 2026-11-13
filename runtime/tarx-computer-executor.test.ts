@@ -36,12 +36,12 @@ async function waitForFixtureAction(file:string,outcome:Promise<unknown>){
  }
  throw Error('fixture action delivery deadline exceeded')
 }
-async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false){
+async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false,failClick=false){
  const dir=await realpath(await mkdtemp(join(tmpdir(),'tarx-core-executor-test-')));t.after(()=>rm(dir,{recursive:true,force:true}))
  const pidFile=join(dir,'descendant-pid')
  const files:Record<string,string>={
   'package.json':JSON.stringify({type:'module'}),
-  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});return new Promise((_,reject)=>{${interruptOnStop?`process.once('SIGTERM',()=>reject(Error('fixture action interrupted during Stop')));` : ''}writeFileSync(${JSON.stringify(pidFile)},String(c.pid))})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
+  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${failClick?`throw Error('fixture click failure')` : hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});return new Promise((_,reject)=>{${interruptOnStop?`process.once('SIGTERM',()=>reject(Error('fixture action interrupted during Stop')));` : ''}writeFileSync(${JSON.stringify(pidFile)},String(c.pid))})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
   'refs.js':`export const indexRefs=tree=>new Map([[tree.ref_id,tree]])`,
   'policy.js':`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`,
   'loop.js':`export const verifyAll=async()=>({passed:true});export const runTask=async()=>{throw Error('fixture is not a planner')}`,
@@ -144,10 +144,10 @@ test('cursor is session-owned, uses the canonical checked TARX asset and is ende
 test('an unavailable local model fails before native session/cursor creation and preserves diagnostic outcome',async t=>{
  const f=await fixture(t,false,true),states:boolean[]=[],outcomes:any[]=[]
  const localScope:NativeScope={...scope,mode:'local_model',steps:undefined,model:{baseURL:'http://127.0.0.1:1',model:'fixture-unavailable'}}
- const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,onCursorState:s=>states.push(s),onOutcome:o=>outcomes.push(o)})
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,onCursorState:s=>states.push(s),onOutcome:(o,id)=>outcomes.push({outcome:o,requestId:id})})
  const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
  assert.equal(result.outcome,'error');assert.equal(result.planner_status,'unavailable');assert.equal(result.native_actions,0);assert.equal(result.model_calls,0)
- assert.equal(states.includes(true),false);assert.equal(outcomes.length,1)
+ assert.equal(states.includes(true),false);assert.equal(outcomes.length,1);assert.equal(outcomes[0].requestId,request.request_id);assert.equal(outcomes[0].outcome.outcome,'error');assert.equal(outcomes[0].outcome.planner_status,'unavailable')
  await assert.rejects(readFile(join(f.dir,'cursor-ended')),/ENOENT/)
 })
 
