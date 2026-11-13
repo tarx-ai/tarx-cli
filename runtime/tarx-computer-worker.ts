@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto'
 import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
+import {returnedFailure} from './tarx-computer-failure.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient,createSupercomputerPlannerClient} from './tarx-computer-planner.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean;accountToken?:string}
 let started=false,serial=0
@@ -133,6 +134,7 @@ async function run(job:Job) {
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
  }
  await ad.guard()
- return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{})}
+ const failure=done?undefined:returnedFailure(result)
+ return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{}),...(failure??{})}
  }finally{if(nativeSession)await bootstrap.exec(['session','end',nativeSession])}
 }
