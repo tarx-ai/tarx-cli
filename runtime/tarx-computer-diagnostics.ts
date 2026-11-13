@@ -104,5 +104,3 @@ export function actionDiagnostics(input:{node:unknown;data:unknown;focused?:unkn
   ...(before?{before}:{}),...(after?{after}:{}),
  }
 }
-
-export const diagnosticsEnums=Object.freeze({CATEGORY,DELIVERY,MECHANISM,VERIFICATION})
