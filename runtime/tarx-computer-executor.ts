@@ -142,7 +142,7 @@ export async function resolveNativeAccountAccess(input:{subject_id:string;loadCr
  }catch{return null}
 }
 export type NativeAccountAccess=(run:Omit<ComputerRun,'request'>)=>Promise<VerifiedAccountAccess|null>
-export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome,requestId:string)=>void}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
  async function launch(observe:boolean,{request,session,signal,stillAuthorized}:ComputerRun):Promise<ComputerOutcome> {
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
@@ -205,7 +205,7 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
        // Strictly bounded metadata; core/model/native output never crosses IPC.
        if(JSON.stringify(message).length>1024){failed=true;stop();return}
        result=m.result
-       if(result)try{input.onOutcome?.(result)}catch{/* Diagnostics cannot grant execution or complete a task. */}
+       if(result)try{input.onOutcome?.(result,request.request_id)}catch{/* Diagnostics cannot grant execution or complete a task. */}
       }else {failed=true;stop()}
      })
      child.on('close',(code)=>{
