@@ -18,7 +18,7 @@ process.on('message',message=>{
  started=true
  void run(m).then(result=>process.send?.({kind:'result',result},()=>process.exit(0)),error=>{
   const code=typeof error?.info?.code==='string'&&/^[A-Z_]{1,64}$/.test(error.info.code)?error.info.code:'NATIVE_TASK_FAILED'
-  process.send?.({kind:'failure',phase,code},()=>process.exit(1))
+  process.send?.({kind:'failure',phase,stage:['scope','identity','observation','target','action','verification'].includes(phase)?phase:'preflight',code},()=>process.exit(1))
  })
 })
 process.on('disconnect',()=>process.exit(1))
