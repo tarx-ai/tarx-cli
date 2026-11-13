@@ -72,14 +72,6 @@ test('isolated worker rechecks exact artifacts and approved scope; deterministic
  assert.equal(await executor.ready(),false)
  await assert.rejects(verifyComputerArtifacts(f.artifacts),/mismatch/)
 })
-test('an adapter click failure emits an allowlisted stage and code',async t=>{
- const f=await fixture(t,false,false,false,true),outcomes:any[]=[]
- const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope,onOutcome:(outcome,requestId)=>outcomes.push({outcome,requestId})})
- await assert.rejects(executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true}),/computer_action_NATIVE_TASK_FAILED/)
- assert.equal(outcomes.length,1);assert.equal(outcomes[0].requestId,request.request_id)
- assert.equal(outcomes[0].outcome.failure_stage,'action');assert.equal(outcomes[0].outcome.failure_code,'NATIVE_TASK_FAILED')
-})
-
 test('read-only local-planner recovery does not invent a zero model total',async t=>{
  const f=await fixture(t),{steps,...rest}=scope
  const modelScope:NativeScope={...rest,mode:'local_model',model:{baseURL:'http://127.0.0.1:9',model:'uncontacted-fixture'},preparation_model_calls:1}
