@@ -223,3 +223,19 @@ cd daemon
 node --test --experimental-strip-types test/*.test.ts
 node --experimental-strip-types src/main.ts --check --state-dir /tmp/tarx-daemon-check
 ```
+
+## Browser QA contract (Internal QA)
+
+The daemon exposes a typed, token-authenticated browser-QA task path on the same loopback server. The browser is the only executor; the daemon never opens a page.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/v1/browser-qa/submit` | Queue one `browser_qa` task for the authenticated Internal QA channel |
+| POST | `/v1/browser-qa/claim` | Claim the oldest queued `browser_qa` task with a worker id |
+| POST | `/v1/browser-qa/heartbeat` | Extend the fenced lease |
+| POST | `/v1/browser-qa/complete` | Persist the typed receipt and its outbox row in one transaction |
+| POST | `/v1/browser-qa/cancel` | Settle cancelled and enqueue the cancellation delivery |
+
+The request is fixed to `https://www.tarx.com/`; the receipt is a closed shape with `navigation=completed`, `composer_visible=true`, `composer_usable=true`, `independent_verified=true`, `dom_actions=1`, `native_actions=0`, `model_calls=0`, `billing_truth=not_a_charge`. It contains no page text, prompt, label or credential. `ownerId`/`installId` come from the trusted host (`--owner-id`, `--install-id`), never the browser. Completion writes the result and the deterministic `browser-qa:<task_id>` outbox row before any delivery; cancellation uses `browser-qa-cancel:<task_id>`. Expired leases become `uncertain` and are never replayed.
+
+Tests: `daemon/test/browser-qa-http.test.ts` (4) cover submit/claim/complete, duplicate completion, invalid receipt, Stop with one cancellation delivery, and restart after an expired in-flight lease with no replay. A host bridge/worker that actually navigates the public page and a packaged `tarxd` are still required; this contract alone is not an installed acceptance.

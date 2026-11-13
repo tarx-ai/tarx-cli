@@ -52,6 +52,7 @@ export type DaemonOptions = {
   leaseMs?: number
   heartbeatMs?: number
   receiptLedger?: string
+  identity?: {ownerId: string; installId: string}
 }
 
 export async function runDaemon(options: DaemonOptions): Promise<Record<string, unknown>> {
@@ -105,7 +106,7 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
       return {ok: true, check: true, recovered, receipts, stats, coordinator: null}
     }
     const token = await daemonToken(stateDirectory)
-    server = createDaemonServer({store, port: options.port, now, token})
+    server = createDaemonServer({store, port: options.port, now, token, ...(options.identity ? {identity: options.identity} : {})})
     const address = await server.listen()
     timer = setInterval(() => {
       try {
@@ -130,8 +131,8 @@ export async function runDaemon(options: DaemonOptions): Promise<Record<string, 
   }
 }
 
-function parse(argv: string[]): DaemonOptions {
-  const options: DaemonOptions = {stateDirectory: join(process.env.HOME ?? process.cwd(), ".tarx", "state", "daemon")}
+function parse(argv: string[]): DaemonOptions & {ownerId?: string; installId?: string} {
+  const options: DaemonOptions & {ownerId?: string; installId?: string} = {stateDirectory: join(process.env.HOME ?? process.cwd(), ".tarx", "state", "daemon")}
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === "--once") options.once = true
@@ -140,8 +141,10 @@ function parse(argv: string[]): DaemonOptions {
     else if (arg === "--port") options.port = Number(argv[++i])
     else if (arg === "--interval") options.recoveryIntervalMs = Number(argv[++i])
     else if (arg === "--receipt-ledger") options.receiptLedger = argv[++i] ?? ""
+    else if (arg === "--owner-id") options.ownerId = argv[++i] ?? ""
+    else if (arg === "--install-id") options.installId = argv[++i] ?? ""
     else if (arg === "--help") {
-      console.log(JSON.stringify({usage: "tarxd --state-dir DIR [--port PORT] [--receipt-ledger FILE] [--once|--check]", commands: ["run", "check"]}))
+      console.log(JSON.stringify({usage: "tarxd --state-dir DIR [--port PORT] [--receipt-ledger FILE] [--owner-id ID --install-id ID] [--once|--check]", commands: ["run", "check"]}))
       process.exit(0)
     } else throw new DaemonError("invalid_arguments", 400)
   }
@@ -151,7 +154,9 @@ function parse(argv: string[]): DaemonOptions {
 
 const entry = process.argv[1] ?? ""
 if (entry.endsWith("main.ts") || entry.endsWith("tarxd")) {
-  runDaemon(parse(process.argv.slice(2)))
+  const parsed = parse(process.argv.slice(2))
+  if (parsed.ownerId && parsed.installId) parsed.identity = {ownerId: parsed.ownerId, installId: parsed.installId}
+  runDaemon(parsed)
     .then((result) => {
       console.log(JSON.stringify(result))
       if (!result.ok) process.exitCode = 1
