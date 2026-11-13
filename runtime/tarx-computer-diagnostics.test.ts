@@ -40,6 +40,6 @@ test('diagnostics drop unknown fields and keep before/after pane evidence',()=>{
  const diagnostics=actionDiagnostics({node:{role:'button',name:'Open browser'},data:{disposition:{delivery:'delivered_unverified'},steps:[{mechanism:'semantic_api'}]},focused:false,before:{open:1,close:0},after:{open:1,close:0},steps:[{decision:'act',verification:{check:'observed_only',passed:false}}]})
  assert.deepEqual(diagnostics,{control:'browser_open',delivery:'delivered_unverified',mechanism:'semantic_api',verification:'none',focused:false,before:{open:1,close:0},after:{open:1,close:0}})
  assert.equal(JSON.stringify(diagnostics).includes('Open browser'),false)
- const malformed=actionDiagnostics({node:{role:'button',name:'Open browser'},data:{},focused:'yes',before:{open:99,close:-1},after:null})
+ const malformed=actionDiagnostics({node:{role:'button',name:'Open browser'},data:{},focused:'yes',before:{open:99,close:-1},after:undefined})
  assert.deepEqual(malformed,{control:'browser_open',delivery:'unknown',mechanism:'unknown',verification:'none'})
 })
