@@ -36,12 +36,12 @@ async function waitForFixtureAction(file:string,outcome:Promise<unknown>){
  }
  throw Error('fixture action delivery deadline exceeded')
 }
-async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false){
+async function fixture(t:any,hang=false,cursor=false,interruptOnStop=false,failClick=false){
  const dir=await realpath(await mkdtemp(join(tmpdir(),'tarx-core-executor-test-')));t.after(()=>rm(dir,{recursive:true,force:true}))
  const pidFile=join(dir,'descendant-pid')
  const files:Record<string,string>={
   'package.json':JSON.stringify({type:'module'}),
-  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});return new Promise((_,reject)=>{${interruptOnStop?`process.once('SIGTERM',()=>reject(Error('fixture action interrupted during Stop')));` : ''}writeFileSync(${JSON.stringify(pidFile)},String(c.pid))})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
+  'adapter.js':`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';export class AgentDesktop {constructor(){if(!process.env.HOME.includes('tarx-cu-'))throw Error('ambient home')}async exec(argv){if(argv[0]==='session')return {data:{session_id:'cursor_fixture_session'}};if(argv[0]==='cursor-overlay')return {data:{rendered:true}};if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='click'){${failClick?`throw Error('fixture click failure')` : hang?`const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});return new Promise((_,reject)=>{${interruptOnStop?`process.once('SIGTERM',()=>reject(Error('fixture action interrupted during Stop')));` : ''}writeFileSync(${JSON.stringify(pidFile)},String(c.pid))})`:`return {data:{}}`}}throw Error('unexpected native command')}async snapshot(){return {tree:{ref_id:'@fixture:e1',role:'button',name:'Fixture action'}}}}`,
   'refs.js':`export const indexRefs=tree=>new Map([[tree.ref_id,tree]])`,
   'policy.js':`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`,
   'loop.js':`export const verifyAll=async()=>({passed:true});export const runTask=async()=>{throw Error('fixture is not a planner')}`,
@@ -66,12 +66,35 @@ test('isolated worker rechecks exact artifacts and approved scope; deterministic
  const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope})
  assert.equal(await executor.ready(),true)
  const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>{checks++;return true}})
- assert.deepEqual(result,{outcome:'done',independent_verified:true,native_actions:1,model_calls:0,core_source:core,execution_mode:'deterministic_actuator'})
+ assert.deepEqual(result,{outcome:'done',independent_verified:true,native_actions:1,model_calls:0,core_source:core,execution_mode:'deterministic_actuator',diagnostics:{control:'button',delivery:'unknown',mechanism:'unknown',verification:'none',before:{open:0,close:0},after:{open:0,close:0}}})
  assert.ok(checks>=4)
  await writeFile(join(f.artifacts.coreDirectory,'adapter.js'),'tampered')
  assert.equal(await executor.ready(),false)
  await assert.rejects(verifyComputerArtifacts(f.artifacts),/mismatch/)
 })
+test('an acknowledged action carries bounded pane-control and delivery evidence',async t=>{
+ const f=await fixture(t),outcomes:any[]=[]
+ const adapter=`import {writeFileSync} from 'node:fs';export class AgentDesktop{constructor(){}async exec(argv){if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture',is_focused:false}]};if(argv[0]==='click')return {data:{disposition:{delivery:'delivered_unverified'},steps:[{mechanism:'semantic_api',verified:false}]}};throw Error('unexpected native command')}async snapshot(){return {tree:{role:'window',children:[{ref_id:'@fixture:e1',role:'button',name:'Open browser'}]},snapshot_id:'fixture'}}}`
+ const policy=`export const buildActionArgv=(action)=>({ok:true,argv:['click',action.ref],risk:{level:'low'}})`
+ const loop=`export const verifyAll=async()=>({passed:true});export const runTask=async(ad)=>{await ad.snapshot('Fixture');await ad.act(['click','@fixture:e1']);return {outcome:'max_steps',steps:[{decision:'act',result:'delivered',verification:{check:'observed_only',passed:false}}]}}`
+ const refs=`export const indexRefs=tree=>{const map=new Map(),stack=[tree];while(stack.length){const node=stack.pop();if(!node||typeof node!=='object')continue;if(node.ref_id)map.set(node.ref_id,node);if(Array.isArray(node.children))stack.push(...node.children)}return map}`
+ for(const [name,body] of [['adapter.js',adapter],['policy.js',policy],['loop.js',loop],['refs.js',refs]] as const){await writeFile(join(f.artifacts.coreDirectory,name),body);f.artifacts.files[name]=hash(body)}
+ const paneScope:NativeScope={...scope,actions:[{command:'click',role:'button',name:'Open browser'}],success:[{kind:'enabled',role:'button',name:'Close browser'}],steps:[{action:{command:'click',role:'button',name:'Open browser'},expect:[{kind:'enabled',role:'button',name:'Close browser'}]}]}
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>paneScope,onOutcome:(outcome,requestId)=>outcomes.push({outcome,requestId})})
+ const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
+ assert.equal(result.outcome,'done')
+ assert.deepEqual(result.diagnostics,{control:'browser_open',delivery:'delivered_unverified',mechanism:'semantic_api',verification:'none',focused:false,before:{open:1,close:0},after:{open:1,close:0}})
+ assert.equal(JSON.stringify(result).includes('Open browser'),false)
+ assert.deepEqual(outcomes[0].outcome.diagnostics,result.diagnostics)
+})
+test('an adapter click failure emits an allowlisted deterministic failure',async t=>{
+ const f=await fixture(t,false,false,false,true),outcomes:any[]=[]
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>scope,onOutcome:(outcome,requestId)=>outcomes.push({outcome,requestId})})
+ await assert.rejects(executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true}))
+ assert.equal(outcomes.length,1);assert.equal(outcomes[0].requestId,request.request_id)
+ assert.equal(outcomes[0].outcome.failure_stage,'action');assert.equal(outcomes[0].outcome.failure_code,'NATIVE_TASK_FAILED')
+})
+
 test('read-only local-planner recovery does not invent a zero model total',async t=>{
  const f=await fixture(t),{steps,...rest}=scope
  const modelScope:NativeScope={...rest,mode:'local_model',model:{baseURL:'http://127.0.0.1:9',model:'uncontacted-fixture'},preparation_model_calls:1}
@@ -144,10 +167,10 @@ test('cursor is session-owned, uses the canonical checked TARX asset and is ende
 test('an unavailable local model fails before native session/cursor creation and preserves diagnostic outcome',async t=>{
  const f=await fixture(t,false,true),states:boolean[]=[],outcomes:any[]=[]
  const localScope:NativeScope={...scope,mode:'local_model',steps:undefined,model:{baseURL:'http://127.0.0.1:1',model:'fixture-unavailable'}}
- const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,onCursorState:s=>states.push(s),onOutcome:o=>outcomes.push(o)})
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,onCursorState:s=>states.push(s),onOutcome:(o,id)=>outcomes.push({outcome:o,requestId:id})})
  const result=await executor.run({request,session:{...session,expires_at:Date.now()+10000},signal:new AbortController().signal,stillAuthorized:async()=>true})
  assert.equal(result.outcome,'error');assert.equal(result.planner_status,'unavailable');assert.equal(result.native_actions,0);assert.equal(result.model_calls,0)
- assert.equal(states.includes(true),false);assert.equal(outcomes.length,1)
+ assert.equal(states.includes(true),false);assert.equal(outcomes.length,1);assert.equal(outcomes[0].requestId,request.request_id);assert.equal(outcomes[0].outcome.outcome,'error');assert.equal(outcomes[0].outcome.planner_status,'unavailable')
  await assert.rejects(readFile(join(f.dir,'cursor-ended')),/ENOENT/)
 })
 
