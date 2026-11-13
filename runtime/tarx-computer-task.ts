@@ -84,6 +84,8 @@ function validRecord(r:Record,source:string):boolean {
 function validOutcome(r:ComputerOutcome,source:string) {
  return r&&['done','unverified','denied','error','cancelled'].includes(r.outcome)&&typeof r.independent_verified==='boolean'&&
   (r.planner_status===undefined||['idle','no_controls','requested','unavailable','invalid_json','invalid_action','false_done','blocked','act','done'].includes(r.planner_status))&&
+  (r.failure_stage===undefined||['preflight','scope','identity','observation','target','action','verification','worker'].includes(r.failure_stage))&&
+  (r.failure_code===undefined||typeof r.failure_code==='string'&&/^[A-Za-z_][A-Za-z0-9_]{1,63}$/.test(r.failure_code))&&
   ['local_model','supercomputer','deterministic_actuator'].includes(r.execution_mode)&&r.core_source===source&&
   [r.native_actions,r.model_calls].every(n=>n===null||Number.isInteger(n)&&n>=0&&n<=50)
 }
