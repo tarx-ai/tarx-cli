@@ -131,6 +131,6 @@ export async function issueNativeHostGrant(input:NativeHostGrant):Promise<Comput
  consent.grant({request_id:request.request_id,actions:saved.actions,session,scope:saved.scope})
  return consent.authority.resolve(session_id)
 }
-export function connectComputerHost(input:{resolveAccountAccess?:NativeAccountAccess;prepareBrowser?:PrepareBrowserTask;onCursorState?:(rendered:boolean)=>void;file:string;coreSource:string;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}){
- return createComputerTaskController({file:input.file,coreSource:input.coreSource,authority:input.consent.authority,prepareBrowser:input.prepareBrowser,executor:createNativeComputerExecutor({artifacts:input.artifacts,resolveAccountAccess:input.resolveAccountAccess,onCursorState:input.onCursorState,resolveScope:(session,request)=>input.consent.resolveScope(session,request)})})
+export function connectComputerHost(input:{resolveAccountAccess?:NativeAccountAccess;prepareBrowser?:PrepareBrowserTask;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:import('./tarx-computer-task.ts').ComputerOutcome,requestId:string)=>void;file:string;coreSource:string;artifacts:ComputerArtifacts;consent:ReturnType<typeof createComputerHostConsent>}){
+ return createComputerTaskController({file:input.file,coreSource:input.coreSource,authority:input.consent.authority,prepareBrowser:input.prepareBrowser,executor:createNativeComputerExecutor({artifacts:input.artifacts,resolveAccountAccess:input.resolveAccountAccess,onCursorState:input.onCursorState,onOutcome:input.onOutcome,resolveScope:(session,request)=>input.consent.resolveScope(session,request)})})
 }

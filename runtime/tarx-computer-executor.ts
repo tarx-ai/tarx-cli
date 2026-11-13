@@ -142,7 +142,7 @@ export async function resolveNativeAccountAccess(input:{subject_id:string;loadCr
  }catch{return null}
 }
 export type NativeAccountAccess=(run:Omit<ComputerRun,'request'>)=>Promise<VerifiedAccountAccess|null>
-export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome,requestId:string)=>void}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
  async function launch(observe:boolean,{request,session,signal,stillAuthorized}:ComputerRun):Promise<ComputerOutcome> {
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
@@ -172,7 +172,7 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
     return await new Promise<ComputerOutcome>((resolve,reject)=>{
      const child=fork(new URL('./tarx-computer-worker.ts',import.meta.url),[],{execPath:artifacts.node.path,execArgv:['--experimental-strip-types'],detached:true,
       cwd:home,env:workerEnv(home,artifacts),stdio:['ignore','ignore','ignore','ipc']})
-     let result:ComputerOutcome|undefined,failure:Error|undefined,failed=false,finished=false,stopping=false,checks=0
+     let result:ComputerOutcome|undefined,failure:Error|undefined,failed=false,finished=false,stopping=false,checks=0,failureStage:'preflight'|'scope'|'identity'|'observation'|'target'|'action'|'verification'|'worker'='worker',failureCode='NATIVE_TASK_FAILED'
      let killTimer:ReturnType<typeof setTimeout>|undefined
      const kill=(signal:NodeJS.Signals)=>{if(child.pid)try{process.kill(-child.pid,signal)}catch(e:any){if(e.code!=='ESRCH')failed=true}}
      const stop=()=>{if(stopping)return;stopping=true;kill('SIGTERM');killTimer=setTimeout(()=>kill('SIGKILL'),250)}
@@ -190,7 +190,7 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
      child.on('error',()=>{failed=true;stop()})
      child.on('message',message=>{
       if(finished||!message||typeof message!=='object')return
-      const m=message as {kind?:string;id?:number;result?:ComputerOutcome;phase?:string;code?:string;session?:string;rendered?:boolean}
+      const m=message as {kind?:string;id?:number;result?:ComputerOutcome;phase?:string;stage?:string;code?:string;session?:string;rendered?:boolean}
       // Stop fences late outcomes/presentation; retain session identity for owned cleanup.
       if(signal.aborted&&m.kind!=='native_session')return
       if(m.kind==='authorize'&&Number.isInteger(m.id)&&++checks<=32){
@@ -200,18 +200,21 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
       }else if(m.kind==='native_cursor'&&nativeSession&&m.rendered===true){
        try{input.onCursorState?.(true)}catch{/* Presentation cannot grant execution. */}
       }else if(m.kind==='failure'&&typeof m.phase==='string'&&/^[a-z]{1,20}$/.test(m.phase)&&typeof m.code==='string'&&/^[A-Z_]{1,64}$/.test(m.code)){
-       failure=Error('computer_'+m.phase+'_'+m.code);failed=true;stop()
+       failure=Error('computer_'+m.phase+'_'+m.code);failureCode=m.code
+       failureStage=(['preflight','scope','identity','observation','target','action','verification','worker'].includes(m.stage??'')?m.stage:(['scope','identity','observation','target','action','verification'].includes(m.phase)?m.phase:'preflight')) as typeof failureStage
+       failed=true;stop()
       }else if(m.kind==='result'&&!result){
        // Strictly bounded metadata; core/model/native output never crosses IPC.
        if(JSON.stringify(message).length>1024){failed=true;stop();return}
        result=m.result
-       if(result)try{input.onOutcome?.(result)}catch{/* Diagnostics cannot grant execution or complete a task. */}
+       if(result)try{input.onOutcome?.(result,request.request_id)}catch{/* Diagnostics cannot grant execution or complete a task. */}
       }else {failed=true;stop()}
      })
      child.on('close',(code)=>{
       // Even a successful worker cannot leave a native adapter descendant alive.
       kill('SIGKILL')
       if(code!==0&&!signal.aborted)failed=true
+      if(failed&&!result&&!signal.aborted)try{input.onOutcome?.({outcome:'error',independent_verified:false,native_actions:null,model_calls:null,core_source:artifacts.coreSource,execution_mode:scope.mode,failure_stage:failureStage,failure_code:failureCode},request.request_id)}catch{}
       if(signal.aborted&&!failed){result={outcome:'cancelled',independent_verified:false,native_actions:null,model_calls:null,core_source:artifacts.coreSource,execution_mode:scope.mode};stopping=false}
       finish()
      })

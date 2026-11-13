@@ -4,6 +4,8 @@ import {createHash} from 'node:crypto'
 import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
+import {returnedFailure} from './tarx-computer-failure.ts'
+import {actionDiagnostics,controlCounts,type ControlCounts} from './tarx-computer-diagnostics.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient,createSupercomputerPlannerClient} from './tarx-computer-planner.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean;accountToken?:string}
 let started=false,serial=0
@@ -18,7 +20,7 @@ process.on('message',message=>{
  started=true
  void run(m).then(result=>process.send?.({kind:'result',result},()=>process.exit(0)),error=>{
   const code=typeof error?.info?.code==='string'&&/^[A-Z_]{1,64}$/.test(error.info.code)?error.info.code:'NATIVE_TASK_FAILED'
-  process.send?.({kind:'failure',phase,code},()=>process.exit(1))
+  process.send?.({kind:'failure',phase,stage:['scope','identity','observation','target','action','verification'].includes(phase)?phase:'preflight',code},()=>process.exit(1))
  })
 })
 process.on('disconnect',()=>process.exit(1))
@@ -29,6 +31,7 @@ async function run(job:Job) {
  const [{AgentDesktop},{indexRefs},{buildActionArgv},{verifyAll,runTask}]=await Promise.all(['adapter.js','refs.js','policy.js','loop.js'].map(load))
  phase='scope'
  let latest:any,latestSurface:string|undefined,actions=0,modelCalls=scope.preparation_model_calls??0,plannerStatus:string|undefined
+ let focused:boolean|undefined,latestControls:ControlCounts|undefined,beforeControls:ControlCounts|undefined,actionNode:any,actionData:any,verificationSteps:unknown
  const hash=(s:string)=>createHash('sha256').update(s).digest('hex')
  const rows=(data:any)=>Array.isArray(data)?data:data?.windows??[]
  class ScopedDesktop extends AgentDesktop {
@@ -37,6 +40,7 @@ async function run(job:Job) {
    phase='identity'
    const current=rows((await super.exec(['list-windows','--app',scope.app])).data).filter((r:any)=>r.id===scope.window.id)
    if(current.length!==1||current[0].pid!==scope.window.pid||hash(String(current[0].title??''))!==scope.window.title_sha256||!await authorize())throw Error('native_identity_or_approval_changed')
+   focused=typeof current[0].is_focused==='boolean'?current[0].is_focused:undefined
   }
   async exec(argv:string[],opts:unknown) {
    if(['snapshot','find'].includes(argv[0])){await this.guard();phase='observation';return super.exec([...argv,...(argv[0]==='find'&&argv.includes('--name')&&!argv.includes('--exact')?['--exact']:[]),'--window-id',scope.window.id],opts)}
@@ -45,8 +49,10 @@ async function run(job:Job) {
   }
   async snapshot(app:string,opts:{surface?:string;maxDepth?:number}={}) {
    if(app!==scope.app)throw Error('native_app_out_of_scope')
-   latest=await super.snapshot(app,{maxDepth:30,...opts})
+   const raw=await super.snapshot(app,{maxDepth:30,...opts})
+   latest=raw
    latestSurface=opts.surface
+   latestControls=controlCounts(raw.tree)
    if(scope.mode!=='deterministic_actuator'&&!opts.surface)latest={...latest,tree:scopeNativeObservation(latest.tree,scope.actions)}
    return latest
   }
@@ -55,7 +61,8 @@ async function run(job:Job) {
    const node=latest&&indexRefs(latest.tree).get(argv[1])
    if(argv.length!==2||argv[0]!=='click'||!node||!scope.actions.some(a=>a.command===argv[0]&&a.role===node.role&&a.name===node.name)||actions>=job.maxSteps)throw Error('native_action_out_of_scope')
    await this.guard();latest=undefined;phase='action'
-   const result=await super.exec(argv,{timeoutMs:5000});actions++;return result.data
+   actionNode=node;beforeControls=latestControls
+   const result=await super.exec(argv,{timeoutMs:5000});actions++;actionData=result.data;return result.data
   }
  }
  if(job.observe===true){
@@ -86,6 +93,7 @@ async function run(job:Job) {
   process.send?.({kind:'native_cursor',rendered:true})
  }
  const ad=new ScopedDesktop({bin:artifacts.adapter.path,defaultTimeoutMs:5000,...(nativeSession?{session:nativeSession}:{})})
+ let failure:ReturnType<typeof returnedFailure>
  const approve=async(r:unknown)=>approvedNativeScopedClick(scope,r)
  let done=false
  if(scope.mode==='deterministic_actuator'){
@@ -97,7 +105,8 @@ async function run(job:Job) {
    const action={command:'click',ref:nodes[0].ref_id}
    const plan=buildActionArgv(action,snapshot,scope.app)
    if(!plan.ok||plan.risk.level==='high'&&!await approve({app:scope.app,action,risk:plan.risk,targetRole:plan.node?.role,targetName:plan.node?.name}))throw Error('native_policy_denied')
-   await ad.act(plan.argv);phase='verification'
+   actionNode=nodes[0]
+   actionData=await ad.act(plan.argv);phase='verification'
    if(!(await verifyAll(ad,scope.app,step.expect)).passed)throw Error('native_step_unverified')
   }
   done=(await verifyAll(ad,scope.app,scope.success)).passed
@@ -129,10 +138,18 @@ async function run(job:Job) {
    return {text,controls}
   },()=>actions)
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
+  verificationSteps=result.steps
   plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
+  failure=done?undefined:returnedFailure(result)
  }
  await ad.guard()
- return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{})}
+ // One fresh read-only observation after the run. It is bounded, cannot grant
+ // execution, and turns an acknowledged action into comparable before/after
+ // pane-control evidence without copying any native label.
+ let after:ControlCounts|undefined
+ try{await ad.snapshot(scope.app,{maxDepth:30});after=latestControls}catch{}
+ const diagnostics=actionNode?actionDiagnostics({node:actionNode,data:actionData,focused,before:beforeControls,after,steps:verificationSteps}):undefined
+ return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{}),...(failure??{}),...(diagnostics?{diagnostics}:{})}
  }finally{if(nativeSession)await bootstrap.exec(['session','end',nativeSession])}
 }
