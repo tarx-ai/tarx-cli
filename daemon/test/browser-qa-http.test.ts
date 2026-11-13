@@ -10,8 +10,9 @@ import {createDaemonServer} from "../src/http.ts"
 const TOKEN = "a".repeat(64)
 const identity = {ownerId: "owner_fixture", installId: "install_fixture"}
 const requestId = () => `bqa_${randomBytes(8).toString("hex")}`
-const receipt = (id: string) => ({
-  kind: "browser_qa", request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa",
+const traceId = () => randomBytes(16).toString("hex")
+const receipt = (id: string, trace = traceId()) => ({
+  kind: "browser_qa", request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", trace_id: trace,
   url: "https://www.tarx.com/", navigation: "completed", composer_visible: true, composer_usable: true,
   independent_verified: true, dom_actions: 1, native_actions: 0, model_calls: 0, billing_truth: "not_a_charge",
 })
@@ -33,22 +34,22 @@ async function fixture(t: any) {
 
 test("a typed browser QA task is claimed, persisted before delivery, and delivered once", async (t) => {
   const f = await fixture(t)
-  const id = requestId()
-  const submitted = await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer."})
+  const id = requestId(), trace = traceId()
+  const submitted = await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer.", trace_id: trace})
   assert.equal(submitted.status, 201)
   const claimed = await f.call("/v1/browser-qa/claim", {worker_id: "browser-worker-1"})
   assert.equal(claimed.status, 200)
   assert.equal(claimed.body.task.kind, "browser_qa")
   assert.equal(claimed.body.task.request.request_id, id)
   const fence = claimed.body.task.fencing_token
-  const completed = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: fence, receipt: receipt(id)})
+  const completed = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: fence, receipt: receipt(id, trace)})
   assert.equal(completed.status, 200)
   assert.equal(completed.body.status, "completed")
   assert.match(completed.body.idempotency_key, /^browser-qa:/)
   const task = f.store.getTask(claimed.body.task.task_id)
   assert.equal(task?.status, "completed")
   assert.equal((task?.result as any)?.kind, "browser_qa")
-  const duplicate = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: fence, receipt: receipt(id)})
+  const duplicate = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: fence, receipt: receipt(id, trace)})
   assert.equal(duplicate.status, 200)
   assert.equal(duplicate.body.deduplicated, true)
   assert.equal(duplicate.body.delivery_id, completed.body.delivery_id)
@@ -67,18 +68,18 @@ test("a typed browser QA task is claimed, persisted before delivery, and deliver
 
 test("an invalid receipt is refused and does not complete the task", async (t) => {
   const f = await fixture(t)
-  const id = requestId()
-  await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer."})
+  const id = requestId(), trace = traceId()
+  await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer.", trace_id: trace})
   const claimed = await f.call("/v1/browser-qa/claim", {worker_id: "browser-worker-1"})
-  const bad = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: claimed.body.task.fencing_token, receipt: {...receipt(id), composer_visible: false}})
+  const bad = await f.call("/v1/browser-qa/complete", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: claimed.body.task.fencing_token, receipt: {...receipt(id, trace), composer_visible: false}})
   assert.equal(bad.status, 400)
   assert.equal(f.store.getTask(claimed.body.task.task_id)?.status, "running")
 })
 
 test("Stop settles cancelled with one cancellation delivery and no replay", async (t) => {
   const f = await fixture(t)
-  const id = requestId()
-  await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer."})
+  const id = requestId(), trace = traceId()
+  await f.call("/v1/browser-qa/submit", {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "Open the public TARX browser and verify the composer.", trace_id: trace})
   const claimed = await f.call("/v1/browser-qa/claim", {worker_id: "browser-worker-1"})
   const cancelled = await f.call("/v1/browser-qa/cancel", {task_id: claimed.body.task.task_id, worker_id: "browser-worker-1", fencing_token: claimed.body.task.fencing_token})
   assert.equal(cancelled.status, 200)
@@ -86,7 +87,10 @@ test("Stop settles cancelled with one cancellation delivery and no replay", asyn
   const task = f.store.getTask(claimed.body.task.task_id)
   assert.equal(task?.status, "cancelled")
   assert.equal(task?.delivery_id, cancelled.body.delivery_id)
-  assert.equal(f.store.claimDeliveries("delivery-worker", 1, 30_000).length, 1)
+  const deliveries = await f.call("/v1/browser-qa/deliveries/claim", {worker_id: "delivery-worker"})
+  assert.equal(deliveries.body.deliveries.length, 1)
+  assert.equal(deliveries.body.deliveries[0].payload.trace_id, trace)
+  assert.equal(deliveries.body.deliveries[0].payload.status, "cancelled")
 })
 
 test("an expired in-flight browser QA lease is uncertain and never replayed after restart", async (t) => {
@@ -94,7 +98,7 @@ test("an expired in-flight browser QA lease is uncertain and never replayed afte
   const file = join(dir, "daemon.sqlite")
   let store = createDaemonStore({file})
   const id = requestId()
-  const task = store.submitTask({ownerId: identity.ownerId, installId: identity.installId, channelId: "internal-qa", agentId: "channel-agent:internal-qa", kind: "browser_qa", request: {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "fixed", url: "https://www.tarx.com/"}})
+  const task = store.submitTask({ownerId: identity.ownerId, installId: identity.installId, channelId: "internal-qa", agentId: "channel-agent:internal-qa", kind: "browser_qa", request: {request_id: id, channel_id: "internal-qa", agent_id: "channel-agent:internal-qa", goal: "fixed", trace_id: "0123456789abcdef0123456789abcdef", url: "https://www.tarx.com/"}})
   const claimed = store.claimTask("browser-worker-1", 5_000, "browser_qa")
   assert.equal(claimed?.task_id, task.task_id)
   store.close()

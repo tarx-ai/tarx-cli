@@ -97,9 +97,10 @@ export function createDaemonServer(input: {store: DaemonStore; port?: number; ho
               typeof body.worker_id !== "string" || !Number.isInteger(body.fencing_token)) return send(400, JSON.stringify({error: "invalid_browser_qa_complete"}))
           const task = input.store.getTask(body.task_id)
           if (!task || task.kind !== BROWSER_QA_KIND) return send(404, JSON.stringify({error: "browser_qa_task_not_found"}))
-          const request = task.request as {request_id?: string; channel_id?: string; agent_id?: string}
+          const request = task.request as {request_id?: string; channel_id?: string; agent_id?: string; trace_id?: string}
           if (typeof request?.request_id !== "string" || typeof request.channel_id !== "string" || typeof request.agent_id !== "string") return send(409, JSON.stringify({error: "browser_qa_request_invalid"}))
-          const receipt = validateBrowserQaReceipt(body.receipt, {request_id: request.request_id, channel_id: request.channel_id, agent_id: request.agent_id, goal: "fixed public check"})
+          if (typeof request.trace_id !== "string") return send(409, JSON.stringify({error: "browser_qa_request_invalid"}))
+          const receipt = validateBrowserQaReceipt(body.receipt, {request_id: request.request_id, channel_id: request.channel_id, agent_id: request.agent_id, goal: "fixed public check", trace_id: request.trace_id})
           const completed = input.store.completeTask({
             taskId: body.task_id,
             workerId: body.worker_id,
@@ -115,12 +116,12 @@ export function createDaemonServer(input: {store: DaemonStore; port?: number; ho
               typeof body.worker_id !== "string" || !Number.isInteger(body.fencing_token)) return send(400, JSON.stringify({error: "invalid_browser_qa_cancel"}))
           const task = input.store.getTask(body.task_id)
           if (!task || task.kind !== BROWSER_QA_KIND) return send(404, JSON.stringify({error: "browser_qa_task_not_found"}))
-          const request = task.request as {request_id?: string; channel_id?: string; agent_id?: string}
+          const request = task.request as {request_id?: string; channel_id?: string; agent_id?: string; trace_id?: string}
           const settled = input.store.settleTask({
             taskId: body.task_id, workerId: body.worker_id, fencingToken: body.fencing_token as number,
             status: "cancelled", errorCode: "cancelled_by_request",
-            ...(typeof request?.request_id === "string" && typeof request.channel_id === "string" && typeof request.agent_id === "string"
-              ? {delivery: browserQaCancelDelivery(body.task_id, request.request_id, request.channel_id, request.agent_id)} : {}),
+            ...(typeof request?.request_id === "string" && typeof request.channel_id === "string" && typeof request.agent_id === "string" && typeof request.trace_id === "string"
+              ? {delivery: browserQaCancelDelivery(body.task_id, request.request_id, request.channel_id, request.agent_id, request.trace_id)} : {}),
           })
           return send(200, JSON.stringify({ok: true, task_id: settled.task.task_id, status: settled.task.status, delivery_id: settled.delivery?.delivery_id ?? null}))
         }
