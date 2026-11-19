@@ -99,7 +99,7 @@ export function generateToolBindingSource(tools: readonly CodeModeTool[]): strin
  return [
   '/** Allowlisted Code Mode tools. Intermediate tool output stays in the isolate.',
   ' * Return only the filtered value the model should see. */',
-  'type CommandResult = { status: "ok"|"error"|"denied"|"timeout"|"not_run"|"unknown"; exit_code: number|null; stdout: string; stderr: string; truncated: boolean }',
+  'type CommandResult = { status: "ok"|"error"|"denied"|"timeout"|"aborted"|"not_run"|"unknown"; exit_code: number|null; stdout: string; stderr: string; truncated: boolean }',
   'declare const tools: {',
   decls.join('\n'),
   '};',
@@ -142,7 +142,7 @@ export function unknownResult(tool: string, reason = 'unknown'): CommandResult {
 function asCommandResult(tool: string, value: unknown): CommandResult {
  if (value && typeof value === 'object' && !Array.isArray(value)) {
   const r = value as Partial<CommandResult>
-  if (typeof r.status === 'string' && ['ok', 'error', 'denied', 'timeout', 'not_run', 'unknown'].includes(r.status)) {
+  if (typeof r.status === 'string' && ['ok', 'error', 'denied', 'timeout', 'aborted', 'not_run', 'unknown'].includes(r.status)) {
    return createCommandResult({
     tool,
     status: r.status as CommandStatus,
@@ -236,17 +236,17 @@ export async function runCodeModeTurn(input: CodeModeTurnInput): Promise<CodeMod
  const timeoutMs = input.limits?.timeoutMs ?? DEFAULT_SANDBOX_LIMITS.timeoutMs
  const turnAbort = new AbortController()
  const timer = setTimeout(() => turnAbort.abort(), timeoutMs)
- const combined = input.signal ? AbortSignal.any([input.signal, turnAbort.signal]) : turnAbort.signal
+ const streamSignal = input.signal ? AbortSignal.any([input.signal, turnAbort.signal]) : turnAbort.signal
  try {
   const sandbox = runSandboxedScript({
    script: input.script,
    toolNames: [...input.registry.names],
-   executeTool: (name, toolInput) => executeRegistryTool(input.registry, name, toolInput, combined),
+   executeTool: (name, toolInput) => executeRegistryTool(input.registry, name, toolInput, streamSignal),
    limits: input.limits,
-   signal: combined,
+   signal: input.signal,
    onProgress: (progress) => emit({type: 'progress', step: progress.step, tool: progress.tool, phase: progress.phase}),
   })
-  const text = collectAssistantText(input.assistantText, emit, combined)
+  const text = collectAssistantText(input.assistantText, emit, streamSignal)
   const outcome = await sandbox
   turnAbort.abort()
   await text

@@ -101,7 +101,7 @@ one-action-per-turn planner is unchanged. When it is exactly `1`, the local
 model may write a short JavaScript script that chains allowlisted tools; a
 forked isolate executes it and only the script's return value re-enters model
 context. The isolate is a fresh realm with a frozen allowlisted tool API;
-timeouts stop the whole process group. Command results carry the real exit code, stdout and stderr
+the child stays in the caller's process group so Stop reaps it. Command results carry the real exit code, stdout and stderr
 (truncated). The runner never synthesizes success; a step that did not run is
 `not_run` or `unknown`. Script text and tool output stay on this device: no
 cloud call, telemetry or remote log. Supercomputer, gateway ports, the bridge

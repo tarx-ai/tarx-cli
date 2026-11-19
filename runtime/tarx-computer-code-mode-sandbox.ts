@@ -4,8 +4,11 @@
  * Host-realm objects are never installed on the context. Tool functions are
  * created inside the realm and talk to the parent through JSON-only jobs.
  * The child is launched with V8 string-code generation disabled and Node's
- * permission model (runtime-dir reads only; no child_process, worker, net, or
- * fs-write). Timeout and oversized IPC kill the whole process group.
+ * permission model (runtime-dir reads only; no child_process, worker, or
+ * fs-write). Node 24 has no network permission flag; network is reachable only
+ * through an escape, and isolation relies on the vm realm with no host objects.
+ * The child stays in the caller's process group (`detached: false`) so Stop
+ * reaps it. Timeout and cap still SIGKILL the child.
  *
  * Script text and tool output stay on this device. Nothing here opens a
  * remote socket, writes telemetry, or logs payload contents. */
@@ -20,7 +23,7 @@ export const CONTEXT_RESULT_MAX_BYTES = 8 * 1024
 export const COMMAND_STDOUT_MAX_BYTES = 4 * 1024
 export const COMMAND_STDERR_MAX_BYTES = 4 * 1024
 
-export type CommandStatus = 'ok' | 'error' | 'denied' | 'timeout' | 'not_run' | 'unknown'
+export type CommandStatus = 'ok' | 'error' | 'denied' | 'timeout' | 'aborted' | 'not_run' | 'unknown'
 
 export type CommandResult = {
  tool: string
@@ -145,8 +148,9 @@ export function sandboxRuntimeDir(): string {
  return dirname(fileURLToPath(import.meta.url))
 }
 
-/** Child argv. No child_process, worker, net, or fs-write. fs-read is the
- * runtime directory so this module can load; the isolate still cannot write. */
+/** Child argv. No child_process, worker, or fs-write. fs-read is the runtime
+ * directory so this module can load; the isolate still cannot write. Node 24
+ * has no network permission flag — see file header. */
 export function sandboxChildExecArgv(memoryMb: number, runtimeDir = sandboxRuntimeDir()): string[] {
  return [
   '--experimental-strip-types',
@@ -157,14 +161,31 @@ export function sandboxChildExecArgv(memoryMb: number, runtimeDir = sandboxRunti
  ]
 }
 
-/** Kill a detached sandbox leader and every process in its group. */
+export const SANDBOX_CHILD_DETACHED = false
+
+/** SIGKILL the isolate. Tries its process group first, then the pid, so both
+ * a group leader and a non-detached child are reaped. */
 export function killSandboxGroup(pid: number): void {
  if (!Number.isInteger(pid) || pid <= 0) return
- try { process.kill(-pid, 'SIGKILL') } catch { /* group may already be gone */ }
+ try { process.kill(-pid, 'SIGKILL') } catch { /* not a group leader, or already gone */ }
  try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
 }
 
-function sandboxChild(memoryMb: number): ChildProcess {
+/** Host paths in isolate errors are rewritten to runtime-relative names. */
+export function redactHostPaths(text: string, runtimeDir = sandboxRuntimeDir()): string {
+ if (!text) return text
+ const dir = runtimeDir.replace(/\\/g, '/')
+ let out = text.replace(/\\/g, '/')
+ const escaped = dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+ out = out.replace(new RegExp(escaped + '/', 'g'), '')
+ out = out.replace(new RegExp(escaped, 'g'), '.')
+ out = out.replace(/file:\/\/\/[^\s:)]+\//g, '')
+ out = out.replace(/\/(?:Users|home)\/[^/\s"'`:)]+/g, '~')
+ out = out.replace(/[A-Za-z]:\/Users\/[^/\s"'`:)]+/g, '~')
+ return out
+}
+
+export function forkSandboxChild(memoryMb: number): ChildProcess {
  const runtimeDir = sandboxRuntimeDir()
  return fork(fileURLToPath(new URL(import.meta.url)), [], {
   execPath: process.execPath,
@@ -173,7 +194,7 @@ function sandboxChild(memoryMb: number): ChildProcess {
   env: sandboxEnv(),
   stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   serialization: 'json',
-  detached: true,
+  detached: SANDBOX_CHILD_DETACHED,
  })
 }
 
@@ -208,7 +229,8 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
   let settled = false, step = 0, killing = false, started = false
   const calls: CommandResult[] = []
   const pending = new Map<number, {tool: string}>()
-  const child = sandboxChild(limits.memoryMb)
+  const child = forkSandboxChild(limits.memoryMb)
+  let killStatus: CommandStatus = 'timeout'
 
   const finish = (outcome: SandboxOutcome) => {
    if (settled) return
@@ -220,27 +242,28 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
     pending.delete(id)
     const result = createCommandResult({
      tool: waiter.tool,
-     status: killing ? 'timeout' : 'unknown',
+     status: killing ? killStatus : 'unknown',
      exit_code: null,
      stdout: '',
-     stderr: killing ? 'killed' : 'isolate_exited',
+     stderr: killing ? (killStatus === 'aborted' ? 'aborted' : 'killed') : 'isolate_exited',
     })
     inFlight.push(result)
    }
    try { if (child.connected) child.disconnect() } catch { /* isolate is exiting */ }
    if (child.pid) killSandboxGroup(child.pid)
-   resolve({...outcome, in_flight: inFlight})
+   resolve({...outcome, error: outcome.error ? redactHostPaths(outcome.error) : outcome.error, in_flight: inFlight})
   }
 
   const kill = (status: CommandStatus, error: string) => {
    killing = true
+   killStatus = status
    if (child.pid) killSandboxGroup(child.pid)
    finish({status, value: null, truncated: false, error, calls: calls.slice(), in_flight: []})
   }
 
   const onAbort = () => {
    if (!started && pending.size === 0 && calls.length === 0) kill('not_run', 'aborted')
-   else kill('timeout', 'aborted')
+   else kill('aborted', 'aborted')
   }
   const timer = setTimeout(() => kill('timeout', 'deadline'), limits.timeoutMs)
   input.signal?.addEventListener('abort', onAbort, {once: true})
@@ -259,8 +282,23 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
   })
   child.on('message', (message: unknown) => {
    if (settled || !message || typeof message !== 'object' || Array.isArray(message)) return
-   if (ipcSize(message) > MAX_IPC_BYTES) { kill('error', 'ipc_too_large'); return }
-   const msg = message as {kind?: string; id?: number; name?: string; input?: unknown; value?: unknown; error?: string}
+   const msg = message as {kind?: string; id?: number; name?: string; input?: unknown; value?: unknown; error?: string; truncated?: boolean}
+   if (ipcSize(message) > MAX_IPC_BYTES) {
+    if (msg.kind === 'result') {
+     const bounded = boundContextValue(msg.value, limits.resultMaxBytes)
+     finish({
+      status: msg.error ? 'error' : 'ok',
+      value: msg.error ? null : bounded.value,
+      truncated: true,
+      error: typeof msg.error === 'string' ? redactHostPaths(msg.error).slice(0, 200) : msg.error ? 'script_error' : undefined,
+      calls: calls.slice(),
+      in_flight: [],
+     })
+     return
+    }
+    kill('error', 'ipc_too_large')
+    return
+   }
    if (msg.kind === 'tool_call' && Number.isInteger(msg.id) && typeof msg.name === 'string') {
     const name = msg.name
     const id = msg.id as number
@@ -292,8 +330,8 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
     finish({
      status: msg.error ? 'error' : 'ok',
      value: msg.error ? null : bounded.value,
-     truncated: bounded.truncated,
-     error: typeof msg.error === 'string' && msg.error.length <= 200 ? msg.error : msg.error ? 'script_error' : undefined,
+     truncated: bounded.truncated || msg.truncated === true,
+     error: typeof msg.error === 'string' ? redactHostPaths(msg.error).slice(0, 200) : msg.error ? 'script_error' : undefined,
      calls: calls.slice(),
      in_flight: [],
     })
@@ -304,7 +342,7 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
 
   if (input.signal?.aborted) { onAbort(); return }
   started = true
-  child.send({kind: 'start', script, tools: [...allow]})
+  child.send({kind: 'start', script, tools: [...allow], resultMaxBytes: limits.resultMaxBytes})
  })
 }
 
@@ -316,9 +354,27 @@ async function runSandboxChild() {
   pending.set(id, {resolve})
   process.send?.({kind: 'tool_call', id, name, input})
  })
+ const sendResult = (value: unknown, error?: string) => {
+  const cap = Math.min(
+   Number.isFinite(resultMaxBytes) ? resultMaxBytes : CONTEXT_RESULT_MAX_BYTES,
+   MAX_IPC_BYTES - 1024,
+  )
+  const bounded = boundContextValue(value, Math.max(32, cap))
+  const payload = {
+   kind: 'result' as const,
+   value: error ? null : bounded.value,
+   truncated: bounded.truncated,
+   error,
+  }
+  const body = ipcSize(payload) > MAX_IPC_BYTES
+   ? {kind: 'result' as const, value: error ? null : TRUNCATION_MARKER, truncated: true, error}
+   : payload
+  process.send?.(body, () => process.exit(error ? 1 : 0))
+ }
+ let resultMaxBytes = CONTEXT_RESULT_MAX_BYTES
  process.on('message', (message: unknown) => {
   if (!message || typeof message !== 'object' || Array.isArray(message)) return
-  const msg = message as {kind?: string; script?: string; tools?: string[]; id?: number; result?: CommandResult}
+  const msg = message as {kind?: string; script?: string; tools?: string[]; id?: number; result?: CommandResult; resultMaxBytes?: number}
   if (msg.kind === 'tool_result' && Number.isInteger(msg.id) && pending.has(msg.id as number)) {
    const waiter = pending.get(msg.id as number)!
    pending.delete(msg.id as number)
@@ -326,23 +382,27 @@ async function runSandboxChild() {
    return
   }
   if (msg.kind !== 'start' || typeof msg.script !== 'string' || !Array.isArray(msg.tools)) return
+  if (Number.isFinite(msg.resultMaxBytes) && (msg.resultMaxBytes as number) >= 32) resultMaxBytes = msg.resultMaxBytes as number
   void executeInVm(msg.script, msg.tools.filter((n): n is string => typeof n === 'string'), callTool)
-   .then((value) => process.send?.({kind: 'result', value}, () => process.exit(0)))
-   .catch((error: unknown) => {
-    process.send?.({kind: 'result', value: null, error: sandboxErrorText(error)}, () => process.exit(1))
-   })
+   .then((value) => sendResult(value))
+   .catch((error: unknown) => sendResult(null, sandboxErrorText(error)))
  })
  process.on('disconnect', () => process.exit(1))
 }
 
 function sandboxErrorText(error: unknown): string {
- if (error instanceof Error) return error.message
- if (error && typeof error === 'object' && 'message' in error) {
-  const message = (error as {message: unknown}).message
-  if (typeof message === 'string' && message.trim()) return message.slice(0, 200)
- }
- const text = typeof error === 'string' ? error : ''
- return text.trim() ? text.slice(0, 200) : 'script_error'
+ const record = error && typeof error === 'object' ? error as {message?: unknown; stack?: unknown} : null
+ const message = error instanceof Error
+  ? error.message
+  : typeof record?.message === 'string' ? record.message
+  : typeof error === 'string' ? error
+  : ''
+ const stack = error instanceof Error
+  ? error.stack
+  : typeof record?.stack === 'string' ? record.stack
+  : ''
+ const raw = [message.trim() || 'script_error', stack && stack !== message ? stack : ''].filter(Boolean).join('\n')
+ return redactHostPaths(raw).slice(0, 500)
 }
 
 function bootstrapRealm(context: vm.Context, toolNames: string[]) {

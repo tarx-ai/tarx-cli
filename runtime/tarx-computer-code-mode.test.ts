@@ -24,7 +24,7 @@ import {
  type CodeModeEvent,
  type CodeModeTool,
 } from './tarx-computer-code-mode.ts'
-import {killSandboxGroup,sandboxChildExecArgv,sandboxRuntimeDir} from './tarx-computer-code-mode-sandbox.ts'
+import {forkSandboxChild,killSandboxGroup,redactHostPaths,SANDBOX_CHILD_DETACHED,sandboxChildExecArgv,sandboxRuntimeDir} from './tarx-computer-code-mode-sandbox.ts'
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -85,6 +85,7 @@ test('sandbox times out a hanging script and does not report success', async () 
   limits: {timeoutMs: 1500, memoryMb: 64, resultMaxBytes: 1024, stdoutMaxBytes: 256, maxToolCalls: 4},
  })
  assert.equal(result.status, 'timeout')
+ assert.equal(result.error, 'deadline')
  assert.equal(result.context, null)
  assert.notEqual(result.status, 'ok')
  assert.equal(result.events.at(-1)?.type, 'final')
@@ -127,6 +128,7 @@ test('a thrown script error is an error, never synthesized success', async () =>
  assert.equal(result.status, 'error')
  assert.equal(result.context, null)
  assert.match(result.error ?? '', /boom/)
+ assert.doesNotMatch(result.error ?? '', /\/home\/|\/Users\//)
  assert.notEqual(result.status, 'ok')
 })
 
@@ -184,7 +186,26 @@ test('an aborted run before start is not_run, not success', async () => {
   limits: {timeoutMs: 1000, memoryMb: 64, resultMaxBytes: 256, stdoutMaxBytes: 256, maxToolCalls: 2},
  })
  assert.equal(result.status, 'not_run')
+ assert.equal(result.error, 'aborted')
  assert.equal(result.context, null)
+ assert.notEqual(result.status, 'ok')
+ assert.notEqual(result.status, 'timeout')
+})
+
+test('user Stop after start is aborted, not a deadline timeout', async () => {
+ const ac = new AbortController()
+ const pending = runCodeModeTurn({
+  script: 'await new Promise(() => {})',
+  registry: registry([]),
+  signal: ac.signal,
+  limits: {timeoutMs: 8000, memoryMb: 64, resultMaxBytes: 256, stdoutMaxBytes: 256, maxToolCalls: 2},
+ })
+ await delay(250)
+ ac.abort()
+ const result = await pending
+ assert.equal(result.status, 'aborted')
+ assert.equal(result.error, 'aborted')
+ assert.notEqual(result.status, 'timeout')
  assert.notEqual(result.status, 'ok')
 })
 
@@ -423,8 +444,29 @@ test('timeout covers a hanging script together with a stalled text stream', asyn
  })
  assert.ok(Date.now() - started < 4000)
  assert.equal(result.status, 'timeout')
+ assert.equal(result.error, 'deadline')
  assert.notEqual(result.status, 'ok')
  assert.equal(result.events.at(-1)?.type, 'final')
+})
+
+test('a return over 64 KiB truncates with a marker instead of failing', async () => {
+ const result = await runCodeModeTurn({
+  script: 'return "x".repeat(70000)',
+  registry: registry([]),
+  limits: {timeoutMs: 4000, memoryMb: 64, resultMaxBytes: 64 * 1024, stdoutMaxBytes: 256, maxToolCalls: 2},
+ })
+ assert.equal(result.status, 'ok')
+ assert.equal(result.truncated, true)
+ assert.notEqual(result.error, 'ipc_too_large')
+ assert.match(String(result.context), new RegExp(TRUNCATION_MARKER.replace(/[[\]]/g, '\\$&')))
+})
+
+test('host filesystem paths in isolate errors redact to runtime-relative names', () => {
+ const runtime = sandboxRuntimeDir()
+ const leaked = redactHostPaths(`Error: boom\n    at ${runtime}/tarx-computer-code-mode-sandbox.ts:9:1\n    at /home/alice/project/secret.ts:1:1`)
+ assert.match(leaked, /tarx-computer-code-mode-sandbox\.ts:9:1/)
+ assert.doesNotMatch(leaked, /\/home\/alice/)
+ assert.doesNotMatch(leaked, new RegExp(runtime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 })
 
 test('timeout kills the isolate process group including same-group descendants', async () => {
@@ -457,6 +499,53 @@ test('timeout kills the isolate process group including same-group descendants',
   assert.equal(alive(child.pid!), false)
   assert.equal(alive(grand), false)
  } finally {
+  await rm(dir, {recursive: true, force: true})
+ }
+})
+
+test('killing the worker process group reaps an in-loop sandbox child', async () => {
+ assert.equal(SANDBOX_CHILD_DETACHED, false)
+ assert.equal(typeof forkSandboxChild, 'function')
+ const dir = await mkdtemp(join(tmpdir(), 'tarx-code-mode-worker-pg-'))
+ const pidFile = join(dir, 'pids.json')
+ let workerPid = 0, childPid = 0
+ try {
+  const worker = spawn(process.execPath, [
+   '--experimental-strip-types',
+   '--input-type=module',
+   '-e',
+   `import {writeFileSync} from 'node:fs';
+    import {forkSandboxChild} from ${JSON.stringify(new URL('./tarx-computer-code-mode-sandbox.ts', import.meta.url).href)};
+    const child = forkSandboxChild(64);
+    if (!child.pid) throw Error('no child');
+    writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({worker: process.pid, child: child.pid}));
+    child.send({kind:'start', script:'await null; while (true) {}', tools:[], resultMaxBytes: 256});
+    setInterval(() => {}, 1000);`,
+  ], {cwd: sandboxRuntimeDir(), detached: true, stdio: 'ignore'})
+  assert.ok(worker.pid)
+  workerPid = worker.pid
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+   try {
+    const pids = JSON.parse(await readFile(pidFile, 'utf8')) as {worker?: number; child?: number}
+    if (Number.isInteger(pids.worker) && Number.isInteger(pids.child) && (pids.child as number) > 0) {
+     childPid = pids.child as number
+     break
+    }
+   } catch {}
+   await delay(20)
+  }
+  assert.ok(childPid > 0)
+  assert.equal(alive(workerPid), true)
+  assert.equal(alive(childPid), true)
+  process.kill(-workerPid, 'SIGKILL')
+  const stop = Date.now() + 2000
+  while (Date.now() < stop && (alive(workerPid) || alive(childPid))) await delay(20)
+  assert.equal(alive(workerPid), false)
+  assert.equal(alive(childPid), false)
+ } finally {
+  if (workerPid) try { process.kill(-workerPid, 'SIGKILL') } catch {}
+  if (childPid) try { process.kill(childPid, 'SIGKILL') } catch {}
   await rm(dir, {recursive: true, force: true})
  }
 })
