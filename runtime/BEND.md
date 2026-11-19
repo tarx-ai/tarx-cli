@@ -37,8 +37,8 @@ native `+RTS --help` / `IO.now` in Base:
   (`-DBEND_METAL=1`). On Linux it uses CUDA 12/13 when present.
 - Runtime: `--gpu on\|off\|4GB` (default: on if a GPU is present; Metal default
   heap is 2GB). `--threads N` is the CPU worker count.
-- Linux has **no Metal backend**. This VM therefore records Metal as
-  `pending: needs a Mac run` and does not invent Mac numbers.
+- Linux has **no Metal backend**. Mac numbers below are from T-QA on TARX
+  PRIME (Apple Silicon) at `ae608f5c`, not from this Linux VM.
 - Bend 2 **does** expose in-program time: `IO.now()` is a monotonic clock in
   milliseconds (rounds down). `parallel-sum.bend` wraps `parallel_sum!(d)` with
   it and prints `COMPUTE_MS`. Checksums hash only `RESULT <n>\n`, not the timer.
@@ -57,14 +57,34 @@ tree-sum is the majority of wall time.
 | Linux VM | cpu | 20 | 1048576 | 11 | 3.295 | 3.482 | 1 | 2 | `568232f612c20241046735fbd32629236842b4973390926f4dee62f7388e9252` | |
 | Linux VM | cpu | 24 | 16777216 | 11 | 21.989 | 25.133 | 19 | 23 | `c4a3c7abab305b73a0d9d36fb42fbbcb6eaaa6b7d186cc8f7237a7e67a99d928` | compute dominates |
 | Linux VM | cpu | 26 | 67108864 | 11 | 78.800 | 80.376 | 75 | 77 | `15ecd907eda4f6e2b52941bc5e9cda781132f685fc31c64dc8bbef0de318c760` | compute dominates |
-| Mac (Metal) | cpu | 16 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | cpu | 20 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | cpu | 24 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | cpu | 26 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | metal | 16 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | metal | 20 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | metal | 24 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | metal | 26 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| TARX PRIME | cpu | 16 | 65536 | 11 | — | — | — | — | `06e9491b0a84b12fa5fd361a88e994618101b96dcc1ee4443498187d89c30e5e` | checksum matches metal |
+| TARX PRIME | cpu | 20 | 1048576 | 11 | — | — | — | — | `568232f612c20241046735fbd32629236842b4973390926f4dee62f7388e9252` | checksum matches metal |
+| TARX PRIME | cpu | 24 | 16777216 | 11 | — | — | — | — | `c4a3c7abab305b73a0d9d36fb42fbbcb6eaaa6b7d186cc8f7237a7e67a99d928` | checksum matches metal |
+| TARX PRIME | cpu | 26 | 67108864 | 11 | — | — | 22 | — | `15ecd907eda4f6e2b52941bc5e9cda781132f685fc31c64dc8bbef0de318c760` | T-QA compute |
+| TARX PRIME | metal | 16 | 65536 | 11 | — | — | — | — | `06e9491b0a84b12fa5fd361a88e994618101b96dcc1ee4443498187d89c30e5e` | slower than cpu |
+| TARX PRIME | metal | 20 | 1048576 | 11 | — | — | — | — | `568232f612c20241046735fbd32629236842b4973390926f4dee62f7388e9252` | slower than cpu |
+| TARX PRIME | metal | 24 | 16777216 | 11 | — | — | — | — | `c4a3c7abab305b73a0d9d36fb42fbbcb6eaaa6b7d186cc8f7237a7e67a99d928` | slower than cpu |
+| TARX PRIME | metal | 26 | 67108864 | 11 | — | — | 77 | — | `15ecd907eda4f6e2b52941bc5e9cda781132f685fc31c64dc8bbef0de318c760` | T-QA compute; +55 ms vs cpu |
+
+## Mac Metal (TARX PRIME, T-QA)
+
+T-QA ran `SIZES='16 20 24 26'` on TARX PRIME (Apple Silicon) at `ae608f5c`.
+The private `tarx-ops` REPORT.md was not readable from this agent; rows use
+T-QA's summary plus the deterministic `RESULT` checksums (cpu and metal
+matched at every depth). Wall/p95 and the 16/20/24 compute medians were not
+in that summary, so those cells stay `—` rather than invented.
+
+- Metal was slower at every depth. Depth 26 `compute_ms`: **metal 77 vs cpu 22**.
+- GPU overhead was roughly flat at **~70–110 ms**.
+- **8B resident** on the GPU during the run.
+- Gateway health stayed **200**.
+
+**Conclusion:** Metal is not worth it at these sizes. The `!` tree-sum of ones
+does not amortize GPU launch. Next try depths **28/30** or a heavier per-leaf
+op.
+
+The Mac commands below remain the repro for anyone filling the `—` cells from
+the full JSON.
 
 ## Mac commands (John)
 
@@ -92,10 +112,9 @@ SIZES='16 20 24 26' N=11 ./bend/bench.sh
 #   --sizes 16,20,24,26 --n 11
 ```
 
-Paste the JSON into the table above. For each depth, `backends.cpu` and
-`backends.metal` should share the same `checksum` / `result`. A checksum
-mismatch is a real backend divergence, not a timing issue. Compare
-`median_compute_ms` (inside Bend) not `median_wall_ms` (includes spawn).
+T-QA already ran this on TARX PRIME. Re-run to fill wall/p95 cells. For each
+depth, `backends.cpu` and `backends.metal` should share the same `checksum` /
+`result`. Compare `median_compute_ms` (inside Bend) not `median_wall_ms`.
 
 One-shot run (not the N-sample bench):
 
