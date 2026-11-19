@@ -10,8 +10,10 @@ Enable with `TARX_BEND_JOBS=1`. Default is off.
 - Job kind: `bend`
 - Dispatcher: `runtime/tarx-bend-job.ts` (`createBendJobExecutor`) plus
   `daemon/src/adapters/bend-jobs.ts` for the existing coordinator `kind` field
-- Program: `runtime/bend/parallel-sum.bend` (parallel tree-sum, result `65536`)
-- Bench: `runtime/bend/bench.sh` (median / p95 wall time + SHA-256 of stdout)
+- Program: `runtime/bend/parallel-sum.bend` (parallel tree-sum of `2^d` ones;
+  `d` is argv log2 depth, default 16)
+- Bench: `runtime/bend/bench.sh` with `SIZES='16 20 24 26'` (median / p95 wall
+  and in-program `IO.now` time + SHA-256 of the `RESULT` line)
 
 The daemon launcher (`tarxd`) is unchanged: it still does not install a default
 executor. Tests inject the adapter into `createCoordinator`, which is how job
@@ -24,11 +26,11 @@ calls, not a `bend --backend metal` switch.
 
 | TARX backend | Bend 2 mapping |
 | --- | --- |
-| `cpu` | compile `bend file.bend -o program`, run `./program +RTS --gpu off` |
-| `metal` | same compile; run `./program +RTS --gpu on` (macOS Metal only) |
+| `cpu` | compile `bend file.bend -o program`, run `./program +RTS --gpu off -RTS D` |
+| `metal` | same compile; run `./program +RTS --gpu on -RTS D` (macOS Metal only) |
 
 Facts from [Bend 2 README](https://github.com/bendlang/bend) / `bend guide` /
-native `+RTS --help`:
+native `+RTS --help` / `IO.now` in Base:
 
 - Targets are C, **Metal**, CUDA, and JavaScript.
 - `!` is the GPU/parallel call. On macOS the native build uses Metal
@@ -37,25 +39,32 @@ native `+RTS --help`:
   heap is 2GB). `--threads N` is the CPU worker count.
 - Linux has **no Metal backend**. This VM therefore records Metal as
   `pending: needs a Mac run` and does not invent Mac numbers.
+- Bend 2 **does** expose in-program time: `IO.now()` is a monotonic clock in
+  milliseconds (rounds down). `parallel-sum.bend` wraps `parallel_sum!(d)` with
+  it and prints `COMPUTE_MS`. Checksums hash only `RESULT <n>\n`, not the timer.
 
 ## Local CPU timings (Linux VM)
 
-Host: Linux x86_64, 4 cores, no CUDA / no Metal. Bend 2.0.40. Native compile
-warns `no CUDA toolkit … so ! runs on the CPU`, then the binary is run with
-`+RTS --gpu off`.
+Host: Linux x86_64, 4 cores, Bend 2.0.40, clang 18, no CUDA. Compile once
+(`compile_ms=817`), then 11 runs per depth of `./program +RTS --gpu off -RTS D`.
+`wall_ms` is process start plus run (`performance.now`). `compute_ms` is
+`IO.now` around the `!` call. At depth 16 spawn still dominates; at 24+ the
+tree-sum is the majority of wall time.
 
-Linux x86_64, 4 cores, Bend 2.0.40, clang 18, no CUDA. Compile once, then
-11 runs of `./program +RTS --gpu off`. Wall time is process start + run
-(`performance.now`); the tree-sum itself is smaller than spawn.
-
-| Host | Backend | N | median wall ms | p95 wall ms | checksum | notes |
-| --- | --- | ---: | ---: | ---: | --- | --- |
-| Linux VM | cpu | 11 | 2.284 | 3.096 | `0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32` | real; compile 571 ms; `+RTS --gpu off` |
-| Mac (Metal) | cpu | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-| Mac (Metal) | metal | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
-
-Checksum of the deterministic stdout `65536\n` is
-`0f3633c0ecb81f7639c3fe70873b438e74fb8960c68f7c39e6a8eac795e70a32`.
+| Host | Backend | depth | result | N | median wall ms | p95 wall ms | median compute ms | p95 compute ms | checksum of `RESULT n\\n` | notes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Linux VM | cpu | 16 | 65536 | 11 | 2.425 | 2.637 | 0 | 1 | `06e9491b0a84b12fa5fd361a88e994618101b96dcc1ee4443498187d89c30e5e` | spawn-dominated |
+| Linux VM | cpu | 20 | 1048576 | 11 | 3.295 | 3.482 | 1 | 2 | `568232f612c20241046735fbd32629236842b4973390926f4dee62f7388e9252` | |
+| Linux VM | cpu | 24 | 16777216 | 11 | 21.989 | 25.133 | 19 | 23 | `c4a3c7abab305b73a0d9d36fb42fbbcb6eaaa6b7d186cc8f7237a7e67a99d928` | compute dominates |
+| Linux VM | cpu | 26 | 67108864 | 11 | 78.800 | 80.376 | 75 | 77 | `15ecd907eda4f6e2b52941bc5e9cda781132f685fc31c64dc8bbef0de318c760` | compute dominates |
+| Mac (Metal) | cpu | 16 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | cpu | 20 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | cpu | 24 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | cpu | 26 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | metal | 16 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | metal | 20 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | metal | 24 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
+| Mac (Metal) | metal | 26 | pending: needs a Mac run | 11 | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | pending: needs a Mac run | |
 
 ## Mac commands (John)
 
@@ -76,24 +85,26 @@ npm ci --ignore-scripts --omit=dev --no-audit --no-fund
 export TARX_BEND_JOBS=1
 export BEND_NO_TELEMETRY=1
 chmod +x bend/bench.sh
-./bend/bench.sh
+SIZES='16 20 24 26' N=11 ./bend/bench.sh
 # equivalent:
 # node --experimental-strip-types tarx-bend-job.ts bench \
-#   --program "$PWD/bend/parallel-sum.bend" --backends cpu,metal --n 11
+#   --program "$PWD/bend/parallel-sum.bend" --backends cpu,metal \
+#   --sizes 16,20,24,26 --n 11
 ```
 
-Paste the JSON into the table above. `backends.cpu` and `backends.metal` should
-share the same `checksum`. A checksum mismatch is a real backend divergence,
-not a timing issue.
+Paste the JSON into the table above. For each depth, `backends.cpu` and
+`backends.metal` should share the same `checksum` / `result`. A checksum
+mismatch is a real backend divergence, not a timing issue. Compare
+`median_compute_ms` (inside Bend) not `median_wall_ms` (includes spawn).
 
 One-shot run (not the N-sample bench):
 
 ```sh
 export TARX_BEND_JOBS=1 BEND_NO_TELEMETRY=1
 node --experimental-strip-types tarx-bend-job.ts run \
-  --program "$PWD/bend/parallel-sum.bend" --backend cpu
+  --program "$PWD/bend/parallel-sum.bend" --backend cpu --depth 26
 node --experimental-strip-types tarx-bend-job.ts run \
-  --program "$PWD/bend/parallel-sum.bend" --backend metal
+  --program "$PWD/bend/parallel-sum.bend" --backend metal --depth 26
 ```
 
 Without `TARX_BEND_JOBS=1` both commands return `bend_jobs_disabled`.
@@ -118,4 +129,5 @@ Unit coverage (mocked `bend` binary, no network):
 - missing binary → `bend_binary_missing`
 - timeout → process killed (`bend_timeout`)
 - stdout captured + SHA-256 checksum
+- `RESULT` checksum ignores `COMPUTE_MS`
 - coordinator: disabled job fails closed; enabled job completes

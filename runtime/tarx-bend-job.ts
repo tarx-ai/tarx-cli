@@ -22,11 +22,15 @@ export const BEND_JOBS_FLAG = 'TARX_BEND_JOBS'
 export const BEND_BACKENDS = ['cpu', 'metal'] as const
 export type BendBackend = (typeof BEND_BACKENDS)[number]
 
+export const MAX_DEPTH = 30
+export const DEFAULT_SIZES = [16, 20, 24, 26] as const
+
 export type BendJobRequest = {
   program: string
   backend: BendBackend
   timeout_ms?: number
   threads?: number
+  depth?: number
 }
 
 export type BendSpawnResult = {
@@ -49,6 +53,8 @@ export type BendJobResult = {
   exit_code: number | null
   signal: string | null
   wall_time_ms: number
+  compute_ms: number | null
+  result: string | null
   checksum: string | null
   killed: boolean
   pid: number | null
@@ -103,7 +109,7 @@ export function parseBendJobRequest(value: unknown): {ok: true; request: BendJob
     return {ok: false, error: 'bend_invalid_request', detail: 'request must be an object'}
   }
   const body = value as Record<string, unknown>
-  const extra = Object.keys(body).filter((key) => !['program', 'backend', 'timeout_ms', 'threads'].includes(key))
+  const extra = Object.keys(body).filter((key) => !['program', 'backend', 'timeout_ms', 'threads', 'depth'].includes(key))
   if (extra.length) return {ok: false, error: 'bend_invalid_request', detail: `unknown fields: ${extra.join(',')}`}
   if (typeof body.program !== 'string' || !body.program || body.program.includes('\0')) {
     return {ok: false, error: 'bend_invalid_request', detail: 'program must be a non-empty path'}
@@ -125,7 +131,14 @@ export function parseBendJobRequest(value: unknown): {ok: true; request: BendJob
     }
     threads = body.threads
   }
-  return {ok: true, request: {program: body.program, backend: body.backend, timeout_ms, threads}}
+  let depth: number | undefined
+  if (body.depth !== undefined) {
+    if (typeof body.depth !== 'number' || !Number.isInteger(body.depth) || body.depth < 0 || body.depth > MAX_DEPTH) {
+      return {ok: false, error: 'bend_invalid_request', detail: `depth must be 0..${MAX_DEPTH} (log2 size)`}
+    }
+    depth = body.depth
+  }
+  return {ok: true, request: {program: body.program, backend: body.backend, timeout_ms, threads, depth}}
 }
 
 function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -147,6 +160,8 @@ function fail(partial: Partial<BendJobResult> & {error: string; detail?: string}
     exit_code: partial.exit_code ?? null,
     signal: partial.signal ?? null,
     wall_time_ms: partial.wall_time_ms ?? 0,
+    compute_ms: partial.compute_ms ?? null,
+    result: partial.result ?? null,
     checksum: null,
     killed: partial.killed ?? false,
     pid: partial.pid ?? null,
@@ -157,6 +172,15 @@ function fail(partial: Partial<BendJobResult> & {error: string; detail?: string}
 
 function checksum(text: string): string {
   return createHash('sha256').update(text).digest('hex')
+}
+
+/** RESULT line is the deterministic payload; COMPUTE_MS is IO.now() around `!`. */
+export function parseProgramOutput(stdout: string): {result: string | null; compute_ms: number | null; checksum: string} {
+  const resultMatch = stdout.match(/^RESULT (\d+)\s*$/m)
+  const computeMatch = stdout.match(/^COMPUTE_MS (\d+)\s*$/m)
+  const result = resultMatch?.[1] ?? null
+  const compute_ms = computeMatch && Number.isInteger(Number(computeMatch[1])) ? Number(computeMatch[1]) : null
+  return {result, compute_ms, checksum: checksum(result !== null ? `RESULT ${result}\n` : stdout)}
 }
 
 function killTree(child: ChildProcess): void {
@@ -259,9 +283,10 @@ async function resolveBendBin(env: NodeJS.ProcessEnv, explicit?: string): Promis
   return {ok: false, detail: `bend binary not found on PATH: ${named}`}
 }
 
-function runtimeArgs(backend: BendBackend, threads?: number): string[] {
+function runtimeArgs(backend: BendBackend, threads?: number, depth?: number): string[] {
   const args = ['+RTS', '--gpu', backend === 'metal' ? 'on' : 'off']
   if (threads !== undefined) args.push('--threads', String(threads))
+  if (depth !== undefined) args.push('-RTS', String(depth))
   return args
 }
 
@@ -316,7 +341,7 @@ function fromSpawn(backend: BendBackend, compile: BendSpawnResult, run: BendSpaw
     exit_code: 0,
     signal: null,
     wall_time_ms: run.wall_time_ms,
-    checksum: checksum(run.stdout),
+    ...parseProgramOutput(run.stdout),
     killed: false,
     pid: run.pid,
   }
@@ -379,7 +404,7 @@ export async function runBendJob(raw: unknown, options: BendJobOptions = {}): Pr
     const compiled = await compileBend({bendBin: bin.path, program: program.path, binary, timeoutMs, env, signal: options.signal, spawn: spawner})
     if (!compiled.ok) return {...compiled.result, backend: request.backend}
     const remaining = Math.max(1, timeoutMs - compiled.result.wall_time_ms)
-    const run = await spawner(binary, runtimeArgs(request.backend, request.threads), {
+    const run = await spawner(binary, runtimeArgs(request.backend, request.threads, request.depth), {
       cwd: work,
       env: childEnv(env),
       timeoutMs: remaining,
@@ -418,58 +443,84 @@ export function median(values: readonly number[]): number {
   return (sorted[mid - 1]! + sorted[mid]!) / 2
 }
 
+export type BendBenchBackend = {
+  status: 'ok' | 'pending: needs a Mac run' | 'failed'
+  median_wall_ms?: number
+  p95_wall_ms?: number
+  median_compute_ms?: number | null
+  p95_compute_ms?: number | null
+  checksum?: string | null
+  result?: string | null
+  error?: string
+  detail?: string
+  wall_runs?: number[]
+  compute_runs?: Array<number | null>
+}
+
 export type BendBenchReport = {
   program: string
   n: number
   host: {platform: NodeJS.Platform; arch: string}
   compile_ms: number | null
-  backends: Record<string, {
-    status: 'ok' | 'pending: needs a Mac run' | 'failed'
-    median_ms?: number
-    p95_ms?: number
-    checksum?: string | null
-    error?: string
-    detail?: string
-    runs?: number[]
-  }>
+  timing: string
+  sizes: Record<string, {depth: number; backends: Record<string, BendBenchBackend>}>
+}
+
+const TIMING_NOTE = 'compute_ms is Bend IO.now() around the ! call (monotonic milliseconds, rounded down). wall_ms is process start plus run.'
+
+function pendingMetal(): BendBenchBackend {
+  return {status: 'pending: needs a Mac run', detail: 'Bend 2 Metal cannot run on Linux'}
+}
+
+function numbers(values: Array<number | null>): number[] {
+  return values.filter((value): value is number => typeof value === 'number')
 }
 
 export async function benchBendJob(input: {
   program: string
   backends: BendBackend[]
   n: number
+  sizes?: readonly number[]
   options?: BendJobOptions
 }): Promise<BendBenchReport> {
   const options = input.options ?? {}
   const env = options.env ?? process.env
   const platform = options.platform ?? process.platform
   const spawner = options.spawn ?? spawnBendProcess
+  const sizes = [...(input.sizes ?? DEFAULT_SIZES)]
   const report: BendBenchReport = {
     program: input.program,
     n: input.n,
     host: {platform, arch: process.arch},
     compile_ms: null,
-    backends: {},
+    timing: TIMING_NOTE,
+    sizes: {},
+  }
+  for (const depth of sizes) {
+    report.sizes[String(depth)] = {depth, backends: {}}
+    for (const backend of input.backends) {
+      if (backend === 'metal' && platform !== 'darwin') report.sizes[String(depth)].backends.metal = pendingMetal()
+    }
   }
   const runnable = input.backends.filter((backend) => !(backend === 'metal' && platform !== 'darwin'))
-  for (const backend of input.backends) {
-    if (backend === 'metal' && platform !== 'darwin') {
-      report.backends.metal = {status: 'pending: needs a Mac run', detail: 'Bend 2 Metal cannot run on Linux'}
+  const failAll = (error: string, detail?: string) => {
+    for (const depth of sizes) {
+      for (const backend of runnable) report.sizes[String(depth)].backends[backend] = {status: 'failed', error, detail}
     }
   }
   if (!runnable.length) return report
   if (!bendJobsEnabled(env)) {
-    for (const backend of runnable) report.backends[backend] = {status: 'failed', error: 'bend_jobs_disabled', detail: 'set TARX_BEND_JOBS=1 to enable Bend jobs'}
+    failAll('bend_jobs_disabled', 'set TARX_BEND_JOBS=1 to enable Bend jobs')
     return report
   }
   const bin = await resolveBendBin(env, options.bendBin)
   if (!bin.ok) {
-    for (const backend of runnable) report.backends[backend] = {status: 'failed', error: 'bend_binary_missing', detail: bin.detail}
+    failAll('bend_binary_missing', bin.detail)
     return report
   }
   const program = await resolveProgram(input.program)
   if (!program.ok) {
-    for (const backend of runnable) report.backends[backend] = {status: 'failed', error: 'bend_invalid_request', detail: program.detail}
+    failAll('bend_invalid_request', program.detail)
     return report
   }
   const work = options.workDir ?? await mkdtemp(join(tmpdir(), 'tarx-bend-bench-'))
@@ -486,36 +537,47 @@ export async function benchBendJob(input: {
       spawn: spawner,
     })
     if (!compiled.ok) {
-      for (const backend of runnable) report.backends[backend] = {status: 'failed', error: compiled.result.error, detail: compiled.result.detail}
+      failAll(compiled.result.error ?? 'bend_compile_failed', compiled.result.detail)
       return report
     }
     report.compile_ms = compiled.result.wall_time_ms
-    for (const backend of runnable) {
-      const runs: number[] = []
-      let checksumValue: string | null = null
-      let failed: BendJobResult | undefined
-      for (let i = 0; i < input.n; i++) {
-        const run = await spawner(binary, runtimeArgs(backend), {
-          cwd: work,
-          env: childEnv(env),
-          timeoutMs: DEFAULT_TIMEOUT_MS,
-          signal: options.signal,
-        })
-        const result = fromSpawn(backend, compiled.result, run)
-        if (!result.ok) { failed = result; break }
-        runs.push(result.wall_time_ms)
-        checksumValue = result.checksum
-      }
-      if (failed) {
-        report.backends[backend] = {status: 'failed', error: failed.error, detail: failed.detail, runs}
-        continue
-      }
-      report.backends[backend] = {
-        status: 'ok',
-        median_ms: median(runs),
-        p95_ms: percentile(runs, 95),
-        checksum: checksumValue,
-        runs,
+    for (const depth of sizes) {
+      for (const backend of runnable) {
+        const wall: number[] = []
+        const compute: Array<number | null> = []
+        let checksumValue: string | null = null
+        let resultValue: string | null = null
+        let failed: BendJobResult | undefined
+        for (let i = 0; i < input.n; i++) {
+          const run = await spawner(binary, runtimeArgs(backend, undefined, depth), {
+            cwd: work,
+            env: childEnv(env),
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+            signal: options.signal,
+          })
+          const result = fromSpawn(backend, compiled.result, run)
+          if (!result.ok) { failed = result; break }
+          wall.push(result.wall_time_ms)
+          compute.push(result.compute_ms)
+          checksumValue = result.checksum
+          resultValue = result.result
+        }
+        if (failed) {
+          report.sizes[String(depth)].backends[backend] = {status: 'failed', error: failed.error, detail: failed.detail, wall_runs: wall, compute_runs: compute}
+          continue
+        }
+        const computeOk = numbers(compute)
+        report.sizes[String(depth)].backends[backend] = {
+          status: 'ok',
+          median_wall_ms: median(wall),
+          p95_wall_ms: percentile(wall, 95),
+          median_compute_ms: computeOk.length ? median(computeOk) : null,
+          p95_compute_ms: computeOk.length ? percentile(computeOk, 95) : null,
+          checksum: checksumValue,
+          result: resultValue,
+          wall_runs: wall,
+          compute_runs: compute,
+        }
       }
     }
     return report
@@ -541,7 +603,7 @@ export async function runBendJobCli(argv: string[], options: BendJobOptions = {}
   if (command === 'help' || command === '--help') {
     return {
       ok: true,
-      usage: 'tarx-bend-job run|bench --program FILE [--backend cpu|metal] [--backends cpu,metal] [--n N]',
+      usage: 'tarx-bend-job run|bench --program FILE [--backend cpu|metal] [--backends cpu,metal] [--depth D] [--sizes 16,20,24,26] [--n N]',
       flag: `${BEND_JOBS_FLAG}=1`,
       kind: BEND_JOB_KIND,
     }
@@ -549,7 +611,13 @@ export async function runBendJobCli(argv: string[], options: BendJobOptions = {}
   const program = flags.program
   if (!program) return {ok: false, error: 'bend_invalid_request', detail: '--program is required'}
   if (command === 'run') {
-    const result = await runBendJob({program, backend: flags.backend ?? 'cpu', timeout_ms: flags.timeout_ms ? Number(flags.timeout_ms) : undefined, threads: flags.threads ? Number(flags.threads) : undefined}, options)
+    const result = await runBendJob({
+      program,
+      backend: flags.backend ?? 'cpu',
+      timeout_ms: flags.timeout_ms ? Number(flags.timeout_ms) : undefined,
+      threads: flags.threads ? Number(flags.threads) : undefined,
+      depth: flags.depth !== undefined ? Number(flags.depth) : undefined,
+    }, options)
     return result
   }
   if (command === 'bench') {
@@ -557,7 +625,11 @@ export async function runBendJobCli(argv: string[], options: BendJobOptions = {}
     if (!Number.isInteger(n) || n < 1 || n > 100) return {ok: false, error: 'bend_invalid_request', detail: '--n must be 1..100'}
     const backends = (flags.backends ?? flags.backend ?? 'cpu,metal').split(',').filter(Boolean) as BendBackend[]
     if (backends.some((backend) => backend !== 'cpu' && backend !== 'metal')) return {ok: false, error: 'bend_invalid_request', detail: 'backends must be cpu and/or metal'}
-    return {ok: true, ...(await benchBendJob({program, backends, n, options}))}
+    const sizes = (flags.sizes ?? DEFAULT_SIZES.join(',')).split(',').map((value) => Number(value.trim()))
+    if (!sizes.length || sizes.some((depth) => !Number.isInteger(depth) || depth < 0 || depth > MAX_DEPTH)) {
+      return {ok: false, error: 'bend_invalid_request', detail: `--sizes must be integers 0..${MAX_DEPTH}`}
+    }
+    return {ok: true, ...(await benchBendJob({program, backends, n, sizes, options}))}
   }
   return {ok: false, error: 'bend_invalid_request', detail: `unknown command: ${command}`}
 }

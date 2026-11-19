@@ -11,6 +11,7 @@ import {
   createBendJobExecutor,
   median,
   parseBendJobRequest,
+  parseProgramOutput,
   percentile,
   runBendJob,
   runBendJobCli,
@@ -75,9 +76,11 @@ async function fixture() {
 }
 
 test('parseBendJobRequest accepts cpu/metal and rejects extra fields', () => {
-  assert.deepEqual(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cpu'}), {ok: true, request: {program: '/tmp/x.bend', backend: 'cpu', timeout_ms: undefined, threads: undefined}})
+  assert.deepEqual(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cpu'}), {ok: true, request: {program: '/tmp/x.bend', backend: 'cpu', timeout_ms: undefined, threads: undefined, depth: undefined}})
+  assert.deepEqual(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cpu', depth: 24}), {ok: true, request: {program: '/tmp/x.bend', backend: 'cpu', timeout_ms: undefined, threads: undefined, depth: 24}})
   assert.equal(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cuda'}).ok, false)
   assert.equal(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cpu', extra: 1}).ok, false)
+  assert.equal(parseBendJobRequest({program: '/tmp/x.bend', backend: 'cpu', depth: 99}).ok, false)
 })
 
 test('flag off refuses a bend job without spawning', async () => {
@@ -159,13 +162,25 @@ test('job executor refuses unknown kinds and disabled bend jobs', async () => {
 
 test('bench skips Metal on Linux and reports median/p95 for CPU', async () => {
   const f = await fixture()
-  const report = await benchBendJob({program: f.program, backends: ['cpu', 'metal'], n: 3, options: {env: f.env, bendBin: f.bend, platform: 'linux'}})
-  assert.equal(report.backends.cpu?.status, 'ok')
-  assert.equal(report.backends.cpu?.checksum, EXPECTED_CHECKSUM)
-  assert.equal(report.backends.cpu?.runs?.length, 3)
-  assert.equal(typeof report.backends.cpu?.median_ms, 'number')
-  assert.equal(typeof report.backends.cpu?.p95_ms, 'number')
-  assert.equal(report.backends.metal?.status, 'pending: needs a Mac run')
+  const report = await benchBendJob({program: f.program, backends: ['cpu', 'metal'], n: 3, sizes: [16], options: {env: f.env, bendBin: f.bend, platform: 'linux'}})
+  const cpu = report.sizes['16']?.backends.cpu
+  assert.equal(cpu?.status, 'ok')
+  assert.equal(cpu?.checksum, EXPECTED_CHECKSUM)
+  assert.equal(cpu?.wall_runs?.length, 3)
+  assert.equal(typeof cpu?.median_wall_ms, 'number')
+  assert.equal(typeof cpu?.p95_wall_ms, 'number')
+  assert.equal(report.sizes['16']?.backends.metal?.status, 'pending: needs a Mac run')
+})
+
+test('checksum uses RESULT and ignores COMPUTE_MS', () => {
+  const parsed = parseProgramOutput('RESULT 65536\nCOMPUTE_MS 99\n')
+  assert.equal(parsed.result, '65536')
+  assert.equal(parsed.compute_ms, 99)
+  assert.equal(parsed.checksum, createHash('sha256').update('RESULT 65536\n').digest('hex'))
+  const mock = parseProgramOutput('65536\n')
+  assert.equal(mock.result, null)
+  assert.equal(mock.compute_ms, null)
+  assert.equal(mock.checksum, EXPECTED_CHECKSUM)
 })
 
 test('percentile helpers match the bench contract', () => {
