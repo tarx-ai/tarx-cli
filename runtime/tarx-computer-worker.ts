@@ -5,6 +5,7 @@ import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient,createSupercomputerPlannerClient} from './tarx-computer-planner.ts'
+import {createComputerCodeModeRegistry,isCodeModeEnabled,runLocalCodeModeLoop} from './tarx-computer-code-mode.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean;accountToken?:string}
 let started=false,serial=0
 let phase='artifacts'
@@ -67,7 +68,7 @@ async function run(job:Job) {
   // interrupted planner's total generations. Do not turn unknown into zero.
   return {outcome:passed?'done':'unverified',independent_verified:passed,native_actions:0,model_calls:scope.mode==='deterministic_actuator'?0:null,core_source:artifacts.coreSource,execution_mode:scope.mode}
  }
- const localClient=scope.mode==='local_model'?createLoopbackPlannerClient(scope.model!):scope.mode==='supercomputer'?createSupercomputerPlannerClient({token:job.accountToken!}):undefined
+ const localClient=scope.mode==='local_model'?createLoopbackPlannerClient({...scope.model!,...(isCodeModeEnabled()?{tokenLimit:1024 as const}:{})}):scope.mode==='supercomputer'?createSupercomputerPlannerClient({token:job.accountToken!}):undefined
  // The per-run credential remains only in the transport closure while needed.
  delete job.accountToken
  if(localClient&&!await localClient.ready())return {outcome:'error',independent_verified:false,native_actions:0,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,planner_status:'unavailable'}
@@ -116,7 +117,7 @@ async function run(job:Job) {
    return client.complete(messages,opts)
   }}
   const {renderObservation}=await load('observe.js')
-  const model=createScopedComputerPlanner(authorizedClient,scope.actions,scope.mode==='supercomputer'?undefined:job.request.context,()=>modelCalls++,()=>{
+  const readObservation=()=>{
    if(!latest)return null
    const rendered=renderObservation(latest),nodes=indexRefs(latest.tree)
    // Use the same checked renderer and snapshot as the core loop. Its menu
@@ -124,13 +125,59 @@ async function run(job:Job) {
    const text=(latestSurface==='menu'?'(a menu is open; only its items are shown. press escape to close it)\n':'')+rendered.text
    const controls=[...rendered.handles].map(([handle,ref])=>{
     const node=nodes.get(ref)
-    return {handle,role:node?.role??'',name:node?.name??''}
+    return {handle,ref,role:node?.role??'',name:node?.name??''}
    })
    return {text,controls}
+  }
+  if(isCodeModeEnabled()&&scope.mode==='local_model'){
+   // Experimental local-only script runner. Supercomputer stays on the
+   // per-call planner. Flag off keeps runTask as the default path.
+   await ad.snapshot(scope.app,{maxDepth:30})
+   const eligible=()=>{
+    const bound=readObservation()
+    return (bound?.controls??[]).filter(c=>scope.actions.some(a=>a.command==='click'&&a.role===c.role&&a.name===c.name))
+   }
+   const observationText=()=>eligible().map(c=>`[${c.handle}] ${c.role} ${JSON.stringify(c.name)}`).join('\n')
+   const registry=createComputerCodeModeRegistry({
+    async click(handle){
+     if(!latest)await ad.snapshot(scope.app,{maxDepth:30})
+     const control=eligible().find(c=>c.handle===handle)
+     if(!control)return {status:'denied',exit_code:null,stdout:'',stderr:'invalid_handle'}
+     const plan=buildActionArgv({command:'click',ref:control.ref},latest,scope.app)
+     if(!plan.ok||plan.risk.level==='high'&&!await approve({app:scope.app,action:{command:'click',ref:control.ref},risk:plan.risk,targetRole:plan.node?.role,targetName:plan.node?.name})){
+      return {status:'denied',exit_code:null,stdout:'',stderr:'native_policy_denied'}
+     }
+     await ad.act(plan.argv)
+     return {status:'ok',exit_code:null,stdout:JSON.stringify({handle,role:control.role,name:control.name}),stderr:''}
+    },
+    async observe(){
+     await ad.snapshot(scope.app,{maxDepth:30})
+     return {status:'ok',exit_code:null,stdout:JSON.stringify({controls:eligible().map(({handle,role,name})=>({handle,role,name}))}),stderr:''}
+    },
+   })
+   const loop=await runLocalCodeModeLoop({
+    client:authorizedClient,
+    registry,
+    goal:job.request.goal,
+    context:job.request.context,
+    observation:observationText(),
+    maxRounds:Math.min(job.maxSteps,8),
+    deliveredActions:()=>actions,
+    onGeneration:()=>modelCalls++,
+   })
+   plannerStatus=loop.decisionStatus
+   const passed=(await verifyAll(ad,scope.app,scope.success)).passed
+   done=loop.outcome==='done'&&passed&&actions>0
+  }else{
+  const model=createScopedComputerPlanner(authorizedClient,scope.actions,scope.mode==='supercomputer'?undefined:job.request.context,()=>modelCalls++,()=>{
+   const bound=readObservation()
+   if(!bound)return null
+   return {text:bound.text,controls:bound.controls.map(({handle,role,name})=>({handle,role,name}))}
   },()=>actions)
   const result=await runTask(ad,model,{app:scope.app,goal:job.request.goal,maxSteps:job.maxSteps,success:scope.success},{approve})
   plannerStatus=model.decisionStatus
   done=result.outcome==='done'&&result.finalCheck?.passed===true&&actions>0
+  }
  }
  await ad.guard()
  return {outcome:done?'done':'unverified',independent_verified:done,native_actions:actions,model_calls:modelCalls,core_source:artifacts.coreSource,execution_mode:scope.mode,...(plannerStatus?{planner_status:plannerStatus}:{})}

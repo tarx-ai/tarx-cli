@@ -159,3 +159,4 @@ export function createScopedComputerPlanner(client:Client,actions:Action[],conte
 
 // Explicit separate native-host route. The loopback-only factory remains strict.
 export {createSupercomputerPlannerClient} from './tarx-supercomputer-planner.ts'
+export {CODE_MODE_ENV,isCodeModeEnabled} from './tarx-computer-code-mode.ts'
