@@ -9,6 +9,7 @@ import {isAbsolute,join,dirname} from 'node:path'
 import {tmpdir} from 'node:os'
 import {promisify} from 'node:util'
 import type {ComputerExecutor,ComputerOutcome,ComputerRequest,ComputerRun,ComputerSession} from './tarx-computer-task.ts'
+import {codeModeWorkerEnv} from './tarx-computer-code-mode.ts'
 
 export type CheckedFile={path:string;sha256:string}
 export type ComputerArtifacts={coreSource:string;coreDirectory:string;files:Record<string,string>;node:CheckedFile;adapter:CheckedFile;cursor?:CheckedFile}
@@ -142,7 +143,7 @@ export async function resolveNativeAccountAccess(input:{subject_id:string;loadCr
  }catch{return null}
 }
 export type NativeAccountAccess=(run:Omit<ComputerRun,'request'>)=>Promise<VerifiedAccountAccess|null>
-export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void}):ComputerExecutor {
+export function createNativeComputerExecutor(input:{resolveAccountAccess?:NativeAccountAccess;artifacts:ComputerArtifacts;resolveScope:(session:ComputerSession,request?:ComputerRequest)=>Promise<NativeScope|null>;onCursorState?:(rendered:boolean)=>void;onOutcome?:(outcome:ComputerOutcome)=>void;codeModeEnv?:NodeJS.ProcessEnv}):ComputerExecutor {
  const artifacts=structuredClone(input.artifacts)
  async function launch(observe:boolean,{request,session,signal,stillAuthorized}:ComputerRun):Promise<ComputerOutcome> {
    if(signal.aborted||!await stillAuthorized())throw Error('computer_cancelled')
@@ -171,7 +172,7 @@ export function createNativeComputerExecutor(input:{resolveAccountAccess?:Native
    try {
     return await new Promise<ComputerOutcome>((resolve,reject)=>{
      const child=fork(new URL('./tarx-computer-worker.ts',import.meta.url),[],{execPath:artifacts.node.path,execArgv:['--experimental-strip-types'],detached:true,
-      cwd:home,env:workerEnv(home,artifacts),stdio:['ignore','ignore','ignore','ipc']})
+      cwd:home,env:{...workerEnv(home,artifacts),...codeModeWorkerEnv(input.codeModeEnv??process.env)},stdio:['ignore','ignore','ignore','ipc']})
      let result:ComputerOutcome|undefined,failure:Error|undefined,failed=false,finished=false,stopping=false,checks=0
      let killTimer:ReturnType<typeof setTimeout>|undefined
      const kill=(signal:NodeJS.Signals)=>{if(child.pid)try{process.kill(-child.pid,signal)}catch(e:any){if(e.code!=='ESRCH')failed=true}}
