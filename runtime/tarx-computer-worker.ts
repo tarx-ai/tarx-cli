@@ -5,7 +5,7 @@ import {join} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {verifyComputerArtifacts,validateNativeScope,approvedNativeScopedClick,type ComputerArtifacts,type NativeScope} from './tarx-computer-executor.ts'
 import {createScopedComputerPlanner,scopeNativeObservation,createLoopbackPlannerClient,createSupercomputerPlannerClient} from './tarx-computer-planner.ts'
-import {createComputerCodeModeRegistry,isCodeModeEnabled,runLocalCodeModeLoop} from './tarx-computer-code-mode.ts'
+import {createComputerCodeModeRegistry,isCodeModeEnabled,runLocalCodeModeLoop,shouldUseCodeMode} from './tarx-computer-code-mode.ts'
 type Job={artifacts:ComputerArtifacts;scope:NativeScope;request:{goal:string;context?:string};maxSteps:number;observe?:boolean;accountToken?:string}
 let started=false,serial=0
 let phase='artifacts'
@@ -129,7 +129,7 @@ async function run(job:Job) {
    })
    return {text,controls}
   }
-  if(isCodeModeEnabled()&&scope.mode==='local_model'){
+  if(shouldUseCodeMode(scope.mode)){
    // Experimental local-only script runner. Supercomputer stays on the
    // per-call planner. Flag off keeps runTask as the default path.
    await ad.snapshot(scope.app,{maxDepth:30})

@@ -1,14 +1,16 @@
 /** Isolated Code Mode script runner. Model-written JavaScript runs in a forked
- * process with a vm context that exposes only allowlisted `tools` bindings.
+ * process with a fresh vm realm that exposes only allowlisted `tools`.
  *
- * This is not a hostile-kernel sandbox. It is a local isolation boundary:
- * no inherited secrets, no network primitives, no require/import, timeouts,
- * memory and output caps. Tool implementations run in the parent and may use
- * network only when that specific tool is registered as allowed to.
+ * Host-realm objects are never installed on the context. Tool functions are
+ * created inside the realm and talk to the parent through JSON-only jobs.
+ * The child is launched with V8 string-code generation disabled and Node's
+ * permission model (runtime-dir reads only; no child_process, worker, net, or
+ * fs-write). Timeout and oversized IPC kill the whole process group.
  *
  * Script text and tool output stay on this device. Nothing here opens a
  * remote socket, writes telemetry, or logs payload contents. */
 import {fork,type ChildProcess} from 'node:child_process'
+import {dirname} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import vm from 'node:vm'
 
@@ -67,6 +69,7 @@ export type SandboxOutcome = {
 
 const SANDBOX_ROLE = 'sandbox'
 const MAX_IPC_BYTES = 64 * 1024
+const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 
 export function capText(text: string, maxBytes: number): {text: string; truncated: boolean} {
  const value = typeof text === 'string' ? text : ''
@@ -129,7 +132,6 @@ function ipcSize(value: unknown): number {
 }
 
 function sandboxEnv(): NodeJS.ProcessEnv {
- // Explicit allowlist only. Do not inherit API keys, tokens, or proxy settings.
  return {
   TARX_CODE_MODE_ROLE: SANDBOX_ROLE,
   LANG: 'en_US.UTF-8',
@@ -137,6 +139,42 @@ function sandboxEnv(): NodeJS.ProcessEnv {
   HOME: '/tmp',
   TMPDIR: '/tmp',
  }
+}
+
+export function sandboxRuntimeDir(): string {
+ return dirname(fileURLToPath(import.meta.url))
+}
+
+/** Child argv. No child_process, worker, net, or fs-write. fs-read is the
+ * runtime directory so this module can load; the isolate still cannot write. */
+export function sandboxChildExecArgv(memoryMb: number, runtimeDir = sandboxRuntimeDir()): string[] {
+ return [
+  '--experimental-strip-types',
+  `--max-old-space-size=${memoryMb}`,
+  '--disallow-code-generation-from-strings',
+  '--permission',
+  `--allow-fs-read=${runtimeDir}`,
+ ]
+}
+
+/** Kill a detached sandbox leader and every process in its group. */
+export function killSandboxGroup(pid: number): void {
+ if (!Number.isInteger(pid) || pid <= 0) return
+ try { process.kill(-pid, 'SIGKILL') } catch { /* group may already be gone */ }
+ try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+}
+
+function sandboxChild(memoryMb: number): ChildProcess {
+ const runtimeDir = sandboxRuntimeDir()
+ return fork(fileURLToPath(new URL(import.meta.url)), [], {
+  execPath: process.execPath,
+  execArgv: sandboxChildExecArgv(memoryMb, runtimeDir),
+  cwd: runtimeDir,
+  env: sandboxEnv(),
+  stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  serialization: 'json',
+  detached: true,
+ })
 }
 
 /** Run model-written JavaScript in a child isolate. The parent keeps the real
@@ -170,14 +208,7 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
   let settled = false, step = 0, killing = false, started = false
   const calls: CommandResult[] = []
   const pending = new Map<number, {tool: string}>()
-  const child: ChildProcess = fork(fileURLToPath(new URL(import.meta.url)), [], {
-   execPath: process.execPath,
-   execArgv: ['--experimental-strip-types', `--max-old-space-size=${limits.memoryMb}`],
-   cwd: '/tmp',
-   env: sandboxEnv(),
-   stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-   serialization: 'json',
-  })
+  const child = sandboxChild(limits.memoryMb)
 
   const finish = (outcome: SandboxOutcome) => {
    if (settled) return
@@ -197,13 +228,13 @@ export function runSandboxedScript(input: SandboxRun): Promise<SandboxOutcome> {
     inFlight.push(result)
    }
    try { if (child.connected) child.disconnect() } catch { /* isolate is exiting */ }
-   try { if (child.pid && !child.killed) child.kill('SIGKILL') } catch { /* already gone */ }
+   if (child.pid) killSandboxGroup(child.pid)
    resolve({...outcome, in_flight: inFlight})
   }
 
   const kill = (status: CommandStatus, error: string) => {
    killing = true
-   try { if (child.pid) child.kill('SIGKILL') } catch { /* already gone */ }
+   if (child.pid) killSandboxGroup(child.pid)
    finish({status, value: null, truncated: false, error, calls: calls.slice(), in_flight: []})
   }
 
@@ -298,49 +329,121 @@ async function runSandboxChild() {
   void executeInVm(msg.script, msg.tools.filter((n): n is string => typeof n === 'string'), callTool)
    .then((value) => process.send?.({kind: 'result', value}, () => process.exit(0)))
    .catch((error: unknown) => {
-    const text = error instanceof Error ? error.message : 'script_error'
-    process.send?.({kind: 'result', value: null, error: String(text).slice(0, 200)}, () => process.exit(1))
+    process.send?.({kind: 'result', value: null, error: sandboxErrorText(error)}, () => process.exit(1))
    })
  })
  process.on('disconnect', () => process.exit(1))
 }
 
+function sandboxErrorText(error: unknown): string {
+ if (error instanceof Error) return error.message
+ if (error && typeof error === 'object' && 'message' in error) {
+  const message = (error as {message: unknown}).message
+  if (typeof message === 'string' && message.trim()) return message.slice(0, 200)
+ }
+ const text = typeof error === 'string' ? error : ''
+ return text.trim() ? text.slice(0, 200) : 'script_error'
+}
+
+function bootstrapRealm(context: vm.Context, toolNames: string[]) {
+ const names = toolNames.filter((name) => TOOL_NAME.test(name))
+ vm.runInContext(
+  `'use strict';
+  var __tarx = {jobs: [], waiters: Object.create(null), seq: 0};
+  Object.defineProperty(globalThis, '__tarx', {value: __tarx, writable: false, configurable: false, enumerable: false});
+  function enqueue(name, input) {
+    var id = ++__tarx.seq;
+    return new Promise(function(resolve) {
+      __tarx.waiters[id] = resolve;
+      __tarx.jobs.push({id: id, name: name, input: input});
+    });
+  }
+  var target = Object.create(null);
+  var listed = ${JSON.stringify(names)};
+  for (var i = 0; i < listed.length; i++) {
+    (function(name) {
+      target[name] = function(input) { return enqueue(name, input); };
+    })(listed[i]);
+  }
+  Object.freeze(target);
+  var tools = new Proxy(target, {
+    get: function(obj, prop) {
+      if (typeof prop !== 'string') return undefined;
+      if (Object.prototype.hasOwnProperty.call(obj, prop)) return obj[prop];
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(prop)) return undefined;
+      return function(input) { return enqueue(prop, input); };
+    },
+    getPrototypeOf: function() { return null; },
+    has: function(obj, prop) { return Object.prototype.hasOwnProperty.call(obj, prop); },
+    ownKeys: function(obj) { return Object.keys(obj); },
+    set: function() { return false; },
+    defineProperty: function() { return false; },
+    deleteProperty: function() { return false; }
+  });
+  Object.defineProperty(globalThis, 'tools', {value: tools, writable: false, configurable: false, enumerable: false});
+  var console = Object.freeze({
+    log: function(){}, warn: function(){}, error: function(){}, info: function(){}, debug: function(){}
+  });
+  Object.defineProperty(globalThis, 'console', {value: console, writable: false, configurable: false, enumerable: false});
+  `,
+  context,
+ )
+}
+
+async function drainJobs(context: vm.Context, callTool: (name: string, input: unknown) => Promise<CommandResult>) {
+ const raw = vm.runInContext(`JSON.stringify(__tarx.jobs.splice(0))`, context)
+ let jobs: Array<{id?: unknown; name?: unknown; input?: unknown}>
+ try { jobs = JSON.parse(typeof raw === 'string' ? raw : '[]') } catch { return }
+ if (!Array.isArray(jobs) || !jobs.length) return
+ for (const job of jobs) {
+  const name = typeof job.name === 'string' ? job.name : ''
+  const id = job.id
+  if (!Number.isInteger(id) || !name) continue
+  const result = await callTool(name, job.input)
+  vm.runInContext(
+   `(function(id, payload) {
+      var w = __tarx.waiters[id];
+      delete __tarx.waiters[id];
+      if (w) w(JSON.parse(payload));
+    })(${JSON.stringify(id)}, ${JSON.stringify(JSON.stringify(result))})`,
+   context,
+  )
+ }
+}
+
+const denyDynamicImport = (async () => { throw Error('import_denied') }) as never
+
 async function executeInVm(script: string, toolNames: string[], callTool: (name: string, input: unknown) => Promise<CommandResult>) {
  if (Buffer.byteLength(script, 'utf8') > SCRIPT_MAX_BYTES) throw Error('script_too_large')
- const allow = new Set(toolNames)
- const tools = new Proxy(Object.create(null), {
-  has(_target, name) { return typeof name === 'string' && allow.has(name) },
-  get(_target, name) {
-   if (name === 'then' || name === 'toJSON' || typeof name !== 'string') return undefined
-   return (input?: unknown) => callTool(name, input)
-  },
-  ownKeys() { return [...allow] },
-  getOwnPropertyDescriptor(_target, name) {
-   if (typeof name === 'string' && allow.has(name)) return {configurable: true, enumerable: true, writable: false, value: (input?: unknown) => callTool(name, input)}
-  },
- })
- const sandbox: Record<string, unknown> = {
-  tools,
-  Promise, Array, Object, Map, Set, WeakMap, WeakSet, JSON, Math, Date,
-  Number, String, Boolean, Error, TypeError, RangeError, RegExp,
-  parseInt, parseFloat, isNaN, isFinite, Infinity, NaN, undefined,
-  Uint8Array, Int8Array, ArrayBuffer, TextEncoder, TextDecoder,
-  console: {log() {}, warn() {}, error() {}, info() {}, debug() {}},
- }
- Object.defineProperty(sandbox, 'globalThis', {value: sandbox, writable: false, configurable: false})
- const context = vm.createContext(sandbox, {
+ const allow = new Set(toolNames.filter((name) => TOOL_NAME.test(name)))
+ const context = vm.createContext(undefined, {
   name: 'tarx-code-mode',
   origin: 'tarx-code-mode',
   codeGeneration: {strings: false, wasm: false},
+  importModuleDynamically: denyDynamicImport,
  })
- const wrapped = `"use strict";\n(async () => {\nconst tools = globalThis.tools;\n${script}\n})()`
- const result = vm.runInContext(wrapped, context, {
+ bootstrapRealm(context, [...allow])
+ const wrapped = `'use strict';\n(async () => {\n${script}\n})()`
+ const pending = vm.runInContext(wrapped, context, {
   timeout: 8_000,
   displayErrors: false,
   filename: 'code-mode-script.js',
   breakOnSigint: true,
+  importModuleDynamically: denyDynamicImport,
  })
- return await result
+ let settled = false
+ const finished = Promise.resolve(pending).then(
+  (value) => { settled = true; return {ok: true as const, value} },
+  (error: unknown) => { settled = true; return {ok: false as const, error} },
+ )
+ while (!settled) {
+  await drainJobs(context, callTool)
+  await Promise.race([finished, new Promise<void>((resolve) => setImmediate(resolve))])
+ }
+ await drainJobs(context, callTool)
+ const end = await finished
+ if (!end.ok) throw end.error
+ return end.value
 }
 
 if (process.env.TARX_CODE_MODE_ROLE === SANDBOX_ROLE) {

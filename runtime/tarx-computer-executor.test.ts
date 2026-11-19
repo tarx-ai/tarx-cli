@@ -197,6 +197,37 @@ test('native account access introspects one stable token and rejects a foreign o
  for(const principal of [{ok:false},{ok:true,subject_id:'tvs_'+'f'.repeat(32)}])assert.equal(await resolveNativeAccountAccess({subject_id:session.subject_id,signal:new AbortController().signal,loadCredential:async()=>token,fetcher:(async()=>new Response(JSON.stringify(principal))) as typeof fetch}),null)
 })
 
+test('Code Mode worker branch runs a local_model script and never calls runTask',async t=>{
+ const f=await fixture(t)
+ const observe=`export const renderObservation=()=>({text:'[7] button "Fixture action"',handles:new Map([[7,'@fixture:e1']])})`
+ const loop=`export const verifyAll=async()=>({passed:true});export const runTask=async()=>{throw Error('per-call planner must not run in Code Mode')}`
+ for(const [name,source] of [['observe.js',observe],['loop.js',loop]]){await writeFile(join(f.artifacts.coreDirectory,name),source);f.artifacts.files[name]=hash(source)}
+ const {createServer}=await import('node:http')
+ let posts=0
+ const server=createServer((req,res)=>{
+  if(req.url==='/v1/models'){res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{id:'fixture-local-model'}]}));return}
+  let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{
+   posts++
+   const content=posts===1
+    ? JSON.stringify({status:'script',code:'return await tools.click({handle:7})'})
+    : JSON.stringify({status:'done'})
+   res.setHeader('content-type','application/json')
+   res.end(JSON.stringify({choices:[{message:{content}}]}))
+  })
+ })
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r))
+ t.after(()=>new Promise<void>(r=>server.close(()=>r())))
+ const address=server.address();assert.ok(address&&typeof address!=='string')
+ const localScope:NativeScope={app:scope.app,window:scope.window,actions:scope.actions,success:scope.success,mode:'local_model',model:{baseURL:'http://127.0.0.1:'+address.port,model:'fixture-local-model'}}
+ const executor=createNativeComputerExecutor({artifacts:f.artifacts,resolveScope:async()=>localScope,codeModeEnv:{TARX_CODE_MODE:'1'}})
+ const result=await executor.run({request,session:{...session,expires_at:Date.now()+20000,timeout_ms:15000},signal:new AbortController().signal,stillAuthorized:async()=>true})
+ assert.equal(result.outcome,'done')
+ assert.equal(result.execution_mode,'local_model')
+ assert.equal(result.native_actions,1)
+ assert.ok((result.model_calls??0)>=2)
+ assert.ok(posts>=2)
+})
+
 test('recovery rejects revoked worker authorization before reading native controls',async t=>{
  const f=await fixture(t),marker=join(f.dir,'recovery-observed')
  const adapter=`import {writeFileSync} from 'node:fs';export class AgentDesktop{async exec(argv){if(argv[0]==='list-windows')return {data:[{id:'w-1',pid:123,title:'Fixture'}]};if(argv[0]==='find'){writeFileSync(${JSON.stringify(marker)},'observed');return {data:{count:1}}}throw Error('unexpected fixture command')}async find(){return (await this.exec(['find'])).data}}`

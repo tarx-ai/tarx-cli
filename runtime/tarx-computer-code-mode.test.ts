@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import {spawn} from 'node:child_process'
+import {mkdtemp,readFile,rm} from 'node:fs/promises'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 import {
  CODE_MODE_ENV,
  createCodeModePlanner,
@@ -15,10 +19,12 @@ import {
  parseCodeModePlannerOutput,
  runCodeModeTurn,
  runLocalCodeModeLoop,
+ shouldUseCodeMode,
  TRUNCATION_MARKER,
  type CodeModeEvent,
  type CodeModeTool,
 } from './tarx-computer-code-mode.ts'
+import {killSandboxGroup,sandboxChildExecArgv,sandboxRuntimeDir} from './tarx-computer-code-mode-sandbox.ts'
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -30,6 +36,15 @@ function registry(tools: CodeModeTool[]) {
  return createToolRegistry(tools)
 }
 
+const alive = (pid: number) => {
+ try { process.kill(pid, 0); return true } catch (error: unknown) {
+  if ((error as {code?: string}).code === 'ESRCH') return false
+  throw error
+ }
+}
+
+const tight = {timeoutMs: 4000, memoryMb: 64, resultMaxBytes: 1024, stdoutMaxBytes: 256, maxToolCalls: 4}
+
 test('Code Mode stays off unless TARX_CODE_MODE is exactly 1', () => {
  assert.equal(CODE_MODE_ENV, 'TARX_CODE_MODE')
  assert.equal(isCodeModeEnabled({}), false)
@@ -38,6 +53,10 @@ test('Code Mode stays off unless TARX_CODE_MODE is exactly 1', () => {
  assert.equal(isCodeModeEnabled({TARX_CODE_MODE: 'yes'}), false)
  assert.equal(isCodeModeEnabled({TARX_CODE_MODE: '1 '}), false)
  assert.equal(isCodeModeEnabled({TARX_CODE_MODE: '1'}), true)
+ assert.equal(shouldUseCodeMode('local_model', {TARX_CODE_MODE: '1'}), true)
+ assert.equal(shouldUseCodeMode('supercomputer', {TARX_CODE_MODE: '1'}), false)
+ assert.equal(shouldUseCodeMode('local_model', {TARX_CODE_MODE: 'true'}), false)
+ assert.equal(shouldUseCodeMode('deterministic_actuator', {TARX_CODE_MODE: '1'}), false)
  assert.deepEqual(codeModeWorkerEnv({}), {})
  assert.deepEqual(codeModeWorkerEnv({TARX_CODE_MODE: '1', OPENROUTER_API_KEY: 'secret'}), {TARX_CODE_MODE: '1'})
  assert.equal('OPENROUTER_API_KEY' in codeModeWorkerEnv({TARX_CODE_MODE: '1', OPENROUTER_API_KEY: 'secret'}), false)
@@ -213,6 +232,255 @@ return {processHidden, fetchHidden, envHidden, escaped, home: (typeof process !=
  })
  assert.equal(result.status, 'ok')
  assert.deepEqual(result.context, {processHidden: true, fetchHidden: true, envHidden: true, escaped: false, home: null})
+})
+
+test('sandbox child argv is permission-restricted to runtime-dir reads', () => {
+ const dir = sandboxRuntimeDir()
+ const argv = sandboxChildExecArgv(64, dir)
+ assert.ok(argv.includes('--disallow-code-generation-from-strings'))
+ assert.ok(argv.includes('--permission'))
+ assert.ok(argv.includes('--allow-fs-read=' + dir))
+ assert.equal(argv.some((flag) => flag.includes('allow-child-process')), false)
+ assert.equal(argv.some((flag) => flag.includes('allow-worker')), false)
+ assert.equal(argv.some((flag) => flag.includes('allow-fs-write')), false)
+ assert.equal(argv.some((flag) => flag.includes('allow-net')), false)
+})
+
+function closedProbe(report: unknown) {
+ const value = report && typeof report === 'object' && !Array.isArray(report) ? report as Record<string, unknown> : {}
+ assert.equal(value.escaped, false)
+ assert.equal(value.processType, 'undefined')
+ assert.equal(value.generated, false)
+ assert.equal(value.imported, false)
+}
+
+test('host-object constructor chains cannot generate code or reach process', async () => {
+ const result = await runCodeModeTurn({
+  script: `const report = {escaped:false, generated:false, imported:false, processType: typeof process};
+const objects = [Object, Array, Promise, JSON, Math, Date, Number, String, Boolean, Error, console, globalThis];
+for (const obj of objects) {
+  try {
+    const F = obj.constructor.constructor;
+    F("return 1")();
+    report.generated = true;
+  } catch {}
+  try {
+    const F = obj.constructor.constructor;
+    const got = F("return typeof process")();
+    if (got !== "undefined") report.escaped = true;
+  } catch {}
+}
+return report;`,
+  registry: registry([]),
+  limits: tight,
+ })
+ assert.equal(result.status, 'ok')
+ closedProbe(result.context)
+})
+
+test('tool-bridge constructor cannot generate code or reach process', async () => {
+ const result = await runCodeModeTurn({
+  script: `const report = {escaped:false, generated:false, imported:false, processType: typeof process, frozen:false};
+try { report.frozen = Object.isFrozen(tools); } catch {}
+try {
+  tools.click.constructor("return 1")();
+  report.generated = true;
+} catch {}
+try {
+  const got = tools.click.constructor.constructor("return typeof process")();
+  if (got !== "undefined") report.escaped = true;
+} catch {}
+try {
+  const proto = Object.getPrototypeOf(tools);
+  if (proto && proto.constructor && proto.constructor.constructor) {
+    proto.constructor.constructor("return 1")();
+    report.generated = true;
+  }
+} catch {}
+return report;`,
+  registry: registry([tool('click', async () => ({ok: true}))]),
+  limits: tight,
+ })
+ assert.equal(result.status, 'ok')
+ closedProbe(result.context)
+ assert.equal((result.context as {frozen?: boolean}).frozen, true)
+})
+
+test('string-built identifiers cannot reach host code generation', async () => {
+ const code = `const k = "cons" + "tructor";
+const p = "pro" + "cess";
+const report = {escaped:false, generated:false, imported:false, processType: typeof globalThis[p]};
+try {
+  tools.click[k][k]("return 1")();
+  report.generated = true;
+} catch {}
+try {
+  const got = ({})[k][k]("return typeof globalThis[\\"" + p + "\\"]")();
+  if (got !== "undefined") report.escaped = true;
+} catch {}
+try {
+  globalThis[k]("return 1")();
+  report.generated = true;
+} catch {}
+return report;`
+ assert.ok(parseCodeModePlannerOutput(JSON.stringify({status: 'script', code})))
+ const result = await runCodeModeTurn({
+  script: code,
+  registry: registry([tool('click', async () => ({ok: true}))]),
+  limits: tight,
+ })
+ assert.equal(result.status, 'ok')
+ closedProbe(result.context)
+})
+
+test('eval and Function via reachable objects fail closed', async () => {
+ const result = await runCodeModeTurn({
+  script: `const report = {escaped:false, generated:false, imported:false, processType: typeof process};
+try { eval("1"); report.generated = true } catch {}
+try { Function("return 1")(); report.generated = true } catch {}
+try { (function(){}).constructor("return 1")(); report.generated = true } catch {}
+try { (async function(){}).constructor("return 1")(); report.generated = true } catch {}
+try { tools.click.constructor.constructor("return 1")(); report.generated = true } catch {}
+try {
+  const got = Error.constructor("return typeof process")();
+  if (got !== "undefined") report.escaped = true;
+} catch {}
+return report;`,
+  registry: registry([tool('click', async () => ({ok: true}))]),
+  limits: tight,
+ })
+ assert.equal(result.status, 'ok')
+ closedProbe(result.context)
+})
+
+test('dynamic import fails closed', async () => {
+ const result = await runCodeModeTurn({
+  script: `const report = {escaped:false, generated:false, imported:false, processType: typeof process};
+try {
+  await import("node:fs");
+  report.imported = true;
+} catch {}
+try {
+  await import("node:child_process");
+  report.imported = true;
+} catch {}
+try {
+  const spec = "node:" + "fs";
+  await import(spec);
+  report.imported = true;
+} catch {}
+return report;`,
+  registry: registry([]),
+  limits: tight,
+ })
+ assert.equal(result.status, 'ok')
+ closedProbe(result.context)
+})
+
+function stalledText(first?: string): AsyncIterable<string> {
+ return {
+  [Symbol.asyncIterator]() {
+   let yielded = !first
+   return {
+    next() {
+     if (!yielded) {
+      yielded = true
+      return Promise.resolve({value: first as string, done: false})
+     }
+     return new Promise<{value: string; done: false}>((resolve) => {
+      const timer = setTimeout(() => resolve({value: 'late', done: false}), 60_000)
+      timer.unref()
+     })
+    },
+    return() {
+     return Promise.resolve({value: undefined, done: true})
+    },
+   }
+  },
+ }
+}
+
+test('a stalled assistant text stream cannot outlive the isolate deadline', async () => {
+ const started = Date.now()
+ const result = await runCodeModeTurn({
+  script: 'return 1',
+  registry: registry([]),
+  assistantText: stalledText('start'),
+  limits: {timeoutMs: 1500, memoryMb: 64, resultMaxBytes: 256, stdoutMaxBytes: 256, maxToolCalls: 2},
+ })
+ assert.ok(Date.now() - started < 4000)
+ assert.equal(result.status, 'ok')
+ assert.equal(result.events.at(-1)?.type, 'final')
+})
+
+test('timeout covers a hanging script together with a stalled text stream', async () => {
+ const started = Date.now()
+ const result = await runCodeModeTurn({
+  script: 'await new Promise(() => {})',
+  registry: registry([]),
+  assistantText: stalledText(),
+  limits: {timeoutMs: 1500, memoryMb: 64, resultMaxBytes: 256, stdoutMaxBytes: 256, maxToolCalls: 2},
+ })
+ assert.ok(Date.now() - started < 4000)
+ assert.equal(result.status, 'timeout')
+ assert.notEqual(result.status, 'ok')
+ assert.equal(result.events.at(-1)?.type, 'final')
+})
+
+test('timeout kills the isolate process group including same-group descendants', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'tarx-code-mode-pgid-'))
+ const pidFile = join(dir, 'child.pid')
+ try {
+  const child = spawn(process.execPath, ['-e', `
+    const {spawn} = require("node:child_process");
+    const {writeFileSync} = require("node:fs");
+    const g = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], {stdio: "ignore"});
+    writeFileSync(process.argv[1], String(g.pid));
+    setInterval(()=>{}, 1000);
+  `, pidFile], {detached: true, stdio: 'ignore'})
+  assert.ok(child.pid)
+  const deadline = Date.now() + 3000
+  let grand = 0
+  while (Date.now() < deadline) {
+   try {
+    grand = Number(await readFile(pidFile, 'utf8'))
+    if (Number.isInteger(grand) && grand > 0) break
+   } catch {}
+   await delay(20)
+  }
+  assert.ok(grand > 0)
+  assert.equal(alive(child.pid!), true)
+  assert.equal(alive(grand), true)
+  killSandboxGroup(child.pid!)
+  const stop = Date.now() + 2000
+  while (Date.now() < stop && (alive(child.pid!) || alive(grand))) await delay(20)
+  assert.equal(alive(child.pid!), false)
+  assert.equal(alive(grand), false)
+ } finally {
+  await rm(dir, {recursive: true, force: true})
+ }
+})
+
+test('scripts cannot leave a detached child after timeout', async () => {
+ const result = await runCodeModeTurn({
+  script: `const report = {escaped:false, generated:false, imported:false, spawned:false, processType: typeof process};
+try {
+  const cp = await import("node:child_process");
+  cp.spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {detached:true, stdio:"ignore"}).unref();
+  report.spawned = true;
+} catch {}
+try {
+  const F = tools.click.constructor.constructor;
+  F("return process")().binding;
+  report.escaped = true;
+} catch {}
+await new Promise(() => {});
+return report;`,
+  registry: registry([tool('click', async () => ({ok: true}))]),
+  limits: {timeoutMs: 1500, memoryMb: 64, resultMaxBytes: 1024, stdoutMaxBytes: 256, maxToolCalls: 2},
+ })
+ assert.equal(result.status, 'timeout')
+ assert.notEqual(result.status, 'ok')
 })
 
 test('a denied command file does not run and stays denied', async () => {

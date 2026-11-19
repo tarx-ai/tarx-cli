@@ -45,6 +45,11 @@ export function isCodeModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean
  return env[CODE_MODE_ENV] === '1'
 }
 
+/** Supercomputer and deterministic paths never take the script runner. */
+export function shouldUseCodeMode(mode: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+ return isCodeModeEnabled(env) && mode === 'local_model'
+}
+
 export type CodeModeTool = {
  name: string
  description: string
@@ -191,45 +196,74 @@ export type CodeModeTurnInput = {
  limits?: Partial<SandboxLimits>
 }
 
+function abortDone(signal: AbortSignal): Promise<{done: true; value: undefined}> {
+ return new Promise((resolve) => {
+  if (signal.aborted) { resolve({done: true, value: undefined}); return }
+  signal.addEventListener('abort', () => resolve({done: true, value: undefined}), {once: true})
+ })
+}
+
 async function collectAssistantText(
  stream: AsyncIterable<string> | undefined,
  emit: (event: CodeModeEvent) => void,
+ signal: AbortSignal,
 ): Promise<void> {
  if (!stream) return
- for await (const chunk of stream) {
-  if (typeof chunk !== 'string' || !chunk) continue
-  emit({type: 'assistant_text', text: chunk.slice(0, 4000)})
+ const iterator = stream[Symbol.asyncIterator]()
+ try {
+  for (;;) {
+   if (signal.aborted) return
+   const next = await Promise.race([iterator.next(), abortDone(signal)])
+   if (!next || next.done) return
+   const chunk = next.value
+   if (typeof chunk !== 'string' || !chunk) continue
+   emit({type: 'assistant_text', text: chunk.slice(0, 4000)})
+  }
+ } finally {
+  try { void iterator.return?.() } catch { /* stream already closed */ }
  }
 }
 
 /** Execute a model-written script. Assistant text can stream while tools run.
- * Final status is always last. Context receives only the script return value. */
+ * Final status is always last. Context receives only the script return value.
+ * A stalled text stream is covered by the same deadline as the isolate. */
 export async function runCodeModeTurn(input: CodeModeTurnInput): Promise<CodeModeTurnResult> {
  const events: CodeModeEvent[] = []
  const emit = (event: CodeModeEvent) => {
   events.push(event)
   try { input.onEvent?.(event) } catch { /* presentation cannot grant success */ }
  }
- const sandbox = runSandboxedScript({
-  script: input.script,
-  toolNames: [...input.registry.names],
-  executeTool: (name, toolInput, signal) => executeRegistryTool(input.registry, name, toolInput, signal),
-  limits: input.limits,
-  signal: input.signal,
-  onProgress: (progress) => emit({type: 'progress', step: progress.step, tool: progress.tool, phase: progress.phase}),
- })
- const text = collectAssistantText(input.assistantText, emit)
- const [outcome] = await Promise.all([sandbox, text])
- const final: CodeModeEvent = {type: 'final', status: outcome.status, truncated: outcome.truncated}
- emit(final)
- return {
-  status: outcome.status,
-  context: outcome.status === 'ok' ? outcome.value : null,
-  truncated: outcome.truncated,
-  calls: outcome.calls,
-  in_flight: outcome.in_flight,
-  error: outcome.error,
-  events,
+ const timeoutMs = input.limits?.timeoutMs ?? DEFAULT_SANDBOX_LIMITS.timeoutMs
+ const turnAbort = new AbortController()
+ const timer = setTimeout(() => turnAbort.abort(), timeoutMs)
+ const combined = input.signal ? AbortSignal.any([input.signal, turnAbort.signal]) : turnAbort.signal
+ try {
+  const sandbox = runSandboxedScript({
+   script: input.script,
+   toolNames: [...input.registry.names],
+   executeTool: (name, toolInput) => executeRegistryTool(input.registry, name, toolInput, combined),
+   limits: input.limits,
+   signal: combined,
+   onProgress: (progress) => emit({type: 'progress', step: progress.step, tool: progress.tool, phase: progress.phase}),
+  })
+  const text = collectAssistantText(input.assistantText, emit, combined)
+  const outcome = await sandbox
+  turnAbort.abort()
+  await text
+  const final: CodeModeEvent = {type: 'final', status: outcome.status, truncated: outcome.truncated}
+  emit(final)
+  return {
+   status: outcome.status,
+   context: outcome.status === 'ok' ? outcome.value : null,
+   truncated: outcome.truncated,
+   calls: outcome.calls,
+   in_flight: outcome.in_flight,
+   error: outcome.error,
+   events,
+  }
+ } finally {
+  clearTimeout(timer)
+  turnAbort.abort()
  }
 }
 
