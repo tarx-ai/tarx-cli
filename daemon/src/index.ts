@@ -1,3 +1,4 @@
+export {createBendJobAdapter, BEND_JOB_KIND} from "./adapters/bend-jobs.ts"
 export {syncComputerReceipts, type ReceiptImportResult} from "./adapters/computer-receipts.ts"
 export {createCoordinator, type CoordinatorOptions, type DeliveryAdapter, type TaskExecution, type TaskExecutor} from "./coordinator.ts"
 export {DaemonError, asDaemonError} from "./errors.ts"
