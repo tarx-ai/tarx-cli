@@ -31,3 +31,18 @@ printf 'installed %s\n' "$DEST"
 printf 'CLI copied. No daemon or model was installed or started.\n'
 printf 'Check local health: %s readiness\n' "$DEST"
 printf 'Remote compute: https://compute.tarx.com (account and availability not verified)\n'
+
+# Metadata-only activation event: a CLI install completed. No email, hostname,
+# path, or user identifier is sent. Failure here never fails the install.
+ref="${TARX_REF:-}"
+case "$ref" in
+  *[!A-Za-z0-9_-]*|'') ref='' ;;
+esac
+event_url="${TARX_INSTALL_EVENT_URL:-https://tarx.com/api/install-started}"
+if [ -n "$ref" ]; then
+  curl -fsS -m 3 -X POST "$event_url" -H 'content-type: application/json' \
+    -d "{\"ref\":\"$ref\"}" >/dev/null 2>&1 || true
+else
+  curl -fsS -m 3 -X POST "$event_url" -H 'content-type: application/json' \
+    -d '{}' >/dev/null 2>&1 || true
+fi
