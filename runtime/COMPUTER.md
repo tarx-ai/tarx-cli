@@ -94,3 +94,17 @@ account quota, token billing or monetary charges. Interrupted totals can remain
 unknown. The receipt is not an invoice. Default desktop producer/host wiring,
 explicit native data consent and a real account/native run remain acceptance
 gates; this source does not switch product routing or activate a host.
+
+Experimental Code Mode (`TARX_CODE_MODE=1`, default off) is a local-only
+script runner for the 8B Qwen planner. When the flag is unset, the existing
+one-action-per-turn planner is unchanged. When it is exactly `1`, the local
+model may write a short JavaScript script that chains allowlisted tools; a
+forked isolate executes it and only the script's return value re-enters model
+context. The isolate is a fresh realm with a frozen allowlisted tool API;
+the child stays in the caller's process group so Stop reaps it. Command results carry the real exit code, stdout and stderr
+(truncated). The runner never synthesizes success; a step that did not run is
+`not_run` or `unknown`. Script text and tool output stay on this device: no
+cloud call, telemetry or remote log. Supercomputer, gateway ports, the bridge
+and hosted routes are not switched by this flag. Native core policy still
+gates every click. Streaming events are local to the runner; they are not a
+browser protocol.
